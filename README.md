@@ -65,6 +65,34 @@ npm install
 npm run dev   # http://localhost:5173
 ```
 
+## Desktop app (Tauri)
+
+A native macOS/Windows wrapper lives in `desktop/`. It embeds the built frontend and talks to the backend over `http://127.0.0.1:8000`.
+
+**Prerequisites:** Rust toolchain (`rustup`), Node ≥ 18.
+
+**Dev mode** (hot-reload via the Vite dev server — backend must already be running):
+```bash
+cd desktop
+npm install
+npm run desktop:dev
+```
+
+**Production build** (bundles the compiled frontend into a native `.app` / `.exe`):
+```bash
+cd desktop
+npm install
+npm run desktop:build   # output: desktop/src-tauri/target/release/bundle/
+```
+
+> First build downloads and compiles Tauri's Rust crates — expect 5–10 min on a cold cache.
+
+To add an app icon, place a 1024×1024 PNG at `desktop/app-icon.png` and run:
+```bash
+cd desktop && npx @tauri-apps/cli icon app-icon.png
+```
+Then reference the generated files in `desktop/src-tauri/tauri.conf.json` under `bundle.icon`.
+
 ## Status
 
 Local MVP. Rule-based generation only — no ML models or external APIs required.

@@ -1,0 +1,13 @@
+{
+  "name": "super-band-session-player-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "desktop:dev": "tauri dev",
+    "desktop:build": "npm run build:frontend-for-desktop && tauri build",
+    "build:frontend-for-desktop": "cd ../frontend && VITE_API_URL=http://127.0.0.1:8000 npm run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

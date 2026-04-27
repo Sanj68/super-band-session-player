@@ -1,0 +1,28 @@
+{
+  "productName": "Super Band Session Player",
+  "version": "0.1.0",
+  "identifier": "com.superband.sessionplayer",
+  "build": {
+    "frontendDist": "../../frontend/dist",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Super Band Session Player",
+        "width": 1440,
+        "height": 900,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}
