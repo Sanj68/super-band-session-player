@@ -7,6 +7,7 @@ import {
   deleteSetup,
   duplicateSession,
   downloadExportZip,
+  downloadSessionMidi,
   generateAroundAnchor,
   generateSession,
   getEvaluationSummary,
@@ -453,6 +454,28 @@ export default function App() {
       a.click();
       URL.revokeObjectURL(url);
       setStatus("Export downloaded.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [session]);
+
+  const onExportSessionMidi = useCallback(async () => {
+    if (!session?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await downloadSessionMidi(session.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `session_${session.id}.mid`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus("Session MIDI exported.");
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -2089,6 +2112,9 @@ export default function App() {
             />
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" onClick={onExportSessionMidi} disabled={busy || !allGenerated}>
+              Export Session MIDI
+            </button>
             <button type="button" onClick={onExport} disabled={busy || !allGenerated}>
               Export MIDI (zip)
             </button>

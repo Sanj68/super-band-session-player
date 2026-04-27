@@ -41,7 +41,7 @@ from app.services.audio_source_analysis import analyze_reference_audio
 from app.services.bass_quality import analyze_bass_take
 from app.services.midi_note_extract import extract_lane_notes
 from app.services.lead_generator import normalize_lead_style
-from app.services.midi_export import lane_midi_response, zip_all_lanes
+from app.services.midi_export import lane_midi_response, merge_lane_midis, zip_all_lanes
 from app.services.source_analysis import build_groove_profile, build_harmony_plan, build_source_analysis
 from app.services.session_context import SessionAnchorContext, build_session_context, normalize_anchor_lane
 from app.utils import music_theory as mt
@@ -1230,6 +1230,29 @@ def download_lane_midi(session_id: str, lane: LaneName):
             detail={"error": "lane_not_generated", "lane": lane.value},
         )
     return lane_midi_response(data, name)
+
+
+@router.get("/{session_id}/midi")
+def download_session_midi(session_id: str):
+    s = _get_session_or_404(session_id)
+    lanes = {
+        "drums": s.drum_bytes,
+        "bass": s.bass_bytes,
+        "chords": s.chords_bytes,
+        "lead": s.lead_bytes,
+    }
+    if not any(lanes.values()):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "session_not_generated", "message": "Generate at least one lane before session MIDI export."},
+        )
+    data = merge_lane_midis(tempo=s.tempo, lanes=lanes)
+    if not data:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "session_midi_empty", "message": "Session MIDI export produced no data."},
+        )
+    return lane_midi_response(data, f"session_{session_id}.mid")
 
 
 @router.get("/{session_id}/export")

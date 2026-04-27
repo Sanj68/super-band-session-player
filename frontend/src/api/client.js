@@ -196,8 +196,18 @@ export function exportZipUrl(sessionId) {
   return `${API_BASE}/api/sessions/${sessionId}/export`;
 }
 
+export function sessionMidiUrl(sessionId) {
+  return `${API_BASE}/api/sessions/${sessionId}/midi`;
+}
+
 export async function downloadExportZip(sessionId) {
   const res = await fetch(exportZipUrl(sessionId));
+  if (!res.ok) await parseError(res);
+  return res.blob();
+}
+
+export async function downloadSessionMidi(sessionId) {
+  const res = await fetch(sessionMidiUrl(sessionId));
   if (!res.ok) await parseError(res);
   return res.blob();
 }
