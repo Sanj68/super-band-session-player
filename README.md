@@ -68,3 +68,21 @@ npm run dev   # http://localhost:5173
 ## Status
 
 Local MVP. Rule-based generation only — no ML models or external APIs required.
+
+## Audio Analysis Validation Pack
+
+Before changing audio->generation behavior, use the validation pack scaffold:
+
+- `backend/data/validation_pack/README.md`
+- `backend/data/validation_pack/manifest.json`
+- `backend/tools/run_validation_pack.py`
+
+Run:
+
+```bash
+cd backend
+. .venv/bin/activate
+python tools/run_validation_pack.py --api-base http://127.0.0.1:8000
+```
+
+Add 5 local clips under `backend/data/validation_pack/clips/` and fill expected fields in the manifest.

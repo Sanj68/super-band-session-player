@@ -7,6 +7,7 @@ import pretty_midi
 
 from app.services.bass_generator import generate_bass as generate_bass_impl
 from app.services.chord_generator import generate_chords as generate_chords_impl
+from app.services.conditioning import UnifiedConditioning
 from app.services.drum_generator import generate_drums as generate_drums_impl
 from app.services.lead_generator import generate_lead as generate_lead_impl
 from app.services.session_context import SessionAnchorContext
@@ -49,8 +50,10 @@ def generate_bass(
     bass_style: str | None = None,
     bass_instrument: str | None = None,
     bass_player: str | None = None,
+    bass_engine: str | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
+    conditioning: UnifiedConditioning | None = None,
 ) -> tuple[bytes, str]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
     return generate_bass_impl(
@@ -61,8 +64,10 @@ def generate_bass(
         bass_style=bass_style,
         bass_instrument=bass_instrument,
         bass_player=bass_player,
+        bass_engine=bass_engine,
         session_preset=session_preset,
         context=context,
+        conditioning=conditioning,
     )
 
 

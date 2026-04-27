@@ -20,3 +20,8 @@ backend/data/bass_candidate_runs.json
 .DS_Store
 .vscode/
 .idea/
+
+# Local audio/reference data - do not commit
+backend/data/reference_audio/
+backend/data/validation_pack/
+backend/data/validation_pack_commercial/

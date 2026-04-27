@@ -40,6 +40,11 @@ _SCALE_INTERVALS: Final[dict[str, list[int]]] = {
 
 # Default to major if unknown
 _FALLBACK_SCALE = "major"
+_SCALE_ALIASES: Final[dict[str, str]] = {
+    "minor": "natural_minor",
+    "aeolian": "natural_minor",
+    "ionian": "major",
+}
 
 
 def normalize_key(key: str) -> str:
@@ -59,9 +64,7 @@ def key_root_pc(key: str) -> int:
 
 
 def scale_intervals(scale: str) -> list[int]:
-    s = scale.strip().lower().replace(" ", "_")
-    if s not in _SCALE_INTERVALS:
-        return list(_SCALE_INTERVALS[_FALLBACK_SCALE])
+    s = describe_scale(scale)
     return list(_SCALE_INTERVALS[s])
 
 
@@ -138,6 +141,7 @@ def progression_degrees_for_bars(bar_count: int, scale: str) -> list[int]:
 
 def describe_scale(scale: str) -> str:
     s = scale.strip().lower().replace(" ", "_")
+    s = _SCALE_ALIASES.get(s, s)
     if s in _SCALE_INTERVALS:
         return s
     return _FALLBACK_SCALE

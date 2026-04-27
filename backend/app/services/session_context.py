@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from app.services.midi_note_extract import extract_lane_notes
+from app.utils import music_theory as mt
 
 _ANCHOR_LANES: Final[frozenset[str]] = frozenset({"drums", "bass", "chords", "lead"})
 
@@ -60,10 +61,131 @@ class SessionAnchorContext:
     kick_slot_weight: tuple[tuple[float, ...], ...]
     """When anchor is drums: snare/rim/clap (37–40) onset weight per slot, else zeros."""
     snare_slot_weight: tuple[tuple[float, ...], ...]
+    """Estimated beat-phase offset (0..3) for anchor downbeat relative to timeline start."""
+    beat_phase_offset_beats: int
+    """Confidence in beat-phase estimate."""
+    beat_phase_confidence: float
+    """Absolute bar-start anchor used by context-aware generation."""
+    bar_start_anchor_sec: float
+    """Per-bar harmonic root pitch-class guess (0=C)."""
+    harmonic_root_pc_per_bar: tuple[int, ...]
+    """Per-bar stable target pitch classes."""
+    harmonic_target_pcs_per_bar: tuple[tuple[int, ...], ...]
+    """Per-bar allowed passing pitch classes."""
+    harmonic_passing_pcs_per_bar: tuple[tuple[int, ...], ...]
+    """Per-bar avoid pitch classes for structural tones."""
+    harmonic_avoid_pcs_per_bar: tuple[tuple[int, ...], ...]
+    """Per-bar confidence for harmonic targeting."""
+    harmonic_confidence_per_bar: tuple[float, ...]
+    """Per-bar source tag (evidence or scale_fallback)."""
+    harmonic_source_per_bar: tuple[str, ...]
 
 
 _KICK_GM: Final[frozenset[int]] = frozenset({35, 36})
 _SNARE_GM: Final[frozenset[int]] = frozenset({37, 38, 39, 40})
+
+
+def _estimate_anchor_phase(notes: list[Any], beat_len: float) -> tuple[int, float]:
+    if beat_len <= 1e-9 or not notes:
+        return 0, 0.0
+    scores = [0.0, 0.0, 0.0, 0.0]
+    for n in notes:
+        onset_beat = int(round(float(n.start) / beat_len))
+        phase = onset_beat % 4
+        vel = float(max(1, min(127, n.velocity))) / 127.0
+        dur = max(0.04, float(n.end - n.start))
+        scores[phase] += vel * min(1.5, 0.5 + dur)
+    best = max(range(4), key=lambda i: scores[i])
+    total = sum(scores)
+    ordered = sorted(scores, reverse=True)
+    if total <= 1e-9:
+        return best, 0.0
+    sep = (ordered[0] - ordered[1]) / total if len(ordered) > 1 else 0.0
+    conf = min(1.0, 0.25 + (1.8 * max(0.0, sep)))
+    return best, conf
+
+
+def _stable_tones_from_root(root_pc: int, key_pc: int, scale_intervals: list[int]) -> tuple[int, ...]:
+    if not scale_intervals:
+        return (root_pc % 12,)
+    root_rel = (root_pc - key_pc) % 12
+    if root_rel not in scale_intervals:
+        return (root_pc % 12,)
+    i = scale_intervals.index(root_rel)
+    n = len(scale_intervals)
+    pcs = (
+        (key_pc + scale_intervals[i]) % 12,
+        (key_pc + scale_intervals[(i + 2) % n]) % 12,
+        (key_pc + scale_intervals[(i + 4) % n]) % 12,
+    )
+    return tuple(dict.fromkeys(pcs))
+
+
+def _build_harmonic_targets(
+    session: Any,
+    *,
+    bar_count: int,
+    bar_len: float,
+    bar_start_anchor_sec: float,
+) -> tuple[tuple[int, ...], tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...], tuple[float, ...], tuple[str, ...]]:
+    key = str(getattr(session, "key", "C") or "C")
+    scale = str(getattr(session, "scale", "major") or "major")
+    key_pc = mt.key_root_pc(key)
+    scale_intervals = mt.scale_intervals(scale)
+    scale_pcs = tuple((key_pc + x) % 12 for x in scale_intervals)
+
+    lane_weights: tuple[tuple[str, float], ...] = (("chords", 2.2), ("bass", 1.4), ("lead", 0.6))
+    roots: list[int] = []
+    targets: list[tuple[int, ...]] = []
+    passings: list[tuple[int, ...]] = []
+    avoids: list[tuple[int, ...]] = []
+    confs: list[float] = []
+    sources: list[str] = []
+
+    for bar in range(bar_count):
+        hist: dict[int, float] = {}
+        for lane, lane_w in lane_weights:
+            raw = _lane_midi_bytes(session, lane)
+            if not raw:
+                continue
+            for n in extract_lane_notes(raw):
+                bi = int((n.start - bar_start_anchor_sec) / bar_len) if bar_len > 1e-9 else 0
+                if bi != bar:
+                    continue
+                pc = int(n.pitch) % 12
+                vel_w = float(max(1, min(127, n.velocity))) / 127.0
+                dur_w = max(0.05, float(n.end - n.start))
+                hist[pc] = hist.get(pc, 0.0) + (lane_w * vel_w * dur_w)
+
+        # Honest fallback: static tonic when evidence is absent/weak.
+        source = "scale_fallback"
+        conf = 0.2
+        root_pc = key_pc
+        if hist:
+            total = sum(hist.values())
+            ranked = sorted(hist.items(), key=lambda kv: kv[1], reverse=True)
+            best_pc, best_w = ranked[0]
+            second_w = ranked[1][1] if len(ranked) > 1 else 0.0
+            # Prefer in-scale evidence; if top is out-of-scale and weak, pull to tonic.
+            in_scale_bonus = 0.08 if best_pc in scale_pcs else -0.08
+            sep = (best_w - second_w) / max(best_w, 1e-9)
+            ratio = best_w / max(total, 1e-9)
+            if best_pc in scale_pcs or ratio >= 0.5:
+                root_pc = best_pc
+            source = "evidence"
+            conf = max(0.15, min(1.0, 0.5 * ratio + 0.35 * sep + in_scale_bonus))
+
+        stable = _stable_tones_from_root(root_pc, key_pc, scale_intervals)
+        passing = tuple(pc for pc in scale_pcs if pc not in stable)
+        avoid = tuple(pc for pc in range(12) if pc not in scale_pcs)
+        roots.append(int(root_pc))
+        targets.append(stable)
+        passings.append(passing)
+        avoids.append(avoid)
+        confs.append(round(float(conf), 4))
+        sources.append(source)
+
+    return tuple(roots), tuple(targets), tuple(passings), tuple(avoids), tuple(confs), tuple(sources)
 
 
 def build_session_context(session: Any) -> SessionAnchorContext | None:
@@ -90,15 +212,23 @@ def build_session_context(session: Any) -> SessionAnchorContext | None:
     bar_len = 4.0 * spb
     beat_len = spb
     sixteenth = spb / 4.0
+    phase_offset_beats, phase_conf = _estimate_anchor_phase(notes, beat_len)
+    bar_start_anchor_sec = float(phase_offset_beats) * beat_len
+    harmonic_roots, harmonic_targets, harmonic_passings, harmonic_avoids, harmonic_confs, harmonic_sources = _build_harmonic_targets(
+        session,
+        bar_count=bar_count,
+        bar_len=bar_len,
+        bar_start_anchor_sec=bar_start_anchor_sec,
+    )
 
     by_bar: list[list[float]] = [[] for _ in range(bar_count)]
     pitches: list[int] = []
     for n in notes:
         pitches.append(n.pitch)
-        bi = int(n.start / bar_len) if bar_len > 1e-9 else 0
+        bi = int((n.start - bar_start_anchor_sec) / bar_len) if bar_len > 1e-9 else 0
         if bi < 0 or bi >= bar_count:
             continue
-        rel = (n.start - bi * bar_len) / bar_len
+        rel = (n.start - bar_start_anchor_sec - bi * bar_len) / bar_len
         rel = rel - int(rel)
         if rel < 0:
             rel += 1.0
@@ -153,10 +283,10 @@ def build_session_context(session: Any) -> SessionAnchorContext | None:
     snare_rows: list[tuple[float, ...]] = []
     if anchor == "drums":
         for n in notes:
-            bi = int(n.start / bar_len) if bar_len > 1e-9 else 0
+            bi = int((n.start - bar_start_anchor_sec) / bar_len) if bar_len > 1e-9 else 0
             if bi < 0 or bi >= bar_count:
                 continue
-            rel = (n.start - bi * bar_len) / bar_len
+            rel = (n.start - bar_start_anchor_sec - bi * bar_len) / bar_len
             rel = rel - int(rel)
             if rel < 0:
                 rel += 1.0
@@ -199,6 +329,15 @@ def build_session_context(session: Any) -> SessionAnchorContext | None:
         slot_occupancy=tuple(slot_occ_rows),
         kick_slot_weight=tuple(kick_rows),
         snare_slot_weight=tuple(snare_rows),
+        beat_phase_offset_beats=phase_offset_beats,
+        beat_phase_confidence=round(phase_conf, 4),
+        bar_start_anchor_sec=round(bar_start_anchor_sec, 6),
+        harmonic_root_pc_per_bar=harmonic_roots,
+        harmonic_target_pcs_per_bar=harmonic_targets,
+        harmonic_passing_pcs_per_bar=harmonic_passings,
+        harmonic_avoid_pcs_per_bar=harmonic_avoids,
+        harmonic_confidence_per_bar=harmonic_confs,
+        harmonic_source_per_bar=harmonic_sources,
     )
 
 

@@ -5,13 +5,14 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routes.evaluation_routes import router as evaluation_router
 from app.routes.session_routes import router as session_router
 from app.routes.setup_routes import router as setup_router
 
 app = FastAPI(
     title="Super Band Session Player",
     version="0.1.0",
-    description="Local MVP: rule-based MIDI session player (no DB, no auth).",
+    description="Rule-based MIDI session player (no DB, no auth).",
 )
 
 app.add_middleware(
@@ -29,6 +30,7 @@ app.add_middleware(
 
 app.include_router(session_router, prefix="/api/sessions")
 app.include_router(setup_router, prefix="/api/setups")
+app.include_router(evaluation_router, prefix="/api/evaluations")
 
 
 @app.get("/health")
