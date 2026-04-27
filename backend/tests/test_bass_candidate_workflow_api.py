@@ -102,3 +102,89 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert state["lanes"]["bass"]["generated"] is True
     assert isinstance(state["lanes"]["bass"]["notes"], list)
     assert len(state["lanes"]["bass"]["notes"]) > 0
+
+
+def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:
+    """promote returns 404 for unknown session_id, run_id, or take_id."""
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 100, "key": "D", "scale": "minor", "bar_count": 4},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+
+    gen = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 7777},
+    )
+    assert gen.status_code == 200
+    run_id = gen.json()["run_id"]
+    take_id = gen.json()["takes"][0]["take_id"]
+
+    # Unknown session_id → 404.
+    r = client.post(f"/api/sessions/no-such-session/bass-candidates/{run_id}/{take_id}/promote")
+    assert r.status_code == 404
+
+    # Valid session, unknown run_id → 404.
+    r = client.post(f"/api/sessions/{session_id}/bass-candidates/bad-run/{take_id}/promote")
+    assert r.status_code == 404
+
+    # Valid session + run, unknown take_id → 404.
+    r = client.post(f"/api/sessions/{session_id}/bass-candidates/{run_id}/bad-take/promote")
+    assert r.status_code == 404
+
+
+def test_bass_candidate_promote_lane_notes_match_candidate_notes(tmp_path: Path) -> None:
+    """After promotion, the session bass lane notes are exactly the promoted candidate's notes."""
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 96, "key": "F", "scale": "major", "bar_count": 4},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+
+    gen = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 55555},
+    )
+    assert gen.status_code == 200
+    run_id = gen.json()["run_id"]
+    take_id = gen.json()["takes"][0]["take_id"]
+
+    # Fetch the candidate's own notes before any promotion.
+    notes_res = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/notes"
+    )
+    assert notes_res.status_code == 200
+    candidate_notes = notes_res.json()
+    assert len(candidate_notes) > 0
+
+    # Promote the candidate.
+    promote_res = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
+    )
+    assert promote_res.status_code == 200
+    state = promote_res.json()
+    assert state["current_bass_candidate_run_id"] == run_id
+    assert state["current_bass_candidate_take_id"] == take_id
+
+    # The session bass lane notes must be identical to the candidate's notes.
+    lane_notes = state["lanes"]["bass"]["notes"]
+    assert len(lane_notes) == len(candidate_notes)
+    for lane_note, cand_note in zip(lane_notes, candidate_notes):
+        assert lane_note["pitch"] == cand_note["pitch"]
+        assert lane_note["start"] == cand_note["start"]
+        assert lane_note["end"] == cand_note["end"]
+        assert lane_note["velocity"] == cand_note["velocity"]
