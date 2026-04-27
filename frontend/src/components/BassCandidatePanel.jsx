@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  bassCandidateMidiUrl,
+  downloadBassCandidateMidi,
   generateBassCandidates,
   getBassCandidateTakeNotes,
   listBassCandidates,
@@ -29,6 +29,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const [takeAKey, setTakeAKey] = useState("");
   const [takeBKey, setTakeBKey] = useState("");
   const [abAuditioning, setAbAuditioning] = useState(false);
+  const [downloadingTakeKey, setDownloadingTakeKey] = useState("");
   const [sourceLevel, setSourceLevel] = useState(0.55);
   const [bassContextLevel, setBassContextLevel] = useState(0.26);
   const audioContextRef = useRef(null);
@@ -59,6 +60,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       setTakeAKey("");
       setTakeBKey("");
       setAbAuditioning(false);
+      setDownloadingTakeKey("");
       return;
     }
     refreshBassCandidates().catch(() => {});
@@ -532,6 +534,32 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     return STAGE_LABELS[key] ?? "Candidate";
   }, []);
 
+  const onDownloadTakeMidi = useCallback(
+    async (runId, takeId) => {
+      if (!session?.id) return;
+      const takeKey = `${runId}::${takeId}`;
+      setError(null);
+      setDownloadingTakeKey(takeKey);
+      try {
+        const blob = await downloadBassCandidateMidi(session.id, runId, takeId);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `bass_candidate_${runId}_${takeId}.mid`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setStatus(`Downloaded MIDI for ${takeId}.`);
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        setDownloadingTakeKey("");
+      }
+    },
+    [session?.id, setError, setStatus],
+  );
+
   const onGenerateBassCandidates = useCallback(async () => {
     if (!session?.id) return;
     setBusy(true);
@@ -721,6 +749,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                 const isNotesLoading = !!loadingTakeNotes[takeKey];
                 const takeNotes = takeNotesByKey[takeKey] ?? [];
                 const isPlaying = playingTakeKey === takeKey;
+                const isDownloading = downloadingTakeKey === takeKey;
                 const playbackStatus = isNotesLoading ? "Loading notes..." : isPlaying ? "Playing" : "Stopped";
                 const playbackStatusColor = isNotesLoading
                   ? "#0369a1"
@@ -783,13 +812,14 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                       <span style={{ color: "#334155", fontWeight: 600 }}>
                         Quality {qualityTotal.toFixed(3)}
                       </span>
-                      <a
-                        href={bassCandidateMidiUrl(session.id, run.run_id, take.take_id)}
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => onDownloadTakeMidi(run.run_id, take.take_id)}
+                        disabled={isDownloading}
+                        style={{ padding: "0.2rem 0.6rem" }}
                       >
-                        Preview MIDI
-                      </a>
+                        {isDownloading ? "Downloading..." : "Download MIDI"}
+                      </button>
                       <button
                         type="button"
                         onClick={() => setTakeAKey(takeKey)}

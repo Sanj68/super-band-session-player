@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -91,6 +92,21 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
         assert n["end"] >= n["start"]
         assert 0 <= n["velocity"] <= 127
 
+    midi_res = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{first_take['take_id']}"
+    )
+    assert midi_res.status_code == 200
+    assert midi_res.headers["content-type"] == "audio/midi"
+    assert "attachment;" in midi_res.headers["content-disposition"]
+    assert midi_res.headers["content-disposition"].endswith(
+        f'filename="{session_id}_{run["run_id"]}_{first_take["take_id"]}_bass.mid"'
+    )
+    assert len(midi_res.content) > 0
+    stored_run = bass_candidate_store.get_run_for_session(session_id, run["run_id"])
+    assert stored_run is not None
+    stored_take = next(t for t in stored_run["takes"] if t["take_id"] == first_take["take_id"])
+    assert midi_res.content == base64.b64decode(stored_take["midi_b64"].encode("ascii"))
+
     promoted = client.post(
         f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{first_take['take_id']}/promote"
     )
@@ -138,6 +154,38 @@ def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:
     # Valid session + run, unknown take_id → 404.
     r = client.post(f"/api/sessions/{session_id}/bass-candidates/{run_id}/bad-take/promote")
     assert r.status_code == 404
+
+
+def test_bass_candidate_midi_download_404_on_invalid_ids(tmp_path: Path) -> None:
+    """candidate MIDI download returns safe 404s for unknown run_id or take_id."""
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "A", "scale": "minor", "bar_count": 4},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+
+    gen = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 8888},
+    )
+    assert gen.status_code == 200
+    run_id = gen.json()["run_id"]
+    take_id = gen.json()["takes"][0]["take_id"]
+
+    r = client.get(f"/api/sessions/{session_id}/bass-candidates/bad-run/{take_id}")
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"] == "candidate_run_not_found"
+
+    r = client.get(f"/api/sessions/{session_id}/bass-candidates/{run_id}/bad-take")
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"] == "candidate_take_not_found"
 
 
 def test_bass_candidate_promote_lane_notes_match_candidate_notes(tmp_path: Path) -> None:

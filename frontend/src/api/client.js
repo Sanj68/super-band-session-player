@@ -106,6 +106,12 @@ export function bassCandidateMidiUrl(sessionId, runId, takeId) {
   return `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}`;
 }
 
+export async function downloadBassCandidateMidi(sessionId, runId, takeId) {
+  const res = await fetch(bassCandidateMidiUrl(sessionId, runId, takeId));
+  if (!res.ok) await parseError(res);
+  return res.blob();
+}
+
 export async function promoteBassCandidate(sessionId, runId, takeId) {
   const res = await fetch(
     `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}/promote`,
