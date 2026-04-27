@@ -1,9 +1,22 @@
-node_modules/
-venv/
+# Python
 __pycache__/
-*.pyc
-.env
-.DS_Store
-dist/
-build/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
 .venv/
+venv/
+
+# Node / Vite
+node_modules/
+frontend/node_modules/
+frontend/node_modules/.vite/
+frontend/dist/
+
+# Local data / generated runs
+backend/data/bass_candidate_runs.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
