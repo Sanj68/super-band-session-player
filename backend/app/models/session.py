@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -88,6 +90,11 @@ class BassPlayer(str, Enum):
     bootsy = "bootsy"
     marcus = "marcus"
     pino = "pino"
+
+
+class BassEngine(str, Enum):
+    baseline = "baseline"
+    phrase_v2 = "phrase_v2"
 
 
 class DrumPlayer(str, Enum):
@@ -176,6 +183,30 @@ def lane_styles_for_session_preset(preset: SessionPreset) -> tuple[str, str, str
 class SessionPatch(BaseModel):
     """Partial session update. Provide at least one field; no automatic lane regeneration."""
 
+    tempo: int | None = Field(
+        default=None,
+        ge=40,
+        le=240,
+        description="When set, updates session tempo (BPM).",
+    )
+    key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4,
+        description="When set, updates session key (e.g. C, F#, Bb).",
+    )
+    scale: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        description="When set, updates session scale/mode label.",
+    )
+    bar_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=128,
+        description="When set, updates number of bars in the session.",
+    )
     lead_style: LeadStyle | None = Field(
         default=None,
         description="When set, updates stored lead preset (regenerate lead to apply).",
@@ -216,6 +247,10 @@ class SessionPatch(BaseModel):
         default=None,
         description="When set, updates stored bass player profile (regenerate bass to apply). Send null to clear.",
     )
+    bass_engine: BassEngine | None = Field(
+        default=None,
+        description="Bass generation engine mode (baseline or phrase_v2).",
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="When set, updates stored drum player profile (regenerate drums to apply). Send null to clear.",
@@ -237,9 +272,9 @@ class SessionPatch(BaseModel):
     def at_least_one_field(self) -> SessionPatch:
         if not self.model_fields_set:
             raise ValueError(
-                "Provide at least one of: lead_style, lead_player, bass_style, bass_player, chord_style, chord_player, "
-                "drum_style, drum_player, session_preset, lead_instrument, bass_instrument, chord_instrument, drum_kit, "
-                "anchor_lane"
+                "Provide at least one of: tempo, key, scale, bar_count, lead_style, lead_player, bass_style, bass_player, "
+                "chord_style, chord_player, drum_style, drum_player, session_preset, lead_instrument, bass_instrument, "
+                "chord_instrument, drum_kit, anchor_lane, bass_engine"
             )
         return self
 
@@ -293,6 +328,10 @@ class SessionCreate(BaseModel):
         default=None,
         description="Optional bass personality; omit for style-only generation.",
     )
+    bass_engine: BassEngine | None = Field(
+        default=None,
+        description="Bass engine mode; omit for baseline.",
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="Optional drum personality; omit for style-only generation.",
@@ -334,6 +373,80 @@ class LaneState(BaseModel):
     )
 
 
+class SectionSpan(BaseModel):
+    label: str = Field(description="Simple section label (intro/verse/lift/chorus/bridge/outro).")
+    start_bar: int = Field(ge=0)
+    end_bar: int = Field(ge=0)
+
+
+class SourceAnalysis(BaseModel):
+    source_lane: str = Field(description="Lane used as analysis source (or 'none').")
+    tempo: int = Field(ge=40, le=240)
+    tempo_estimate_bpm: float = Field(ge=40.0, le=240.0, description="Evidence-derived tempo estimate from onset spacing.")
+    tempo_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in tempo estimate.")
+    beat_grid_seconds: list[float] = Field(default_factory=list, description="Quarter-note beat start times in seconds.")
+    bar_starts_seconds: list[float] = Field(default_factory=list, description="Bar start times in seconds.")
+    beat_phase_offset_beats: int = Field(ge=0, le=3, description="Estimated downbeat phase offset in beats (0..3) relative to timeline start.")
+    beat_phase_scores: list[float] = Field(default_factory=list, description="Relative support scores for beat-phase candidates [0,1,2,3].")
+    beat_phase_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in selected beat-phase/downbeat anchor.")
+    phase_offset_used_for_generation_beats: int = Field(ge=0, le=3, description="Beat-phase offset currently used by context-aware generation.")
+    bar_start_anchor_used_seconds: float = Field(ge=0.0, description="Absolute bar-start anchor currently used by context-aware generation.")
+    generation_aligned_to_anchor: bool = Field(description="Whether generation was aligned to anchor timing for this analysis pass.")
+    downbeat_guess_bar_index: int = Field(ge=0, description="Best-guess downbeat bar index.")
+    downbeat_confidence: float = Field(ge=0.0, le=1.0, description="Confidence score for downbeat guess.")
+    bar_start_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in bar-start anchor/spacing estimate.")
+    tonal_center_pc_guess: int = Field(ge=0, le=11, description="Best-guess tonal center pitch class (0=C).")
+    tonal_center_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in tonal-center estimate.")
+    scale_mode_guess: str = Field(description="Best-guess scale mode from available tonal evidence.")
+    scale_mode_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in scale-mode estimate.")
+    sections: list[SectionSpan] = Field(default_factory=list, description="Simple section segmentation over bars.")
+    bar_energy: list[float] = Field(default_factory=list, description="Per-bar normalized energy 0..1.")
+    bar_accent_profile: list[float] = Field(default_factory=list, description="Per-bar normalized first-beat accent strength 0..1.")
+    bar_confidence_profile: list[float] = Field(default_factory=list, description="Per-bar confidence in rhythm/grid evidence 0..1.")
+
+
+class GrooveProfile(BaseModel):
+    pocket_feel: str = Field(description="Coarse groove feel tag for future conditioning.")
+    syncopation_score: float = Field(ge=0.0, le=1.0)
+    density_per_bar_estimate: float = Field(ge=0.0, description="Estimated note density (notes/bar) for model conditioning.")
+    accent_strength: float = Field(ge=0.0, le=1.0, description="Mean accent intensity signal from source analysis.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Overall confidence in groove-conditioning signals.")
+
+
+class HarmonyPlanBar(BaseModel):
+    bar_index: int = Field(ge=0)
+    root_pc: int = Field(ge=0, le=11, description="Per-bar root pitch-class guess (0=C).")
+    target_pcs: list[int] = Field(default_factory=list, description="Stable target pitch classes for this bar.")
+    passing_pcs: list[int] = Field(default_factory=list, description="Allowed passing pitch classes for this bar.")
+    avoid_pcs: list[int] = Field(default_factory=list, description="Pitch classes to avoid for structural tones.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence in per-bar harmonic target.")
+    source: str = Field(description="Per-bar source: evidence or scale_fallback.")
+
+
+class HarmonyPlan(BaseModel):
+    key_center: str
+    scale: str
+    source: str = Field(description="Harmony source: static_session_key_scale or bar_level_targets")
+    bars: list[HarmonyPlanBar] = Field(default_factory=list)
+
+
+class EngineData(BaseModel):
+    source_analysis: SourceAnalysis
+    groove_profile: GrooveProfile
+    harmony_plan: HarmonyPlan
+
+
+class ReferenceAudioState(BaseModel):
+    filename: str
+    stored_path: str
+    duration_seconds: float = Field(ge=0.0)
+    head_trim_seconds: float = Field(ge=0.0)
+    analyzed: bool = Field(
+        default=False,
+        description="True when /analyze-audio has produced source analysis from this reference file.",
+    )
+
+
 class SessionState(BaseModel):
     id: str
     tempo: int
@@ -358,6 +471,10 @@ class SessionState(BaseModel):
         default=None,
         description="Optional bass player profile id (bootsy, marcus, pino), or null when unset.",
     )
+    bass_engine: str = Field(
+        default="baseline",
+        description="Active bass engine mode (baseline or phrase_v2).",
+    )
     drum_player: str | None = Field(
         default=None,
         description="Optional drum player profile id (stubblefield, questlove, dilla), or null when unset.",
@@ -371,6 +488,22 @@ class SessionState(BaseModel):
     anchor_lane: str | None = Field(
         default=None,
         description="When set, full generate builds this lane first and others use its timing/density context.",
+    )
+    current_bass_candidate_run_id: str | None = Field(
+        default=None,
+        description="Run id of currently promoted bass candidate take, if lane came from candidate workflow.",
+    )
+    current_bass_candidate_take_id: str | None = Field(
+        default=None,
+        description="Take id of currently promoted bass candidate, if applicable.",
+    )
+    engine_data: EngineData | None = Field(
+        default=None,
+        description="Inspectable internal engine analysis used for structured musical context.",
+    )
+    reference_audio: ReferenceAudioState | None = Field(
+        default=None,
+        description="Optional uploaded reference audio metadata for audio-driven analysis.",
     )
     lanes: dict[str, LaneState]
     message: str | None = None
@@ -455,6 +588,51 @@ class GenerateAroundAnchorBody(BaseModel):
         default=None,
         description="When set, updates stored anchor_lane before regenerating non-anchor lanes.",
     )
+
+
+class GenerateBassCandidatesBody(BaseModel):
+    """Request body for POST /api/sessions/{id}/bass-candidates."""
+
+    take_count: int = Field(default=4, ge=2, le=12, description="How many candidate takes to render.")
+    seed: int | None = Field(default=None, description="Optional seed root for repeatable candidate sets.")
+    clip_id: str | None = Field(
+        default=None,
+        description="Optional clip/reference id for evaluation bookkeeping.",
+    )
+
+
+class BassCandidateTake(BaseModel):
+    take_id: str
+    seed: int
+    note_count: int = Field(ge=0)
+    byte_length: int = Field(ge=0)
+    preview: str = ""
+    quality_total: float = Field(default=0.0, ge=0.0, le=1.0)
+    quality_scores: dict[str, float] = Field(default_factory=dict)
+    quality_reason: str = ""
+    selection_stage: Literal["strict", "relaxed", "final_fill"] | None = None
+    motif_family: str | None = None
+    signature_distance: float | None = None
+    quality_floor_cutoff: float | None = None
+    top_pool_score: float | None = None
+
+
+class BassCandidateRun(BaseModel):
+    run_id: str
+    session_id: str
+    created_at: str
+    take_count: int = Field(ge=1)
+    bass_style: str
+    bass_engine: str
+    bass_player: str | None = None
+    bass_instrument: str
+    clip_id: str | None = None
+    conditioning_tempo: int = Field(ge=40, le=240)
+    conditioning_phase_offset: int = Field(ge=0, le=3)
+    conditioning_phase_confidence: float = Field(ge=0.0, le=1.0)
+    conditioning_sections_count: int = Field(ge=0)
+    conditioning_harmonic_bar_count: int = Field(ge=0)
+    takes: list[BassCandidateTake] = Field(default_factory=list)
 
 
 class ExportInfo(BaseModel):
