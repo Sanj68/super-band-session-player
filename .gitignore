@@ -29,3 +29,4 @@ backend/data/validation_pack_commercial/
 # Desktop wrapper
 desktop/node_modules/
 desktop/src-tauri/target/
+desktop/src-tauri/gen/
