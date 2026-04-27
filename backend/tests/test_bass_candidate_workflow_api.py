@@ -53,6 +53,20 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert first_take["byte_length"] > 0
     assert isinstance(first_take["preview"], str)
 
+    # New selection-metadata and quality fields must be present on every take.
+    for take in run["takes"]:
+        assert take.get("selection_stage") in ("strict", "relaxed", "final_fill"), (
+            f"unexpected selection_stage: {take.get('selection_stage')!r}"
+        )
+        assert isinstance(take.get("motif_family"), str) and take["motif_family"], (
+            "motif_family should be a non-empty string"
+        )
+        assert 0.0 <= float(take.get("quality_total", -1)) <= 1.0
+        assert isinstance(take.get("quality_scores"), dict)
+        assert isinstance(take.get("quality_reason"), str)
+        assert take.get("quality_floor_cutoff") is not None
+        assert take.get("top_pool_score") is not None
+
     listed = client.get(f"/api/sessions/{session_id}/bass-candidates")
     assert listed.status_code == 200
     rows = listed.json()

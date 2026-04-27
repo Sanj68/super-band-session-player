@@ -434,3 +434,74 @@ def test_bass_candidate_take_selection_stage_literal_rejects_invalid() -> None:
     for invalid in ("Strict", "STRICT", "fill", "final-fill", "unknown", "", "0"):
         with pytest.raises(ValidationError):
             BassCandidateTake(**base, selection_stage=invalid)
+
+
+def test_bass_candidates_get_handles_old_stored_format(tmp_path: Path) -> None:
+    """GET /bass-candidates must not crash when stored takes lack the new metadata fields.
+
+    Simulates a run that was persisted before selection_stage / motif_family /
+    quality_floor_cutoff / top_pool_score / quality_* were introduced.
+    All missing fields should come back as None / 0.0 / {} / "" without a 500 error.
+    """
+    client = _isolated_client(tmp_path)
+    session_id = _create_session(client)
+
+    old_run: dict = {
+        "run_id": "cand_legacy_run",
+        "session_id": session_id,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "take_count": 2,
+        "bass_style": "supportive",
+        "bass_engine": "baseline",
+        "bass_player": None,
+        "bass_instrument": "finger_bass",
+        "clip_id": None,
+        "conditioning_tempo": 108,
+        "conditioning_phase_offset": 0,
+        "conditioning_phase_confidence": 0.0,
+        "conditioning_sections_count": 0,
+        "conditioning_harmonic_bar_count": 0,
+        "takes": [
+            # Old-format take: only the fields that existed before the metadata work.
+            {
+                "take_id": "cand_legacy_run_t1",
+                "seed": 500,
+                "note_count": 14,
+                "byte_length": 300,
+                "preview": "legacy take 1",
+                "midi_b64": "AAAA",
+                # Intentionally absent: selection_stage, motif_family,
+                # signature_distance, quality_floor_cutoff, top_pool_score,
+                # quality_total, quality_scores, quality_reason.
+            },
+            {
+                "take_id": "cand_legacy_run_t2",
+                "seed": 501,
+                "note_count": 10,
+                "byte_length": 260,
+                "preview": "legacy take 2",
+                "midi_b64": "AAAA",
+            },
+        ],
+    }
+    bass_candidate_store.append_run(old_run)
+
+    listed = client.get(f"/api/sessions/{session_id}/bass-candidates")
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "cand_legacy_run"
+    takes = rows[0]["takes"]
+    assert len(takes) == 2
+
+    for take in takes:
+        # New metadata fields must be None when absent from stored data.
+        assert take["selection_stage"] is None
+        assert take["motif_family"] is None
+        assert take["signature_distance"] is None
+        assert take["quality_floor_cutoff"] is None
+        assert take["top_pool_score"] is None
+        # Quality fields must fall back to safe zero-values.
+        assert take["quality_total"] == 0.0
+        assert take["quality_scores"] == {}
+        assert take["quality_reason"] == ""
