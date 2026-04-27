@@ -35,6 +35,29 @@ export async function generateSession(sessionId) {
   return res.json();
 }
 
+export async function uploadReferenceAudio(sessionId, file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/reference-audio`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function analyzeReferenceAudio(sessionId) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/analyze-audio`, {
+    method: "POST",
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export function referenceAudioUrl(sessionId) {
+  return `${API_BASE}/api/sessions/${sessionId}/reference-audio`;
+}
+
 /** Regenerate non-anchor lanes using anchor lane timing/density context. Optional body sets anchor_lane first. */
 export async function generateAroundAnchor(sessionId, body = {}) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/generate-around-anchor`, {
@@ -59,6 +82,43 @@ export async function regenerateLane(sessionId, lane) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/lanes/${lane}/regenerate`, {
     method: "POST",
   });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function generateBassCandidates(sessionId, body) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/bass-candidates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function listBassCandidates(sessionId) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/bass-candidates`);
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export function bassCandidateMidiUrl(sessionId, runId, takeId) {
+  return `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}`;
+}
+
+export async function promoteBassCandidate(sessionId, runId, takeId) {
+  const res = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}/promote`,
+    { method: "POST" },
+  );
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function getBassCandidateTakeNotes(sessionId, runId, takeId) {
+  const res = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}/notes`,
+  );
   if (!res.ok) await parseError(res);
   return res.json();
 }
@@ -168,6 +228,38 @@ export async function getSavedSetupAsSessionPatch(name) {
   const res = await fetch(
     `${API_BASE}/api/setups/${encodeURIComponent(name)}/as-session-patch`,
   );
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function getClipEvaluation(clipId) {
+  const res = await fetch(`${API_BASE}/api/evaluations/${encodeURIComponent(clipId)}`);
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function setClipReferenceNotes(body) {
+  const res = await fetch(`${API_BASE}/api/evaluations/reference-notes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function createTakeEvaluation(body) {
+  const res = await fetch(`${API_BASE}/api/evaluations/takes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function getEvaluationSummary() {
+  const res = await fetch(`${API_BASE}/api/evaluations/summary`);
   if (!res.ok) await parseError(res);
   return res.json();
 }

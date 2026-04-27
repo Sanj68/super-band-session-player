@@ -2,25 +2,32 @@ import { useCallback, useEffect, useState } from "react";
 import {
   addPartToSuit,
   createSession,
+  createTakeEvaluation,
   createSetup,
   deleteSetup,
   duplicateSession,
   downloadExportZip,
   generateAroundAnchor,
   generateSession,
+  getEvaluationSummary,
   getSession,
   getSavedSetupAsSessionPatch,
+  getClipEvaluation,
   listSetups,
   patchLaneLocks,
   patchSession,
   regenerateLane,
   regenerateSelectedLanes,
   regenerateUnlockedLanes,
+  setClipReferenceNotes,
 } from "./api/client.js";
 import LaneCard from "./components/LaneCard.jsx";
+import BassCandidatePanel from "./components/BassCandidatePanel.jsx";
+import ReferenceAudioPanel from "./components/ReferenceAudioPanel.jsx";
 import SavedSetupsPanel from "./components/SavedSetupsPanel.jsx";
 import SessionComparePanel from "./components/SessionComparePanel.jsx";
 import SessionControls from "./components/SessionControls.jsx";
+import UploadFirstEntryPanel from "./components/UploadFirstEntryPanel.jsx";
 
 const ACTIVE_LEAD_OPTIONS = [
   { value: "melodic", label: "Melodic" },
@@ -102,6 +109,7 @@ export default function App() {
   const [leadStyle, setLeadStyle] = useState("melodic");
   const [leadPlayer, setLeadPlayer] = useState("");
   const [bassStyle, setBassStyle] = useState("supportive");
+  const [bassEngine, setBassEngine] = useState("baseline");
   const [chordStyle, setChordStyle] = useState("simple");
   const [chordPlayer, setChordPlayer] = useState("");
   const [drumStyle, setDrumStyle] = useState("straight");
@@ -116,6 +124,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [activeLeadDraft, setActiveLeadDraft] = useState("melodic");
   const [activeBassDraft, setActiveBassDraft] = useState("supportive");
+  const [activeBassEngineDraft, setActiveBassEngineDraft] = useState("baseline");
   const [activeChordDraft, setActiveChordDraft] = useState("simple");
   const [activeDrumDraft, setActiveDrumDraft] = useState("straight");
   const [activeLeadPlayerDraft, setActiveLeadPlayerDraft] = useState("");
@@ -143,6 +152,19 @@ export default function App() {
   const [compareModeOpen, setCompareModeOpen] = useState(false);
   const [abMessage, setAbMessage] = useState("");
   const [leadSuitMode, setLeadSuitMode] = useState("counter");
+  const [evalClipId, setEvalClipId] = useState("");
+  const [evalReferenceNotes, setEvalReferenceNotes] = useState("");
+  const [evalTakeId, setEvalTakeId] = useState("");
+  const [evalTakeNotes, setEvalTakeNotes] = useState("");
+  const [evalScores, setEvalScores] = useState({
+    groove_fit: 3,
+    harmonic_fit: 3,
+    phrase_feel: 3,
+    articulation_feel: 3,
+    usefulness: 3,
+  });
+  const [evalTakes, setEvalTakes] = useState([]);
+  const [evalSummary, setEvalSummary] = useState(null);
 
   const refreshSetups = useCallback(async () => {
     try {
@@ -159,6 +181,13 @@ export default function App() {
 
   useEffect(() => {
     setSelectedRegenLanes({ drums: false, bass: false, chords: false, lead: false });
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (!session?.id) return;
+    const defaultClipId = session.id;
+    setEvalClipId(defaultClipId);
+    setEvalTakeId(`${defaultClipId}-take-${Date.now()}`);
   }, [session?.id]);
 
   useEffect(() => {
@@ -189,6 +218,7 @@ export default function App() {
     setActiveLeadInstrumentDraft(session?.lead_instrument ?? "flute");
     setActiveBassInstrumentDraft(session?.bass_instrument ?? "finger_bass");
     setActiveBassPlayerDraft(session?.bass_player ?? "");
+    setActiveBassEngineDraft(session?.bass_engine ?? "baseline");
     setActiveDrumPlayerDraft(session?.drum_player ?? "");
     setActiveChordPlayerDraft(session?.chord_player ?? "");
     setActiveChordInstrumentDraft(session?.chord_instrument ?? "piano");
@@ -206,6 +236,7 @@ export default function App() {
     session?.lead_instrument,
     session?.bass_instrument,
     session?.bass_player,
+    session?.bass_engine,
     session?.drum_player,
     session?.chord_player,
     session?.chord_instrument,
@@ -224,6 +255,7 @@ export default function App() {
         bar_count: bars,
         lead_style: leadStyle,
         bass_style: bassStyle,
+        bass_engine: bassEngine,
         chord_style: chordStyle,
         drum_style: drumStyle,
         lead_instrument: leadInstrument,
@@ -265,6 +297,7 @@ export default function App() {
     bars,
     leadStyle,
     bassStyle,
+    bassEngine,
     chordStyle,
     drumStyle,
     leadInstrument,
@@ -520,6 +553,21 @@ export default function App() {
     }
   }, [session, activeBassDraft]);
 
+  const onUpdateBassEngine = useCallback(async () => {
+    if (!session?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await patchSession(session.id, { bass_engine: activeBassEngineDraft });
+      setSession(updated);
+      setStatus(updated.message ?? "Bass engine updated. Regenerate bass to rebuild MIDI.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [session, activeBassEngineDraft]);
+
   const onUpdateChordStyle = useCallback(async () => {
     if (!session?.id) return;
     setBusy(true);
@@ -648,6 +696,7 @@ export default function App() {
     const preset = fromSession ? activePresetDraft || null : newSessionPreset || null;
     const drum = fromSession ? activeDrumDraft : drumStyle;
     const bass = fromSession ? activeBassDraft : bassStyle;
+    const bassEngineMode = fromSession ? activeBassEngineDraft : bassEngine;
     const chord = fromSession ? activeChordDraft : chordStyle;
     const lead = fromSession ? activeLeadDraft : leadStyle;
     const lp = fromSession ? activeLeadPlayerDraft : leadPlayer;
@@ -666,6 +715,7 @@ export default function App() {
         session_preset: preset,
         drum_style: drum,
         bass_style: bass,
+        bass_engine: bassEngineMode,
         chord_style: chord,
         lead_style: lead,
         lead_player: lp || null,
@@ -697,6 +747,8 @@ export default function App() {
     drumStyle,
     activeBassDraft,
     bassStyle,
+    activeBassEngineDraft,
+    bassEngine,
     activeChordDraft,
     chordStyle,
     activeLeadDraft,
@@ -730,6 +782,7 @@ export default function App() {
     if (s.scale) setScale(s.scale);
     setDrumStyle(s.drum_style);
     setBassStyle(s.bass_style);
+    setBassEngine(s.bass_engine ?? "baseline");
     setChordStyle(s.chord_style);
     setChordPlayer(s.chord_player ?? "");
     setLeadStyle(s.lead_style);
@@ -858,6 +911,86 @@ export default function App() {
     [session],
   );
 
+  const loadClipEvaluation = useCallback(async () => {
+    if (!evalClipId.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await getClipEvaluation(evalClipId.trim());
+      setEvalReferenceNotes(res.record?.reference_notes ?? "");
+      setEvalTakes(Array.isArray(res.record?.takes) ? res.record.takes : []);
+      setStatus("Loaded clip evaluation.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [evalClipId]);
+
+  const loadEvaluationSummary = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const summary = await getEvaluationSummary();
+      setEvalSummary(summary);
+      setStatus("Loaded evaluation summary.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const onSaveReferenceNotes = useCallback(async () => {
+    if (!evalClipId.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await setClipReferenceNotes({
+        clip_id: evalClipId.trim(),
+        reference_notes: evalReferenceNotes,
+      });
+      setEvalReferenceNotes(res.record?.reference_notes ?? "");
+      setEvalTakes(Array.isArray(res.record?.takes) ? res.record.takes : []);
+      const summary = await getEvaluationSummary();
+      setEvalSummary(summary);
+      setStatus("Saved reference notes.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [evalClipId, evalReferenceNotes]);
+
+  const onSaveTakeEvaluation = useCallback(async () => {
+    if (!session?.id || !evalClipId.trim() || !evalTakeId.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await createTakeEvaluation({
+        clip_id: evalClipId.trim(),
+        take_id: evalTakeId.trim(),
+        session_id: session.id,
+        bass_engine: session.bass_engine ?? "baseline",
+        bass_style: session.bass_style ?? "supportive",
+        bass_player: session.bass_player ?? null,
+        bass_instrument: session.bass_instrument ?? "finger_bass",
+        notes: evalTakeNotes,
+        scores: evalScores,
+      });
+      setEvalTakes(Array.isArray(res.record?.takes) ? res.record.takes : []);
+      const summary = await getEvaluationSummary();
+      setEvalSummary(summary);
+      setStatus("Saved take evaluation.");
+      setEvalTakeId(`${evalClipId.trim()}-take-${Date.now()}`);
+      setEvalTakeNotes("");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [session, evalClipId, evalTakeId, evalTakeNotes, evalScores]);
+
   const onDuplicateSession = useCallback(async () => {
     if (!session?.id) return;
     setBusy(true);
@@ -892,9 +1025,22 @@ export default function App() {
       <header style={{ marginBottom: "1.5rem" }}>
         <h1 style={{ margin: 0, fontSize: "1.75rem" }}>Super Band Session Player</h1>
         <p style={{ margin: "0.35rem 0 0", color: "#64748b" }}>
-          Local MVP — drums, bass, chords, and lead as separate MIDI lanes.
+          Drums, bass, chords, and lead as separate MIDI lanes.
         </p>
       </header>
+
+      <UploadFirstEntryPanel
+        session={session}
+        setSession={setSession}
+        busy={busy}
+        setBusy={setBusy}
+        setError={setError}
+        setStatus={setStatus}
+        setTempo={setTempo}
+        setKeyNote={setKeyNote}
+        setScale={setScale}
+        setBars={setBars}
+      />
 
       <SessionControls
         tempo={tempo}
@@ -911,6 +1057,8 @@ export default function App() {
         setLeadPlayer={setLeadPlayer}
         bassStyle={bassStyle}
         setBassStyle={setBassStyle}
+        bassEngine={bassEngine}
+        setBassEngine={setBassEngine}
         chordStyle={chordStyle}
         setChordStyle={setChordStyle}
         chordPlayer={chordPlayer}
@@ -1036,6 +1184,11 @@ export default function App() {
                 <code style={{ background: "#f1f5f9", padding: "2px 6px", borderRadius: 4 }}>
                   {session.bass_style}
                 </code>
+                {" "}
+                · <strong>Bass engine:</strong>{" "}
+                <code style={{ background: "#f1f5f9", padding: "2px 6px", borderRadius: 4 }}>
+                  {session.bass_engine ?? "baseline"}
+                </code>
                 {session.bass_player ? (
                   <>
                     {" "}
@@ -1091,6 +1244,186 @@ export default function App() {
               Compare with A
             </button>
           </div>
+          {session.engine_data && (
+            <details
+              style={{
+                marginBottom: "1rem",
+                padding: "0.65rem 0.85rem",
+                background: "#fff",
+                border: "1px solid #e2e8f0",
+                borderRadius: 10,
+              }}
+            >
+              <summary style={{ cursor: "pointer", fontWeight: 600 }}>Engine analysis (Phase 2)</summary>
+              <div style={{ marginTop: 10, fontSize: 13, color: "#334155", lineHeight: 1.5 }}>
+                <div>
+                  <strong>Source lane:</strong> {session.engine_data.source_analysis?.source_lane ?? "none"}
+                </div>
+                <div>
+                  <strong>Downbeat guess (bar):</strong> {session.engine_data.source_analysis?.downbeat_guess_bar_index ?? 0}
+                </div>
+                <div>
+                  <strong>Beat-phase anchor:</strong>{" "}
+                  {(session.engine_data.source_analysis?.beat_phase_offset_beats ?? 0)}
+                  {" /4"}
+                  {" · conf "}
+                  {session.engine_data.source_analysis?.beat_phase_confidence ?? 0}
+                </div>
+                <div>
+                  <strong>Generation timing:</strong>{" "}
+                  phase {(session.engine_data.source_analysis?.phase_offset_used_for_generation_beats ?? 0)}
+                  {" /4 · bar-start "}
+                  {session.engine_data.source_analysis?.bar_start_anchor_used_seconds ?? 0}s
+                  {" · aligned "}
+                  {session.engine_data.source_analysis?.generation_aligned_to_anchor ? "yes" : "no"}
+                </div>
+                <div>
+                  <strong>Sections:</strong>{" "}
+                  {(session.engine_data.source_analysis?.sections ?? [])
+                    .map((s) => `${s.label}[${s.start_bar}-${s.end_bar}]`)
+                    .join(" · ") || "none"}
+                </div>
+                <div>
+                  <strong>Groove:</strong> {session.engine_data.groove_profile?.pocket_feel ?? "unknown"} · sync{" "}
+                  {session.engine_data.groove_profile?.syncopation_score ?? 0}
+                </div>
+                <div>
+                  <strong>Harmony plan:</strong>{" "}
+                  {session.engine_data.harmony_plan?.key_center ?? "C"}{" "}
+                  {session.engine_data.harmony_plan?.scale ?? "major"}
+                  {" · "}
+                  {session.engine_data.harmony_plan?.source ?? "static_session_key_scale"}
+                  {(session.engine_data.harmony_plan?.bars ?? []).length > 0
+                    ? ` · ${(session.engine_data.harmony_plan?.bars ?? [])
+                        .slice(0, 4)
+                        .map((b) => `b${b.bar_index}:r${b.root_pc}[${(b.target_pcs ?? []).join(",")}]`)
+                        .join(" | ")}`
+                    : ""}
+                </div>
+              </div>
+            </details>
+          )}
+          <ReferenceAudioPanel
+            session={session}
+            busy={busy}
+            setBusy={setBusy}
+            setError={setError}
+            setStatus={setStatus}
+            setSession={setSession}
+          />
+          <BassCandidatePanel
+            session={session}
+            setSession={setSession}
+            busy={busy}
+            setBusy={setBusy}
+            setError={setError}
+            setStatus={setStatus}
+          />
+          <details
+            style={{
+              marginBottom: "1rem",
+              padding: "0.65rem 0.85rem",
+              background: "#fff",
+              border: "1px solid #e2e8f0",
+              borderRadius: 10,
+            }}
+          >
+            <summary style={{ cursor: "pointer", fontWeight: 600 }}>Bass Take Evaluation</summary>
+            <div style={{ marginTop: 10, display: "grid", gap: "0.6rem", maxWidth: 840 }}>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                Clip ID
+                <input value={evalClipId} onChange={(e) => setEvalClipId(e.target.value)} />
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" onClick={loadClipEvaluation} disabled={busy || !evalClipId.trim()}>
+                  Load Clip Eval
+                </button>
+                <button type="button" onClick={loadEvaluationSummary} disabled={busy}>
+                  Load Eval Summary
+                </button>
+              </div>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                Reference Notes (what a good bassline should do)
+                <textarea
+                  rows={4}
+                  value={evalReferenceNotes}
+                  onChange={(e) => setEvalReferenceNotes(e.target.value)}
+                />
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" onClick={onSaveReferenceNotes} disabled={busy || !evalClipId.trim()}>
+                  Save Reference Notes
+                </button>
+              </div>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                Take ID
+                <input value={evalTakeId} onChange={(e) => setEvalTakeId(e.target.value)} />
+              </label>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                Take Notes
+                <textarea rows={3} value={evalTakeNotes} onChange={(e) => setEvalTakeNotes(e.target.value)} />
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
+                {[
+                  ["groove_fit", "Groove Fit"],
+                  ["harmonic_fit", "Harmonic Fit"],
+                  ["phrase_feel", "Phrase Feel"],
+                  ["articulation_feel", "Articulation Feel"],
+                  ["usefulness", "Usefulness"],
+                ].map(([k, label]) => (
+                  <label key={k} style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                    {label}
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={evalScores[k]}
+                      onChange={(e) =>
+                        setEvalScores((prev) => ({
+                          ...prev,
+                          [k]: Math.max(1, Math.min(5, Number(e.target.value) || 1)),
+                        }))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={onSaveTakeEvaluation}
+                  disabled={busy || !session?.id || !evalClipId.trim() || !evalTakeId.trim()}
+                >
+                  Save Take Evaluation
+                </button>
+              </div>
+              <div style={{ fontSize: 13, color: "#334155" }}>
+                <strong>Recent takes:</strong>{" "}
+                {evalTakes.length === 0
+                  ? "none"
+                  : evalTakes
+                      .slice(0, 6)
+                      .map((t) => `${t.take_id} [G${t.scores?.groove_fit}/H${t.scores?.harmonic_fit}/P${t.scores?.phrase_feel}]`)
+                      .join(" · ")}
+              </div>
+              <div style={{ fontSize: 13, color: "#334155", borderTop: "1px solid #e2e8f0", paddingTop: 8 }}>
+                <strong>Summary:</strong>{" "}
+                {!evalSummary
+                  ? "not loaded"
+                  : `all takes ${evalSummary.total_take_count} · G ${evalSummary.overall_averages?.groove_fit ?? 0} · H ${evalSummary.overall_averages?.harmonic_fit ?? 0} · P ${evalSummary.overall_averages?.phrase_feel ?? 0} · A ${evalSummary.overall_averages?.articulation_feel ?? 0} · U ${evalSummary.overall_averages?.usefulness ?? 0}`}
+                {evalSummary && Array.isArray(evalSummary.by_engine) && evalSummary.by_engine.length > 0 ? (
+                  <div style={{ marginTop: 4 }}>
+                    {evalSummary.by_engine
+                      .map(
+                        (row) =>
+                          `${row.engine} (${row.take_count}) → G ${row.averages?.groove_fit ?? 0}, H ${row.averages?.harmonic_fit ?? 0}, P ${row.averages?.phrase_feel ?? 0}, A ${row.averages?.articulation_feel ?? 0}, U ${row.averages?.usefulness ?? 0}`,
+                      )
+                      .join(" · ")}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </details>
           {abMessage && (
             <p style={{ color: "#15803d", fontSize: 13, margin: "0 0 0.65rem" }}>{abMessage}</p>
           )}
@@ -1411,6 +1744,39 @@ export default function App() {
               style={{ padding: "0.35rem 0.75rem" }}
             >
               Update Bass Style
+            </button>
+          </div>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "0.5rem",
+              alignItems: "center",
+              marginBottom: "1rem",
+              padding: "0.65rem 0.85rem",
+              background: "#fff",
+              border: "1px solid #e2e8f0",
+              borderRadius: 10,
+              maxWidth: 720,
+            }}
+          >
+            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Bass engine (this session)</span>
+            <select
+              value={activeBassEngineDraft}
+              onChange={(e) => setActiveBassEngineDraft(e.target.value)}
+              disabled={busy}
+              style={{ fontSize: 14 }}
+            >
+              <option value="baseline">Baseline</option>
+              <option value="phrase_v2">Phrase Engine v2</option>
+            </select>
+            <button
+              type="button"
+              onClick={onUpdateBassEngine}
+              disabled={busy || activeBassEngineDraft === (session.bass_engine ?? "baseline")}
+              style={{ padding: "0.35rem 0.75rem" }}
+            >
+              Update Bass Engine
             </button>
           </div>
           <div

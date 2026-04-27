@@ -37,6 +37,11 @@ const BASS_STYLES = [
   { value: "fusion", label: "Fusion" },
 ];
 
+const BASS_ENGINES = [
+  { value: "baseline", label: "Baseline" },
+  { value: "phrase_v2", label: "Phrase Engine v2" },
+];
+
 const CHORD_STYLES = [
   { value: "simple", label: "Simple (default)" },
   { value: "jazzy", label: "Jazzy" },
@@ -143,6 +148,8 @@ export default function SessionControls({
   setLeadPlayer,
   bassStyle,
   setBassStyle,
+  bassEngine,
+  setBassEngine,
   chordStyle,
   setChordStyle,
   chordPlayer,
@@ -286,6 +293,16 @@ export default function SessionControls({
           Bass style
           <select value={bassStyle} onChange={(e) => setBassStyle(e.target.value)}>
             {BASS_STYLES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+          Bass engine
+          <select value={bassEngine} onChange={(e) => setBassEngine(e.target.value)}>
+            {BASS_ENGINES.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
               </option>
