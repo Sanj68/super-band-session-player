@@ -22,6 +22,9 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:4173",
         "http://localhost:4173",
+        # Tauri production desktop app origins
+        "tauri://localhost",         # macOS / Linux
+        "https://tauri.localhost",   # Windows
     ],
     allow_credentials=True,
     allow_methods=["*"],
