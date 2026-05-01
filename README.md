@@ -65,6 +65,24 @@ npm install
 npm run dev   # http://localhost:5173
 ```
 
+## Logic Quickstart
+
+1. Start the backend:
+   ```bash
+   cd backend
+   source .venv/bin/activate
+   uvicorn app.main:app --reload
+   ```
+2. Start the frontend:
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+3. Open `http://localhost:5173`, choose the session settings, and generate the session.
+4. Click **Download MIDI for Logic** for one combined MIDI file, or download individual lane MIDI files for drums, bass, chords, and lead.
+5. Drag the downloaded `.mid` file into Logic.
+6. Assign Logic instruments to the imported MIDI tracks.
+
 ## Desktop app (Tauri)
 
 A native macOS/Windows wrapper lives in `desktop/`. It embeds the built frontend and talks to the backend over `http://127.0.0.1:8000`.

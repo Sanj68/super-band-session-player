@@ -15,6 +15,7 @@ import {
   getSavedSetupAsSessionPatch,
   getClipEvaluation,
   listSetups,
+  midiLaneUrl,
   patchLaneLocks,
   patchSession,
   regenerateLane,
@@ -482,6 +483,20 @@ export default function App() {
       setBusy(false);
     }
   }, [session]);
+
+  const onDownloadLaneMidi = useCallback(
+    (lane) => {
+      if (!session?.id || !session.lanes?.[lane]?.generated) return;
+      const a = document.createElement("a");
+      a.href = midiLaneUrl(session.id, lane);
+      a.download = `${session.id}_${lane}.mid`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setStatus(`${lane[0].toUpperCase()}${lane.slice(1)} MIDI exported.`);
+    },
+    [session],
+  );
 
   const refresh = useCallback(async () => {
     if (!session?.id) return;
@@ -2113,11 +2128,23 @@ export default function App() {
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button type="button" onClick={onExportSessionMidi} disabled={busy || !allGenerated}>
-              Export Session MIDI
+              Download MIDI for Logic
             </button>
             <button type="button" onClick={onExport} disabled={busy || !allGenerated}>
               Export MIDI (zip)
             </button>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            {["drums", "bass", "chords", "lead"].map((lane) => (
+              <button
+                key={lane}
+                type="button"
+                onClick={() => onDownloadLaneMidi(lane)}
+                disabled={busy || !session.lanes?.[lane]?.generated}
+              >
+                Download {lane[0].toUpperCase()}{lane.slice(1)} MIDI
+              </button>
+            ))}
           </div>
         </>
       )}
