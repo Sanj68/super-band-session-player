@@ -695,7 +695,8 @@ def _pick_harmonic_style_pitch(
     ref = prev_pitch if prev_pitch is not None else root_pitch
     pass_prob = min(0.42, 0.08 + (0.48 * max(0.0, min(1.0, harm_conf))))
     if style == "supportive":
-        pass_prob *= 0.58
+        # v0.2.1: tighter pocket — favour root / chord tones; passing tones still possible but rarer.
+        pass_prob = min(0.24, pass_prob * 0.37)
     elif style == "melodic":
         pass_prob *= 1.15
     elif style in ("rhythmic", "slap"):
