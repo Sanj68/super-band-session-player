@@ -17,6 +17,7 @@ from app.services.bass_articulation import ghost_eligibility, shape_note
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
 from app.services.conditioning import UnifiedConditioning
+from app.services.reference_guidance import ReferenceGrooveGuidance, build_reference_guidance
 from app.services.session_context import (
     SessionAnchorContext,
     density_for_bar,
@@ -348,6 +349,46 @@ def _drum_profile_groove(player_key: str | None) -> tuple[float, float, float]:
     if player_key == "pino":
         return 1.08, 0.92, 1.22
     return 1.0, 1.0, 1.0
+
+
+def _apply_reference_groove_nudge(
+    intent: PhraseIntentBar,
+    guidance: ReferenceGrooveGuidance,
+    conditioning: UnifiedConditioning,
+    bar: int,
+) -> PhraseIntentBar:
+    if not guidance.should_apply_bar(bar):
+        return intent
+
+    density_mult = float(intent["density_mult"])
+    rest_bias = float(intent["rest_bias"])
+    offbeat_push = float(intent["offbeat_push"])
+    pocket_feel = str(conditioning.groove_profile.pocket_feel)
+
+    if pocket_feel == "laid_back":
+        density_mult *= 0.94
+        rest_bias += 0.05
+    elif pocket_feel == "driving":
+        density_mult *= 1.06
+        offbeat_push += 0.04
+    elif pocket_feel == "syncopated":
+        offbeat_push += 0.06
+
+    if bar < len(guidance.bar_energy):
+        energy = float(guidance.bar_energy[bar])
+        if energy < 0.30:
+            rest_bias += 0.04
+        elif energy > 0.75:
+            density_mult *= 1.04
+
+    global_syncopation = float(conditioning.groove_profile.syncopation_score)
+    offbeat_push += 0.05 * (global_syncopation - 0.5)
+
+    out = cast(PhraseIntentBar, dict(intent))
+    out["density_mult"] = max(0.55, min(1.35, density_mult))
+    out["rest_bias"] = max(0.0, min(0.65, rest_bias))
+    out["offbeat_push"] = max(0.0, min(1.0, offbeat_push))
+    return out
 
 
 def _pc_to_bass_register(pc: int, *, octave: int = 2, lo: int = 30, hi: int = 62) -> int:
@@ -896,6 +937,11 @@ def generate_bass(
     traits: BassProfile | None = bass_profiles[player_key] if use_profile and player_key else None
 
     style = normalize_bass_style(bass_style)
+    reference_guidance = build_reference_guidance(
+        conditioning,
+        has_midi_anchor=context is not None,
+    )
+    reference_guidance_applied = False
 
     bi = normalize_bass_instrument(bass_instrument)
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
@@ -972,7 +1018,7 @@ def generate_bass(
         phrase_bar = phrase_plan[bar] if bar < len(phrase_plan) else phrase_plan[-1]
         target_density = max(2, len(tuple(phrase_bar.slots)))
         base_density = 4 if style in ("rhythmic", "fusion", "melodic") else 2
-        intent = {
+        intent: PhraseIntentBar = {
             "role": phrase_bar.role,
             "density_mult": max(0.55, min(1.35, float(target_density) / float(base_density))),
             "rest_bias": float(phrase_bar.rest_bias),
@@ -981,6 +1027,9 @@ def generate_bass(
             "sustain_mult": float(phrase_bar.sustain_mult),
             "allow_fill": bool(phrase_bar.allow_fill),
         }
+        if style == "supportive" and reference_guidance.available and conditioning is not None:
+            intent = _apply_reference_groove_nudge(intent, reference_guidance, conditioning, bar)
+            reference_guidance_applied = reference_guidance_applied or reference_guidance.should_apply_bar(bar)
         root = mt.bass_root_midi(key, scale, deg, octave=2)
         ojp = oct_jump_p()
         if style in ("rhythmic", "fusion") and random.random() < ojp:
@@ -1763,7 +1812,7 @@ def generate_bass(
     pm.instruments.append(inst)
     buf = io.BytesIO()
     pm.write(buf)
-    return buf.getvalue(), _preview(
+    preview = _preview(
         style,
         key,
         scale,
@@ -1774,3 +1823,6 @@ def generate_bass(
         rare_groove_soul=soul_preset,
         anchor_role=bass_role_name,
     )
+    if reference_guidance_applied and conditioning is not None:
+        preview += f" (ref groove: {conditioning.groove_profile.pocket_feel}, conf {conditioning.groove_profile.confidence:.2f})"
+    return buf.getvalue(), preview
