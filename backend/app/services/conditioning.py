@@ -32,6 +32,11 @@ class UnifiedConditioning:
     sections: tuple[SectionSpan, ...]
     groove_profile: GrooveProfile
     harmonic_bars: tuple[ConditioningHarmonicBar, ...]
+    tempo_confidence: float = 0.0
+    bar_start_confidence: float = 0.0
+    bar_energy: tuple[float, ...] | None = None
+    bar_accent: tuple[float, ...] | None = None
+    bar_confidence: tuple[float, ...] | None = None
 
     def harmonic_bar(self, bar: int) -> ConditioningHarmonicBar | None:
         if not self.harmonic_bars:
@@ -89,12 +94,17 @@ def build_unified_conditioning(
 
     return UnifiedConditioning(
         tempo=tempo,
+        tempo_confidence=max(0.0, min(1.0, float(source.tempo_confidence))),
         bar_count=bars,
         beat_phase_offset_beats=max(0, min(3, phase)),
         beat_phase_confidence=max(0.0, min(1.0, phase_conf)),
+        bar_start_confidence=max(0.0, min(1.0, float(source.bar_start_confidence))),
         bar_start_anchor_sec=max(0.0, anchor_sec),
         beat_grid_seconds=tuple(float(x) for x in source.beat_grid_seconds),
         bar_starts_seconds=tuple(float(x) for x in source.bar_starts_seconds),
+        bar_energy=tuple(float(x) for x in source.bar_energy),
+        bar_accent=tuple(float(x) for x in source.bar_accent_profile),
+        bar_confidence=tuple(float(x) for x in source.bar_confidence_profile),
         sections=tuple(source.sections),
         groove_profile=groove,
         harmonic_bars=tuple(harm_rows),
