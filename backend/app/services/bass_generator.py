@@ -506,7 +506,32 @@ def _build_chord_segments(
     bar_count: int,
     key: str,
     scale: str,
+    chord_progression: list[str] | None = None,
 ) -> tuple[list[ChordSegment], list[ChordSegment]]:
+    custom_chords = mt.progression_chords_for_bars(chord_progression, bar_count)
+    if custom_chords:
+        key_pc = mt.key_root_pc(key)
+        scale_pcs = tuple((key_pc + x) % 12 for x in mt.scale_intervals(scale))
+        segments: list[ChordSegment] = []
+        per_bar: list[ChordSegment] = []
+        for bar, chord in enumerate(custom_chords):
+            target = tuple(sorted({int(pc) % 12 for pc in chord.tone_pcs}))
+            passing = tuple(pc for pc in scale_pcs if pc not in target)
+            avoid = tuple(pc for pc in range(12) if pc not in scale_pcs and pc not in target)
+            seg: ChordSegment = {
+                "start_bar": bar,
+                "end_bar": bar,
+                "root_pc": int(chord.root_pc) % 12,
+                "quality": _infer_chord_quality(chord.root_pc, target),
+                "target_pcs": target,
+                "passing_pcs": passing,
+                "avoid_pcs": avoid,
+                "confidence": 1.0,
+            }
+            segments.append(seg)
+            per_bar.append(seg)
+        return segments, per_bar
+
     if context is None:
         fallback_segments: list[ChordSegment] = []
         per_bar: list[ChordSegment] = []
@@ -612,6 +637,17 @@ def _bar_harmonic_priority_pitches(
     f = _nearest_pitch_for_pc(fifth_pc, r, lo=lo, hi=hi)
     t = _nearest_pitch_for_pc(third_pc, r, lo=lo, hi=hi)
     return r, f, t
+
+
+def _approach_pitch_to_next_root(next_root_pc: int, *, current_pitch: int, lo: int = 30, hi: int = 62) -> int:
+    """Return a subtle chromatic neighbor one semitone from the next chord root."""
+    next_root = _nearest_pitch_for_pc(next_root_pc, current_pitch, lo=lo, hi=hi)
+    approach = next_root - 1 if current_pitch <= next_root else next_root + 1
+    if approach < lo:
+        approach = next_root + 1
+    if approach > hi:
+        approach = next_root - 1
+    return max(lo, min(hi, approach))
 
 
 def _nearest_from_pitch_classes(
@@ -834,6 +870,7 @@ def generate_bass(
     bass_instrument: str | None = None,
     bass_player: str | None = None,
     bass_engine: str | None = None,
+    chord_progression: list[str] | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
     conditioning: UnifiedConditioning | None = None,
@@ -867,6 +904,7 @@ def generate_bass(
     eighth = spb / 2.0
     sixteenth = spb / 4.0
     degrees = mt.progression_degrees_for_bars(bar_count, scale)
+    has_custom_progression = bool([c for c in (chord_progression or []) if str(c).strip()])
     salt = random.randint(0, 127)
 
     melodic_shape = _MELODIC_SHAPES[salt % len(_MELODIC_SHAPES)]
@@ -918,7 +956,13 @@ def generate_bass(
             return 0.85
         return min(0.98, 0.7 + 0.28 * bias_traits["root_anchor_strength"])
 
-    segments, segment_per_bar = _build_chord_segments(context=context, bar_count=bar_count, key=key, scale=scale)
+    segments, segment_per_bar = _build_chord_segments(
+        context=context,
+        bar_count=bar_count,
+        key=key,
+        scale=scale,
+        chord_progression=chord_progression,
+    )
     _ = segments  # keep named list for diagnostics/debug readability
     phrase_plan = build_phrase_plan(bar_count=bar_count, style=style, salt=salt, context=context)
     prev_structural_pitch: int | None = None
@@ -1294,6 +1338,23 @@ def generate_bass(
                             is_structural=True,
                             traits_fallback=bass_profiles["pino"],
                         )
+                if has_custom_progression and bar + 1 < len(segment_per_bar):
+                    next_seg = segment_per_bar[bar + 1]
+                    next_root_pc = int(next_seg["root_pc"]) % 12
+                    if next_root_pc != int(seg["root_pc"]) % 12:
+                        ap = _approach_pitch_to_next_root(next_root_pc, current_pitch=r)
+                        at0 = bar_t1 - (sixteenth * 0.72) + random.uniform(0.0, 0.004) * spb
+                        at1 = min(bar_t1 - 1e-4, at0 + sixteenth * random.uniform(0.45, 0.62))
+                        if at1 > at0:
+                            emit_note(
+                                pitch=ap,
+                                start=at0,
+                                end=at1,
+                                vel=random.randint(62, 74),
+                                slot=15,
+                                is_structural=False,
+                                traits_fallback=bass_profiles["pino"],
+                            )
             ghost_use = ghost_p * ghost_eligibility(
                 style=style,
                 role=str(phrase_bar.role),

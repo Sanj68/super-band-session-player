@@ -81,6 +81,7 @@ class StoredSession:
     lead_style: str = "melodic"
     bass_style: str = "supportive"
     chord_style: str = "simple"
+    chord_progression: list[str] | None = None
     drum_style: str = "straight"
     lead_instrument: str = _DEFAULT_LEAD_INSTRUMENT
     lead_player: str | None = None
@@ -206,6 +207,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         lead_style=s.lead_style,
         bass_style=s.bass_style,
         chord_style=s.chord_style,
+        chord_progression=s.chord_progression,
         drum_style=s.drum_style,
         lead_instrument=s.lead_instrument,
         lead_player=s.lead_player,
@@ -256,6 +258,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         lead_style=src.lead_style,
         bass_style=src.bass_style,
         chord_style=src.chord_style,
+        chord_progression=list(src.chord_progression) if src.chord_progression is not None else None,
         drum_style=src.drum_style,
         lead_instrument=src.lead_instrument,
         lead_player=src.lead_player,
@@ -347,6 +350,7 @@ def create_session(body: SessionCreate) -> SessionCreated:
         lead_style=ls,
         bass_style=bs,
         chord_style=cs,
+        chord_progression=list(body.chord_progression) if body.chord_progression else None,
         drum_style=ds,
         lead_instrument=li_ins,
         lead_player=lp_ins,
@@ -503,6 +507,9 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if body.chord_style is not None:
         s.chord_style = body.chord_style.value
         parts.append("Chord style updated")
+    if "chord_progression" in body.model_dump(exclude_unset=True):
+        s.chord_progression = list(body.chord_progression) if body.chord_progression else None
+        parts.append("Chord progression updated")
     if "chord_player" in body.model_dump(exclude_unset=True):
         s.chord_player = body.chord_player.value if body.chord_player is not None else None
         parts.append("Chord player updated")
@@ -605,6 +612,7 @@ def _regenerate_lane_on_stored_session(
             bass_instrument=s.bass_instrument,
             bass_player=s.bass_player,
             bass_engine=s.bass_engine,
+            chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
             conditioning=cond,
@@ -824,6 +832,7 @@ def _render_bass_take_with_seed(
             bass_instrument=s.bass_instrument,
             bass_player=s.bass_player,
             bass_engine=s.bass_engine,
+            chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
             conditioning=conditioning,

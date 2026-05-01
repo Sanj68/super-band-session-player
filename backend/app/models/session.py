@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.utils import music_theory as mt
+
 
 class LaneName(str, Enum):
     drums = "drums"
@@ -223,6 +225,10 @@ class SessionPatch(BaseModel):
         default=None,
         description="When set, updates stored chord preset (regenerate chords to apply).",
     )
+    chord_progression: list[str] | None = Field(
+        default=None,
+        description="Optional chord symbols for bass harmony, e.g. Am7 | D7 | Gmaj7 | Cmaj7. Send null or [] to clear.",
+    )
     chord_player: ChordPlayer | None = Field(
         default=None,
         description="When set, updates stored chord player profile (regenerate chords to apply). Send null to clear.",
@@ -268,13 +274,23 @@ class SessionPatch(BaseModel):
         description="Lane to treat as rhythmic/harmonic anchor for complementary generation; send null to clear.",
     )
 
+    @field_validator("chord_progression")
+    @classmethod
+    def validate_chord_progression(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        clean = [str(chord).strip() for chord in v if str(chord).strip()]
+        for chord in clean:
+            mt.parse_chord_symbol(chord)
+        return clean
+
     @model_validator(mode="after")
     def at_least_one_field(self) -> SessionPatch:
         if not self.model_fields_set:
             raise ValueError(
                 "Provide at least one of: tempo, key, scale, bar_count, lead_style, lead_player, bass_style, bass_player, "
-                "chord_style, chord_player, drum_style, drum_player, session_preset, lead_instrument, bass_instrument, "
-                "chord_instrument, drum_kit, anchor_lane, bass_engine"
+                "chord_style, chord_progression, chord_player, drum_style, drum_player, session_preset, "
+                "lead_instrument, bass_instrument, chord_instrument, drum_kit, anchor_lane, bass_engine"
             )
         return self
 
@@ -303,6 +319,10 @@ class SessionCreate(BaseModel):
     chord_style: ChordStyle | None = Field(
         default=None,
         description="Chord voicing preset; omit for simple.",
+    )
+    chord_progression: list[str] | None = Field(
+        default=None,
+        description="Optional chord symbols for bass harmony, e.g. Am7 | D7 | Gmaj7 | Cmaj7.",
     )
     chord_player: ChordPlayer | None = Field(
         default=None,
@@ -348,6 +368,16 @@ class SessionCreate(BaseModel):
         default=None,
         description="Optional anchor lane (drums, bass, chords, lead) for anchor-first / context-aware generation.",
     )
+
+    @field_validator("chord_progression")
+    @classmethod
+    def validate_chord_progression(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        clean = [str(chord).strip() for chord in v if str(chord).strip()]
+        for chord in clean:
+            mt.parse_chord_symbol(chord)
+        return clean
 
 
 class LaneNote(BaseModel):
@@ -460,6 +490,10 @@ class SessionState(BaseModel):
     lead_style: str = Field(default="melodic", description="Active lead preset for this session.")
     bass_style: str = Field(default="supportive", description="Active bass preset for this session.")
     chord_style: str = Field(default="simple", description="Active chord preset for this session.")
+    chord_progression: list[str] | None = Field(
+        default=None,
+        description="Optional chord symbols currently used for bass harmony.",
+    )
     drum_style: str = Field(default="straight", description="Active drum preset for this session.")
     lead_instrument: str = Field(default="flute", description="Active lead instrument for this session.")
     lead_player: str | None = Field(

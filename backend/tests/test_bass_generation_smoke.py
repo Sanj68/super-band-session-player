@@ -41,3 +41,31 @@ def test_supportive_bass_seeded_smoke_is_repeatable_and_valid() -> None:
         assert n.end > n.start
         assert 0 <= n.pitch <= 127
         assert 1 <= n.velocity <= 127
+
+
+def test_supportive_bass_custom_progression_adds_release_approach_note() -> None:
+    random.seed(20260501)
+    data, _preview = generate_bass(
+        tempo=100,
+        bar_count=5,
+        key="C",
+        scale="major",
+        bass_style="supportive",
+        chord_progression=["Am7", "D7", "Gmaj7", "Cmaj7"],
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    spb = 60.0 / 100.0
+    bar_len = spb * 4.0
+    release_bar_start = 3 * bar_len
+    release_bar_end = 4 * bar_len
+
+    # Bar 4 releases into the looped next chord, Am7. The approach should sit
+    # very late in the release bar and land a semitone around A.
+    late_release_notes = [
+        n for n in notes
+        if release_bar_end - (spb / 4.0) <= n.start < release_bar_end and n.pitch % 12 in {8, 10}
+    ]
+    assert late_release_notes

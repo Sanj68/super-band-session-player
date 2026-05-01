@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
 from typing import Final
 
 # Pitch class (0=C) for each key name
@@ -47,6 +49,22 @@ _SCALE_ALIASES: Final[dict[str, str]] = {
 }
 
 
+@dataclass(frozen=True)
+class ChordSpec:
+    symbol: str
+    root: str
+    root_pc: int
+    quality: str
+    intervals: tuple[int, ...]
+
+    @property
+    def tone_pcs(self) -> tuple[int, ...]:
+        return tuple((self.root_pc + interval) % 12 for interval in self.intervals)
+
+
+_CHORD_RE: Final[re.Pattern[str]] = re.compile(r"^\s*([A-Ga-g])([#b]?)(.*?)\s*$")
+
+
 def normalize_key(key: str) -> str:
     k = key.strip()
     if not k:
@@ -61,6 +79,72 @@ def key_root_pc(key: str) -> int:
     if k not in KEY_TO_PC:
         raise ValueError(f"Unknown key: {key!r}. Use e.g. C, F#, Bb.")
     return KEY_TO_PC[k]
+
+
+def parse_chord_symbol(symbol: str) -> ChordSpec:
+    raw = symbol.strip()
+    if not raw:
+        raise ValueError("chord symbol must be non-empty")
+    match = _CHORD_RE.match(raw)
+    if not match:
+        raise ValueError(f"Invalid chord symbol: {symbol!r}")
+    root = normalize_key("".join(match.group(1, 2)))
+    root_pc = key_root_pc(root)
+    suffix = match.group(3).strip().replace(" ", "")
+    suffix_l = suffix.lower()
+
+    add9 = suffix_l.endswith("add9")
+    if add9:
+        suffix_l = suffix_l[:-4]
+
+    intervals: tuple[int, ...]
+    quality: str
+    if suffix_l in ("", "maj"):
+        quality = "major"
+        intervals = (0, 4, 7)
+    elif suffix_l in ("m", "min"):
+        quality = "minor"
+        intervals = (0, 3, 7)
+    elif suffix_l == "7":
+        quality = "dominant7"
+        intervals = (0, 4, 7, 10)
+    elif suffix_l == "maj7" or suffix == "M7":
+        quality = "major7"
+        intervals = (0, 4, 7, 11)
+    elif suffix_l == "m7":
+        # Capital M means major seventh; lower-case m means minor seventh.
+        quality = "minor7"
+        intervals = (0, 3, 7, 10)
+    elif suffix_l == "min7":
+        quality = "minor7"
+        intervals = (0, 3, 7, 10)
+    elif suffix_l == "m7b5":
+        quality = "half_diminished"
+        intervals = (0, 3, 6, 10)
+    elif suffix_l == "dim":
+        quality = "diminished"
+        intervals = (0, 3, 6)
+    elif suffix_l == "sus2":
+        quality = "sus2"
+        intervals = (0, 2, 7)
+    elif suffix_l == "sus4":
+        quality = "sus4"
+        intervals = (0, 5, 7)
+    else:
+        raise ValueError(f"Unsupported chord symbol: {symbol!r}")
+
+    if add9:
+        intervals = tuple(dict.fromkeys((*intervals, 14)))
+        quality = f"{quality}_add9"
+    return ChordSpec(symbol=raw, root=root, root_pc=root_pc, quality=quality, intervals=intervals)
+
+
+def progression_chords_for_bars(chords: list[str] | tuple[str, ...] | None, bar_count: int) -> list[ChordSpec]:
+    clean = [c.strip() for c in (chords or []) if c.strip()]
+    if not clean:
+        return []
+    parsed = [parse_chord_symbol(c) for c in clean]
+    return [parsed[b % len(parsed)] for b in range(max(0, bar_count))]
 
 
 def scale_intervals(scale: str) -> list[int]:

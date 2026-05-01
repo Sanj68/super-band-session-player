@@ -103,6 +103,13 @@ const ACTIVE_DRUM_KITS = [
 
 const REGEN_LANE_KEYS = ["drums", "bass", "chords", "lead"];
 
+function parseChordProgressionInput(value) {
+  return value
+    .split(/[|,]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 export default function App() {
   const [tempo, setTempo] = useState(108);
   const [keyNote, setKeyNote] = useState("C");
@@ -113,6 +120,7 @@ export default function App() {
   const [bassStyle, setBassStyle] = useState("supportive");
   const [bassEngine, setBassEngine] = useState("baseline");
   const [chordStyle, setChordStyle] = useState("simple");
+  const [chordProgression, setChordProgression] = useState("");
   const [chordPlayer, setChordPlayer] = useState("");
   const [drumStyle, setDrumStyle] = useState("straight");
   const [leadInstrument, setLeadInstrument] = useState("flute");
@@ -277,6 +285,10 @@ export default function App() {
       if (chordPlayer) {
         body.chord_player = chordPlayer;
       }
+      const progression = parseChordProgressionInput(chordProgression);
+      if (progression.length > 0) {
+        body.chord_progression = progression;
+      }
       if (leadPlayer) {
         body.lead_player = leadPlayer;
       }
@@ -301,6 +313,7 @@ export default function App() {
     bassStyle,
     bassEngine,
     chordStyle,
+    chordProgression,
     drumStyle,
     leadInstrument,
     bassInstrument,
@@ -1099,6 +1112,8 @@ export default function App() {
         setBassEngine={setBassEngine}
         chordStyle={chordStyle}
         setChordStyle={setChordStyle}
+        chordProgression={chordProgression}
+        setChordProgression={setChordProgression}
         chordPlayer={chordPlayer}
         setChordPlayer={setChordPlayer}
         drumStyle={drumStyle}

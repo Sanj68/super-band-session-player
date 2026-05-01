@@ -152,6 +152,8 @@ export default function SessionControls({
   setBassEngine,
   chordStyle,
   setChordStyle,
+  chordProgression,
+  setChordProgression,
   chordPlayer,
   setChordPlayer,
   drumStyle,
@@ -338,6 +340,15 @@ export default function SessionControls({
               </option>
             ))}
           </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+          Chord progression
+          <input
+            type="text"
+            value={chordProgression}
+            onChange={(e) => setChordProgression(e.target.value)}
+            placeholder="Am7 | D7 | Gmaj7 | Cmaj7"
+          />
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
           Chord player
