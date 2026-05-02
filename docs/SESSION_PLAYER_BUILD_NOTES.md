@@ -67,8 +67,8 @@ useful leverage.
 |---------|-------|---------------|
 | v0.3a   | Validation pack for reference audio analysis | Prove the analysis is trustworthy before any feature depends on it. |
 | v0.3b   | Reference-aware bass groove | Drum loop / reference audio in → bass that locks to the kick, breathes around the snare, resolves through the chord chart. |
-| v0.4    | Variation manager + bar-range regeneration | Take comparison, promote, regenerate bars 5–8 only, keep-notes/change-rhythm and inverse. |
-| v0.5    | Performance MIDI / phrasing layer (bass first) | Articulations as first-class plan output: ghost, dead, slide, grace, hammer; one reference instrument profile. |
+| v0.4    | Variation manager + bar-range regeneration | Complete: deterministic bass seeds, candidate promotion, selected-bar regeneration, and compact frontend controls. |
+| v0.5    | Bass Performance MIDI / Articulation Layer | Make bass MIDI feel played: ghost/dead notes, slides, grace notes, timing push/pull, velocity phrasing, and clean vs performance MIDI modes. |
 | v0.6    | SDK / prompt assistant control layer | Natural language → structured engine controls; user-reviewed patches; never autonomous generation. |
 | v1.0    | DAW-native / plugin direction | AU/VST shell over the existing engine; MIDI in/out + sidechain; engine stays the brain. |
 
@@ -156,51 +156,80 @@ unmistakable.
 
 ## 7. v0.4 — Variation Manager + Bar-Range Regeneration
 
-Goal: turn the engine's existing knobs into a producer workflow.
+Status: **complete**.
 
-- Generate N takes, compare, promote one. (The bass candidate workflow
-  already exists; generalise its UX.)
-- Regenerate bars 5–8 only, leaving the rest of the lane untouched.
-- "Keep notes / change rhythm" and "Keep rhythm / change notes" toggles
-  on a single take.
-- Per-bar deterministic seeding: every emitted note is reproducible from
-  `(session_id, lane, bar, take_id)`. Today's `random.randint(0, 127)`
-  salt at the top of `generate_bass` makes bar-range regeneration
-  inconsistent — fix that as part of v0.4.
-- This milestone is also the **first earned opportunity** to decompose
-  `bass_generator.py` into per-style modules, because per-bar regeneration
-  will repeatedly stress the giant `generate_bass` function. If the
-  decomposition is not necessary to ship v0.4 cleanly, defer it again.
+Tag: `v0.4-variation-manager`.
 
-Acceptance: a producer can take a generated 16-bar bass, regenerate bars
-9–12 with a different seed, and the rest of the part stays bit-identical.
+Completed scope:
+
+- Deterministic bass seed support in `generate_bass(seed=...)` and the
+  phrase-v2 path.
+- `bass_seed` persisted on the session and returned in `SessionState`.
+- Bass candidate promotion carries the candidate seed into the active
+  session bass lane.
+- Bass candidate generation now uses direct seeded generation instead of
+  global random-state wrapping.
+- Bass-only selected-bar regeneration endpoint:
+  `POST /api/sessions/{session_id}/lanes/bass/regenerate-bars`.
+- Compact frontend controls for adjusting selected bass bars inside the
+  existing bass candidate workflow.
+- Outside bars are preserved during selected-bar regeneration; only notes
+  whose start falls inside the selected zero-based bar range are replaced.
+
+What this unlocks: a producer can generate takes, promote one, adjust
+selected bars with a fresh or repeatable variation seed, and download the
+resulting editable MIDI without losing the rest of the part.
+
+Deferred from the original v0.4 ambition:
+
+- "Keep notes / change rhythm" and "Keep rhythm / change notes" toggles.
+- Decomposition of `bass_generator.py` into per-style modules.
+
+Both remain valid future tools, but v0.4 shipped the smaller workflow that
+matters first: promote a bass take, adjust a bar range, preserve everything
+outside that edit.
 
 ## 8. v0.5 — Performance MIDI / Phrasing Layer (Bass First)
 
-Goal: MIDI that sounds played, not programmed.
+Goal: bass MIDI that sounds played, not merely correct.
+
+Core mission:
+
+> Session Player must produce killer, sellable musical output. Correct
+> notes are not enough.
+
+The next bottleneck is musical feel. The system now has deterministic
+takes, promotion, and selected-bar edits. v0.5 should make those edits
+worth keeping by adding performance information that works especially well
+for fusion, hip-hop, broken beat, jazz-funk, deep house, DnB, and
+sample-based grooves.
 
 - Articulation as a first-class output of the phrase plan, not a
   post-processing decoration. Each emitted bass note carries an
   `articulation` enum:
-  `normal`, `ghost`, `dead`, `slide_from`, `slide_to`, `hammer`, `grace`.
-- Velocity is a curve, not a number. Ghost notes ~30–45, dead notes ~20,
-  accents follow phrase role (push > anchor > release). Extend the
-  existing `shape_note` rather than adding a parallel system.
-- Micro-timing tied to the analysis: lay back when the source is
-  dragging, push when it is pushing. Built on `bar_start_anchor_sec` and
-  per-slot pressure, not free random jitter.
-- Pitch bends used sparingly and only on slides / grace notes. Continuous
-  bends are the fastest way to make MIDI sound *worse* in the wrong
-  instrument profile.
-- One reference instrument profile to start: **Logic Studio Bass**
-  (`profiles/logic_studio_bass.json`). Profile is a translation from the
-  articulation enum to keyswitches / CCs / note offsets. Other profiles
-  (MODO Bass, Trilian, Ample, Kontakt user libraries) follow only after
-  the first one is loved.
-- Profiles are user-authorable: drop in a JSON, it works. This is a moat.
+  `normal`, `ghost`, `dead`, `muted`, `slide_from`, `slide_to`, `hammer`,
+  `pull_off`, `grace`, `legato`.
+- Ghost notes and dead/muted notes are essential, not ornamental. They are
+  what make bass parts breathe in funk, hip-hop, broken beat, DnB, and
+  sample-based grooves.
+- Grace notes, slides, hammer-ons, and pull-offs should appear only where
+  phrase role and instrument register make them believable.
+- Legato feel should be explicit: note overlap, release shortening, and
+  phrase connection need to be intentional rather than accidental.
+- Velocity is phrase dynamics, not a random number. Ghosts sit low,
+  anchors speak clearly, pushes lean forward, releases relax. Extend the
+  existing note-shaping path rather than adding a parallel system.
+- Timing push/pull should be musically directed. It can lean into kicks,
+  sit behind snares, rush fills slightly, or relax cadences, but it should
+  not become free random jitter.
+- Support a clean MIDI vs performance MIDI output mode. Clean mode keeps
+  editable note choices simple; performance mode includes the feel layer.
+- Instrument profile direction comes later. v0.5 should design the
+  articulation vocabulary and MIDI output behavior first, then map it to
+  specific instruments once the musical result is worth preserving.
 
 Bass first. Chords and lead get this layer in a later milestone, once the
-articulation vocabulary is settled and at least one profile is solid.
+articulation vocabulary is settled.
 
 Acceptance: A/B clip of the same session at v0.4 vs v0.5. The v0.5
 version is unmistakably more human in informal listening.
