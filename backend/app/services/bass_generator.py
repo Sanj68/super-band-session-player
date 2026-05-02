@@ -724,6 +724,7 @@ def _pick_harmonic_style_pitch(
     avoid_pcs: tuple[int, ...],
     harm_conf: float,
     prev_pitch: int | None,
+    rng: random.Random | object = random,
 ) -> int:
     if slot % 4 == 0 or role == "anchor":
         return root_pitch
@@ -744,11 +745,11 @@ def _pick_harmonic_style_pitch(
         pass_prob *= 0.85
     if role == "release" and slot >= 12:
         pass_prob *= 0.6
-    if passing_pcs and random.random() < pass_prob:
+    if passing_pcs and rng.random() < pass_prob:
         p = _nearest_from_pitch_classes(passing_pcs, reference=ref)
     else:
         if style == "supportive":
-            pool = color if random.random() < 0.45 else stable
+            pool = color if rng.random() < 0.45 else stable
         elif style == "melodic":
             pool = stable + color
         elif style == "rhythmic":
@@ -795,25 +796,32 @@ def _rhythmic_drum_slot_keep(
     d_drum: float,
     kick_lock: float,
     restraint: float,
+    rng: random.Random | object = random,
 ) -> bool:
     """Groove-lock gate for rhythmic 16ths under drum anchor (bounded probabilities)."""
     kw = drum_kick_weight(ctx, bar, slot)
     nk = drum_kick_emphasis_max(ctx, bar, slot, 2)
     pr = slot_pressure(ctx, bar, slot)
     if kw > 0.36 or (slot % 4 == 0 and nk > 0.44):
-        return random.random() < min(0.98, 0.86 + 0.1 * kw * kick_lock)
+        return rng.random() < min(0.98, 0.86 + 0.1 * kw * kick_lock)
     if pr > 0.5 and kw < 0.16:
         skip_p = 0.16 + 0.36 * pr - 0.34 * nk
         if d_drum > 12.0:
             skip_p += 0.1
         skip_p = max(0.06, min(0.72, skip_p * restraint))
-        return random.random() > skip_p
+        return rng.random() > skip_p
     if pr > 0.62 and kw < 0.28:
-        return random.random() > min(0.55, 0.22 + 0.28 * pr)
+        return rng.random() > min(0.55, 0.22 + 0.28 * pr)
     return True
 
 
-def _supportive_slot_may_apply_rest_drop(*, role: str, s: int, rest_bias: float) -> bool:
+def _supportive_slot_may_apply_rest_drop(
+    *,
+    role: str,
+    s: int,
+    rest_bias: float,
+    rng: random.Random | object = random,
+) -> bool:
     """Return True to skip this hit (phrase-plan rest_bias). Never thin core pocket/cadence shells."""
     if s in (0, 8):
         return False
@@ -826,7 +834,7 @@ def _supportive_slot_may_apply_rest_drop(*, role: str, s: int, rest_bias: float)
         w *= 0.9
     elif role in ("push", "release"):
         w *= 0.88
-    return random.random() < min(0.48, w)
+    return rng.random() < min(0.48, w)
 
 
 def _supportive_thin_push_slots(pat: tuple[int, ...], salt: int, bar: int) -> tuple[int, ...]:
@@ -863,6 +871,7 @@ def _supportive_unified_slot8_pitch(
     f: int,
     t: int,
     cadence_strength: float,
+    rng: random.Random | object = random,
 ) -> int:
     """One decision path for slot 8: role + phrase (tone index) in a single mix, no silent override."""
     base = _deg_pitch_map(r, f, t, planned_tidx)
@@ -874,7 +883,7 @@ def _supportive_unified_slot8_pitch(
             w = (0.22, 0.64, 0.14)
         else:
             w = (0.2, 0.25, 0.55)
-        pick = random.choices((r, f, t), weights=w, k=1)[0]
+        pick = rng.choices((r, f, t), weights=w, k=1)[0]
         return pick
     if pr_role == "answer":
         if planned_tidx == 0:
@@ -883,7 +892,7 @@ def _supportive_unified_slot8_pitch(
             w = (0.18, 0.55, 0.27)
         else:
             w = (0.2, 0.22, 0.58)
-        return random.choices((r, f, t), weights=w, k=1)[0]
+        return rng.choices((r, f, t), weights=w, k=1)[0]
     if pr_role == "push":
         return base
     if pr_role == "release":
@@ -898,7 +907,7 @@ def _supportive_unified_slot8_pitch(
             w = (wroot * 0.55, rem * 0.32, rem * 0.38)
         tsum = w[0] + w[1] + w[2]
         w = (w[0] / tsum, w[1] / tsum, w[2] / tsum)
-        return random.choices((r, f, t), weights=w, k=1)[0]
+        return rng.choices((r, f, t), weights=w, k=1)[0]
     return base
 
 
@@ -916,7 +925,9 @@ def generate_bass(
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
     conditioning: UnifiedConditioning | None = None,
+    seed: int | None = None,
 ) -> tuple[bytes, str]:
+    rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
     if engine_mode == "phrase_v2":
         return generate_bass_phrase_v2(
@@ -929,6 +940,7 @@ def generate_bass(
             bass_player=bass_player,
             session_preset=session_preset,
             context=context,
+            seed=seed,
         )
 
     soul_preset = (session_preset or "").strip().lower() == "rare_groove_soul"
@@ -952,7 +964,7 @@ def generate_bass(
     sixteenth = spb / 4.0
     degrees = mt.progression_degrees_for_bars(bar_count, scale)
     has_custom_progression = bool([c for c in (chord_progression or []) if str(c).strip()])
-    salt = random.randint(0, 127)
+    salt = rng.randint(0, 127)
 
     melodic_shape = _MELODIC_SHAPES[salt % len(_MELODIC_SHAPES)]
     slap_template_idx = salt % 5
@@ -984,7 +996,7 @@ def generate_bass(
         restraint_m *= bass_knobs.restraint_mult
 
     def dur_j(base: float) -> float:
-        return base * random.uniform(0.88, 1.06) * art
+        return base * rng.uniform(0.88, 1.06) * art
 
     def oct_jump_p() -> float:
         if not bias_traits:
@@ -1032,9 +1044,9 @@ def generate_bass(
             reference_guidance_applied = reference_guidance_applied or reference_guidance.should_apply_bar(bar)
         root = mt.bass_root_midi(key, scale, deg, octave=2)
         ojp = oct_jump_p()
-        if style in ("rhythmic", "fusion") and random.random() < ojp:
+        if style in ("rhythmic", "fusion") and rng.random() < ojp:
             root = min(52, root + 12)
-        elif style == "melodic" and random.random() < min(0.22, ojp * 0.55):
+        elif style == "melodic" and rng.random() < min(0.22, ojp * 0.55):
             root = min(52, root + 12)
 
         chord2 = mt.chord_tones_midi(key, scale, deg, octave=2, seventh=False)
@@ -1117,7 +1129,7 @@ def generate_bass(
                             leg_use *= 1.0 + 0.035 * restraint_m * (1.15 if player_key == "pino" else 1.0)
                         if dd > 14.0:
                             leg_use = min(0.97, leg_use * 1.025)
-                    t_j = random.uniform(0, 0.006) * spb
+                    t_j = rng.uniform(0, 0.006) * spb
                     t0 = bar_t0 + beat * spb + late + t_j
                     t1 = t0 + spb * leg_use
                     p = root
@@ -1128,10 +1140,10 @@ def generate_bass(
                             p = t
                         elif m == 5 and not (_drum_anchor_ctx(context) and kw8 > 0.5):
                             p = f
-                        elif _drum_anchor_ctx(context) and kw8 > 0.38 and random.random() < 0.55 * kick_lock_m:
-                            p = f if random.random() < 0.45 else root
+                        elif _drum_anchor_ctx(context) and kw8 > 0.38 and rng.random() < 0.55 * kick_lock_m:
+                            p = f if rng.random() < 0.45 else root
                     vb = (88, 80)
-                    vel = max(72, min(100, (vb[0] if beat == 0 else vb[1]) + random.randint(-5, 5)))
+                    vel = max(72, min(100, (vb[0] if beat == 0 else vb[1]) + rng.randint(-5, 5)))
                     emit_note(
                         pitch=p,
                         start=t0,
@@ -1165,16 +1177,16 @@ def generate_bass(
                 rest_b = float(intent["rest_bias"])
                 d_drum = density_for_bar(context, bar) if context else 0.0
                 for j, s in enumerate(pat):
-                    if _supportive_slot_may_apply_rest_drop(role=pr_role, s=s, rest_bias=rest_b):
+                    if _supportive_slot_may_apply_rest_drop(role=pr_role, s=s, rest_bias=rest_b, rng=rng):
                         continue
                     if _drum_anchor_ctx(context):
                         if not _rhythmic_drum_slot_keep(
-                            context, bar, s, d_drum=d_drum, kick_lock=kick_lock_m, restraint=restraint_m
+                            context, bar, s, d_drum=d_drum, kick_lock=kick_lock_m, restraint=restraint_m, rng=rng
                         ):
                             continue
                     elif context and s % 4 != 0:
                         prs = slot_pressure(context, bar, s)
-                        if prs > 0.6 and random.random() < 0.22 + prs * 0.3:
+                        if prs > 0.6 and rng.random() < 0.22 + prs * 0.3:
                             continue
                     tidx = int(tone_path[j % max(1, len(tone_path))])
                     if s == 8:
@@ -1185,6 +1197,7 @@ def generate_bass(
                             f=f,
                             t=t,
                             cadence_strength=float(intent["cadence_strength"]),
+                            rng=rng,
                         )
                     else:
                         p = _deg_pitch_map(r, f, t, tidx)
@@ -1201,8 +1214,9 @@ def generate_bass(
                             avoid_pcs=avoid_pcs,
                             harm_conf=float(harm_conf),
                             prev_pitch=prev_structural_pitch,
+                            rng=rng,
                         )
-                    if reg_sh == 12 and pr_role == "push" and s not in (0, 8) and p == r and random.random() < 0.35:
+                    if reg_sh == 12 and pr_role == "push" and s not in (0, 8) and p == r and rng.random() < 0.35:
                         p = min(58, r + 12)
                     pass_p = 0.0
                     if (
@@ -1214,8 +1228,8 @@ def generate_bass(
                         pass_p = min(0.3, 0.06 + 0.5 * float(harm_conf))
                     if pr_role == "push" and pass_p > 0.0:
                         pass_p *= 0.72
-                    if pass_p > 0.0 and random.random() < pass_p:
-                        p = _pc_to_bass_register(random.choice(passing_pcs), octave=2)
+                    if pass_p > 0.0 and rng.random() < pass_p:
+                        p = _pc_to_bass_register(rng.choice(passing_pcs), octave=2)
                     if avoid_pcs and (p % 12) in set(avoid_pcs):
                         p = r
                     obp = float(intent["offbeat_push"])
@@ -1227,25 +1241,25 @@ def generate_bass(
                         kw = drum_kick_weight(context, bar, s)
                         late += sixteenth * (0.14 * kw - 0.05 * drum_kick_weight(context, bar, (s + 3) % 16)) * kick_lock_m
                         late += sixteenth * 0.06 * bounce_m * (0.55 if player_key == "bootsy" else 0.35)
-                    t_j = random.uniform(0, 0.018) * spb
+                    t_j = rng.uniform(0, 0.018) * spb
                     t0 = bar_t0 + s * sixteenth + late + t_j
                     if pr_role == "anchor" and s in (0, 8):
-                        t0 += spb * random.uniform(-0.0018, 0.0038) * (1.0 + 0.4 * (1.0 if s == 8 else 0.0))
+                        t0 += spb * rng.uniform(-0.0018, 0.0038) * (1.0 + 0.4 * (1.0 if s == 8 else 0.0))
                     if j + 1 < len(pat):
                         span_16 = max(0.45, float(pat[j + 1] - s))
                     else:
                         span_16 = max(0.5, 16.0 - float(s))
-                    leg_use = random.uniform(0.86, 0.95) * art * float(intent["sustain_mult"])
+                    leg_use = rng.uniform(0.86, 0.95) * art * float(intent["sustain_mult"])
                     if _drum_anchor_ctx(context) and d_drum > 11.0:
                         leg_use *= 1.0 + 0.028 * restraint_m * (1.1 if player_key == "pino" else 1.0)
                     if d_drum > 14.0:
                         leg_use = min(0.97, leg_use * 1.02)
                     if pr_role == "release" and s == 14:
-                        span_16 = max(span_16, random.uniform(1.05, 1.3))
+                        span_16 = max(span_16, rng.uniform(1.05, 1.3))
                     t1 = min(bar_t1 - 1e-4, t0 + sixteenth * span_16 * 0.9 * leg_use)
                     if t1 <= t0:
                         t1 = min(bar_t1 - 1e-4, t0 + sixteenth * 0.55)
-                    vel = max(72, min(100, (92 if s == 0 else 80) + random.randint(-5, 5)))
+                    vel = max(72, min(100, (92 if s == 0 else 80) + rng.randint(-5, 5)))
                     if s not in (0, 4, 8, 12) and s % 4 != 0:
                         vel = max(70, min(98, vel - 4))
                     if pr_role == "anchor" and s in (0, 8):
@@ -1276,18 +1290,19 @@ def generate_bass(
                         f=f,
                         t=t,
                         cadence_strength=float(intent["cadence_strength"]),
+                        rng=rng,
                     )
                     if avoid_pcs and (p_a8 % 12) in set(avoid_pcs):
                         p_a8 = r
                     a8_late = sixteenth * 0.03 * float(intent["offbeat_push"])
-                    a8_t0 = bar_t0 + 8 * sixteenth + a8_late + random.uniform(0.0, 0.004) * spb
-                    a8_t1 = min(bar_t1 - 1e-4, a8_t0 + sixteenth * random.uniform(2.1, 2.9) * float(intent["sustain_mult"]))
+                    a8_t0 = bar_t0 + 8 * sixteenth + a8_late + rng.uniform(0.0, 0.004) * spb
+                    a8_t1 = min(bar_t1 - 1e-4, a8_t0 + sixteenth * rng.uniform(2.1, 2.9) * float(intent["sustain_mult"]))
                     if a8_t1 > a8_t0:
                         emit_note(
                             pitch=p_a8,
                             start=a8_t0,
                             end=a8_t1,
-                            vel=random.randint(78, 90),
+                            vel=rng.randint(78, 90),
                             slot=8,
                             is_structural=False,
                             traits_fallback=bass_profiles["pino"],
@@ -1313,23 +1328,23 @@ def generate_bass(
                 if is_cadence_bar:
                     pickup_prob = max(0.92, pickup_prob)
                 pickup_prob *= 1.0 - stack_pen
-                if 12 not in pat_rel and random.random() < pickup_prob:
+                if 12 not in pat_rel and rng.random() < pickup_prob:
                     pickup_slot = 12
                     pickup_push = 0.0
                     if _drum_anchor_ctx(context):
                         pickup_push += sixteenth * 0.07 * drum_kick_weight(context, bar, pickup_slot) * kick_lock_m
-                    pt0 = bar_t0 + pickup_slot * sixteenth + pickup_push + random.uniform(0.0, 0.006) * spb
-                    pt1 = min(bar_t1 - 1e-4, pt0 + sixteenth * random.uniform(0.7, 0.98))
+                    pt0 = bar_t0 + pickup_slot * sixteenth + pickup_push + rng.uniform(0.0, 0.006) * spb
+                    pt1 = min(bar_t1 - 1e-4, pt0 + sixteenth * rng.uniform(0.7, 0.98))
                     if pt1 > pt0:
                         had_pick = True
-                        pp = f if random.random() < (0.68 if is_cadence_bar else 0.56) else r
+                        pp = f if rng.random() < (0.68 if is_cadence_bar else 0.56) else r
                         if avoid_pcs and (pp % 12) in set(avoid_pcs):
                             pp = r
                         emit_note(
                             pitch=pp,
                             start=pt0,
                             end=pt1,
-                            vel=random.randint(72, 86),
+                            vel=rng.randint(72, 86),
                             slot=pickup_slot,
                             is_structural=False,
                             traits_fallback=bass_profiles["pino"],
@@ -1344,26 +1359,26 @@ def generate_bass(
                 tail_prob *= 1.0 - (0.25 * float(had_pick)) - (0.15 * min(0.5, sw_cad))
                 tail_prob *= 1.0 - (0.12 * int(release_main_hits) / 5.0)
                 tail_prob = max(0.0, min(0.99, tail_prob))
-                if 14 not in pat_rel and random.random() < tail_prob:
-                    cad_slot = 14 if is_cadence_bar else (14 if random.random() < 0.75 else 13)
+                if 14 not in pat_rel and rng.random() < tail_prob:
+                    cad_slot = 14 if is_cadence_bar else (14 if rng.random() < 0.75 else 13)
                     tail_push = 0.0
                     if _drum_anchor_ctx(context):
                         tail_push += sixteenth * 0.09 * drum_kick_weight(context, bar, cad_slot) * kick_lock_m
-                    ct0 = bar_t0 + cad_slot * sixteenth + tail_push + random.uniform(0.0, 0.006) * spb
+                    ct0 = bar_t0 + cad_slot * sixteenth + tail_push + rng.uniform(0.0, 0.006) * spb
                     ct1 = min(
                         bar_t1 - 1e-4,
-                        ct0 + sixteenth * random.uniform(1.0 if is_cadence_bar else 0.92, 1.34 if is_cadence_bar else 1.22),
+                        ct0 + sixteenth * rng.uniform(1.0 if is_cadence_bar else 0.92, 1.34 if is_cadence_bar else 1.22),
                     )
                     if ct1 > ct0:
                         had_tail = True
-                        cp = r if random.random() < (0.84 if is_cadence_bar else 0.66) else f
+                        cp = r if rng.random() < (0.84 if is_cadence_bar else 0.66) else f
                         if avoid_pcs and (cp % 12) in set(avoid_pcs):
                             cp = r
                         emit_note(
                             pitch=cp,
                             start=ct0,
                             end=ct1,
-                            vel=random.randint(80, 94),
+                            vel=rng.randint(80, 94),
                             slot=cad_slot,
                             is_structural=True,
                             traits_fallback=bass_profiles["pino"],
@@ -1373,17 +1388,17 @@ def generate_bass(
                     floor_push = 0.0
                     if _drum_anchor_ctx(context):
                         floor_push += sixteenth * 0.06 * drum_kick_weight(context, bar, floor_slot) * kick_lock_m
-                    ft0 = bar_t0 + floor_slot * sixteenth + floor_push + random.uniform(0.0, 0.004) * spb
-                    ft1 = min(bar_t1 - 1e-4, ft0 + sixteenth * random.uniform(1.06, 1.28))
+                    ft0 = bar_t0 + floor_slot * sixteenth + floor_push + rng.uniform(0.0, 0.004) * spb
+                    ft1 = min(bar_t1 - 1e-4, ft0 + sixteenth * rng.uniform(1.06, 1.28))
                     if ft1 > ft0:
-                        fp = r if random.random() < 0.82 else f
+                        fp = r if rng.random() < 0.82 else f
                         if avoid_pcs and (fp % 12) in set(avoid_pcs):
                             fp = r
                         emit_note(
                             pitch=fp,
                             start=ft0,
                             end=ft1,
-                            vel=random.randint(78, 90),
+                            vel=rng.randint(78, 90),
                             slot=floor_slot,
                             is_structural=True,
                             traits_fallback=bass_profiles["pino"],
@@ -1393,14 +1408,14 @@ def generate_bass(
                     next_root_pc = int(next_seg["root_pc"]) % 12
                     if next_root_pc != int(seg["root_pc"]) % 12:
                         ap = _approach_pitch_to_next_root(next_root_pc, current_pitch=r)
-                        at0 = bar_t1 - (sixteenth * 0.72) + random.uniform(0.0, 0.004) * spb
-                        at1 = min(bar_t1 - 1e-4, at0 + sixteenth * random.uniform(0.45, 0.62))
+                        at0 = bar_t1 - (sixteenth * 0.72) + rng.uniform(0.0, 0.004) * spb
+                        at1 = min(bar_t1 - 1e-4, at0 + sixteenth * rng.uniform(0.45, 0.62))
                         if at1 > at0:
                             emit_note(
                                 pitch=ap,
                                 start=at0,
                                 end=at1,
-                                vel=random.randint(62, 74),
+                                vel=rng.randint(62, 74),
                                 slot=15,
                                 is_structural=False,
                                 traits_fallback=bass_profiles["pino"],
@@ -1423,19 +1438,19 @@ def generate_bass(
                     1.0, sw_back
                 )
                 ghost_use = max(0.02, min(0.22, ghost_use * restraint_m))
-            if random.random() < ghost_use:
-                ghost_b = random.choice((1.0, 3.0))
+            if rng.random() < ghost_use:
+                ghost_b = rng.choice((1.0, 3.0))
                 gt0 = bar_t0 + ghost_b * spb
-                gt1 = gt0 + spb * random.uniform(0.12, 0.22)
+                gt1 = gt0 + spb * rng.uniform(0.12, 0.22)
                 if gt1 <= bar_t1:
-                    gp = random.choice((root, f))
+                    gp = rng.choice((root, f))
                     if avoid_pcs and (gp % 12) in set(avoid_pcs):
                         gp = root
                     emit_note(
                         pitch=gp,
                         start=gt0,
                         end=gt1,
-                        vel=random.randint(44, 62),
+                        vel=rng.randint(44, 62),
                         slot=int(ghost_b * 4),
                         is_structural=False,
                         traits_fallback=bass_profiles["pino"],
@@ -1445,20 +1460,20 @@ def generate_bass(
                 ans_p = min(0.42, (0.1 + 0.28 * sw) * (0.55 if player_key == "pino" else 1.0) / max(0.85, restraint_m))
                 if str(phrase_bar.role) == "release":
                     ans_p *= 0.12
-                if sw > 0.32 and random.random() < ans_p:
+                if sw > 0.32 and rng.random() < ans_p:
                     ah = 6 if drum_snare_weight(context, bar, 4) >= drum_snare_weight(context, bar, 12) else 14
                     if drum_kick_weight(context, bar, ah) < 0.38:
-                        t0a = bar_t0 + ah * sixteenth + random.uniform(0, 0.008) * spb
-                        t1a = t0a + sixteenth * random.uniform(0.55, 0.95)
+                        t0a = bar_t0 + ah * sixteenth + rng.uniform(0, 0.008) * spb
+                        t1a = t0a + sixteenth * rng.uniform(0.55, 0.95)
                         if t1a <= bar_t1:
-                            ap = f if random.random() < 0.55 else root
+                            ap = f if rng.random() < 0.55 else root
                             if avoid_pcs and (ap % 12) in set(avoid_pcs):
                                 ap = root
                             emit_note(
                                 pitch=ap,
                                 start=t0a,
                                 end=t1a,
-                                vel=random.randint(38, 58),
+                                vel=rng.randint(38, 58),
                                 slot=ah,
                                 is_structural=False,
                                 traits_fallback=bass_profiles["pino"],
@@ -1484,17 +1499,17 @@ def generate_bass(
                         pr = slot_pressure(context, bar, slot)
                         nk = drum_kick_emphasis_max(context, bar, slot, 2)
                         if i in (0, 4):
-                            if kw < 0.18 and pr > 0.72 and random.random() < 0.22 / kick_lock_m:
+                            if kw < 0.18 and pr > 0.72 and rng.random() < 0.22 / kick_lock_m:
                                 continue
                         else:
                             skip_p = 0.18 + 0.32 * pr - 0.36 * max(kw, nk) - 0.04 * bounce_m
                             skip_p = max(0.0, min(0.62, skip_p * restraint_m))
-                            if random.random() < skip_p:
+                            if rng.random() < skip_p:
                                 continue
                     elif (
                         i not in (0, 4)
                         and slot_pressure(context, bar, slot) > 0.64
-                        and random.random() < 0.42
+                        and rng.random() < 0.42
                     ):
                         continue
                 if use_profile and rest > 0.32:
@@ -1516,16 +1531,17 @@ def generate_bass(
                         avoid_pcs=avoid_pcs,
                         harm_conf=float(harm_conf),
                         prev_pitch=prev_structural_pitch,
+                        rng=rng,
                     )
                 rb_use = rb
                 if _drum_anchor_ctx(context) and i in (0, 4):
                     kw_m = drum_kick_weight(context, bar, min(15, i * 2))
                     rb_use = min(0.98, rb + 0.12 * kw_m * kick_lock_m)
-                if i in (0, 4) and random.random() < rb_use:
+                if i in (0, 4) and rng.random() < rb_use:
                     pitch = r
-                elif random.random() < 0.06 * (0.4 if use_profile and traits else 1.0):
+                elif rng.random() < 0.06 * (0.4 if use_profile and traits else 1.0):
                     pitch = min(pitch + 12, 74)
-                if intent["role"] == "release" and i >= 6 and random.random() < (0.55 * float(intent["cadence_strength"])):
+                if intent["role"] == "release" and i >= 6 and rng.random() < (0.55 * float(intent["cadence_strength"])):
                     pitch = r if i == 6 else f
                 if avoid_pcs and (pitch % 12) in set(avoid_pcs):
                     pitch = r
@@ -1534,9 +1550,9 @@ def generate_bass(
                 ph += sixteenth * 0.1 * float(intent["offbeat_push"]) * (0.35 if i in (0, 4) else 1.0)
                 if context:
                     ph += sixteenth * 0.05 * min(1.0, context.syncopation_score) * (0.4 if i in (0, 4) else 1.0)
-                t0 = bar_t0 + i * eighth + ph + random.uniform(0, 0.012) * spb
+                t0 = bar_t0 + i * eighth + ph + rng.uniform(0, 0.012) * spb
                 t1 = t0 + eighth * dur_j(0.9)
-                vel = max(70, min(100, (88 if i in (0, 4) else 76) + random.randint(-8, 8)))
+                vel = max(70, min(100, (88 if i in (0, 4) else 76) + rng.randint(-8, 8)))
                 emit_note(
                     pitch=pitch,
                     start=t0,
@@ -1586,11 +1602,12 @@ def generate_bass(
                         d_drum=d_drum,
                         kick_lock=kick_lock_m,
                         restraint=restraint_m,
+                        rng=rng,
                     ):
                         continue
                 elif context and s % 4 != 0:
                     pr = slot_pressure(context, bar, s)
-                    if pr > 0.6 and random.random() < 0.28 + pr * 0.32:
+                    if pr > 0.6 and rng.random() < 0.28 + pr * 0.32:
                         continue
                 obr = bias_traits["offbeat_bias"] if bias_traits else 0.0
                 push = sixteenth * 0.02 * obr * (0.4 if s % 4 == 0 else 1.0)
@@ -1601,17 +1618,17 @@ def generate_bass(
                     push += sixteenth * 0.024 * bounce_m * drum_kick_weight(context, bar, s)
                     if player_key == "marcus":
                         push += sixteenth * 0.012 * drum_snare_weight(context, bar, (s + 15) % 16)
-                t0 = bar_t0 + s * sixteenth + push + random.uniform(0, 0.012) * spb
+                t0 = bar_t0 + s * sixteenth + push + rng.uniform(0, 0.012) * spb
                 t1 = t0 + sixteenth * dur_j(0.74)
                 if s % 4 == 0:
                     pitch = r
-                    vel = max(88, min(112, 96 + random.randint(-8, 8)))
+                    vel = max(88, min(112, 96 + rng.randint(-8, 8)))
                     prev_structural_pitch = pitch
                 else:
                     tone_path = tuple(phrase_bar.tone_path) if phrase_bar.tone_path else ()
                     tone_idx = tone_path[k_i % len(tone_path)] if tone_path else (s + salt) % 3
                     pitch = _deg_pitch_map(r, f, t, tone_idx)
-                    if random.random() < p_root_off:
+                    if rng.random() < p_root_off:
                         pitch = r
                     else:
                         pitch = _pick_harmonic_style_pitch(
@@ -1626,8 +1643,9 @@ def generate_bass(
                             avoid_pcs=avoid_pcs,
                             harm_conf=float(harm_conf),
                             prev_pitch=prev_structural_pitch,
+                            rng=rng,
                         )
-                    vel = max(74, min(104, 84 + random.randint(-8, 8)))
+                    vel = max(74, min(104, 84 + rng.randint(-8, 8)))
                 oj_mul = 0.38 * (
                     1.14
                     if _drum_anchor_ctx(context) and player_key == "bootsy" and bias_traits and bias_traits["octave_jump_bias"] > 0.55
@@ -1638,7 +1656,7 @@ def generate_bass(
                     and traits
                     and traits["octave_jump_bias"] > 0.55
                     and s in (8, 12)
-                    and random.random() < traits["octave_jump_bias"] * oj_mul
+                    and rng.random() < traits["octave_jump_bias"] * oj_mul
                 ):
                     if r + 12 <= traits["register_max"]:
                         pitch = r + 12
@@ -1667,7 +1685,7 @@ def generate_bass(
             tpl = (slap_template_idx + bar // 2) % len(event_templates)
             events = event_templates[tpl]
             for s0, dur_s, pitch, vel in events:
-                t0 = bar_t0 + s0 * sixteenth + random.uniform(0, 0.014) * spb
+                t0 = bar_t0 + s0 * sixteenth + rng.uniform(0, 0.014) * spb
                 if _drum_anchor_ctx(context):
                     t0 += sixteenth * 0.05 * drum_kick_weight(context, bar, min(15, s0)) * kick_lock_m
                 t1 = t0 + dur_s * sixteenth * dur_j(0.88)
@@ -1675,7 +1693,7 @@ def generate_bass(
                     t1 = bar_t1 - 1e-4
                 if t1 <= t0:
                     continue
-                v = max(44, min(118, vel + random.randint(-8, 8)))
+                v = max(44, min(118, vel + rng.randint(-8, 8)))
                 emit_note(
                     pitch=int(pitch),
                     start=t0,
@@ -1710,12 +1728,12 @@ def generate_bass(
                         if x in (0, 8):
                             return True
                         if kw > 0.22 or nk > 0.4:
-                            return random.random() < min(0.96, 0.82 + 0.12 * kw * kick_lock_m)
+                            return rng.random() < min(0.96, 0.82 + 0.12 * kw * kick_lock_m)
                         if pr > 0.58 and nk < 0.2:
                             cut = 0.26 + 0.22 * pr + (0.12 if dd_f > 12 else 0.0)
                             cut = min(0.68, cut * restraint_m)
-                            return random.random() > cut
-                        return random.random() < 0.88
+                            return rng.random() > cut
+                        return rng.random() < 0.88
 
                     pat_slots = tuple(x for x in pat_slots if _keep_fusion_slot(x))
                     if not pat_slots:
@@ -1724,7 +1742,7 @@ def generate_bass(
                     pat_slots = tuple(
                         x
                         for x in pat_slots
-                        if slot_pressure(context, bar, x) < 0.66 or x in (0, 8) or random.random() > 0.38
+                        if slot_pressure(context, bar, x) < 0.66 or x in (0, 8) or rng.random() > 0.38
                     )
                     if not pat_slots:
                         pat_slots = (0, 8)
@@ -1757,7 +1775,7 @@ def generate_bass(
                     pitch = r
                     prev_structural_pitch = pitch
                 elif str(phrase_bar.role) == "release" and s >= 12:
-                    pitch = r if random.random() < 0.7 else f
+                    pitch = r if rng.random() < 0.7 else f
                 elif True:
                     pitch = _pick_harmonic_style_pitch(
                         style="fusion",
@@ -1771,9 +1789,10 @@ def generate_bass(
                         avoid_pcs=avoid_pcs,
                         harm_conf=float(harm_conf),
                         prev_pitch=prev_structural_pitch,
+                        rng=rng,
                     )
-                if random.random() < 0.07 * (1.4 if use_profile and traits and traits["fill_activity"] > 0.55 else 1.0):
-                    pitch = min(62, max(34, pitch + random.choice((0, 12, -12))))
+                if rng.random() < 0.07 * (1.4 if use_profile and traits and traits["fill_activity"] > 0.55 else 1.0):
+                    pitch = min(62, max(34, pitch + rng.choice((0, 12, -12))))
                 if avoid_pcs and (pitch % 12) in set(avoid_pcs):
                     pitch = r
                 obf = bias_traits["offbeat_bias"] if bias_traits else 0.0
@@ -1783,13 +1802,13 @@ def generate_bass(
                     push_f += sixteenth * 0.02 * bounce_m * drum_kick_weight(context, bar, s)
                     if player_key == "marcus":
                         push_f += sixteenth * 0.01 * drum_snare_weight(context, bar, (s + 14) % 16)
-                t0 = bar_t0 + s * sixteenth + push_f + random.uniform(0, 0.014) * spb
+                t0 = bar_t0 + s * sixteenth + push_f + rng.uniform(0, 0.014) * spb
                 t1 = t0 + sixteenth * dur_j(0.72)
                 if t1 > bar_t1:
                     t1 = bar_t1 - 1e-4
                 if t1 <= t0:
                     continue
-                vel = max(76, min(104, (92 if s % 4 == 0 else 80) + random.randint(-8, 8)))
+                vel = max(76, min(104, (92 if s % 4 == 0 else 80) + rng.randint(-8, 8)))
                 emit_note(
                     pitch=pitch,
                     start=t0,

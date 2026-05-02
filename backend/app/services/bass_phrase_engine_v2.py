@@ -131,13 +131,14 @@ def _pick_pitch(
     passing_pcs: list[int],
     avoid_pcs: list[int],
     conf: float,
+    rng: random.Random | object = random,
 ) -> int:
     strong = slot % 4 == 0
     if strong or role == "anchor":
         return _pc_to_bass_register(root_pc, octave=2)
-    if passing_pcs and random.random() < min(0.5, 0.15 + 0.5 * conf):
-        return _pc_to_bass_register(random.choice(passing_pcs), octave=2)
-    pick_pc = random.choice(stable_pcs or [root_pc])
+    if passing_pcs and rng.random() < min(0.5, 0.15 + 0.5 * conf):
+        return _pc_to_bass_register(rng.choice(passing_pcs), octave=2)
+    pick_pc = rng.choice(stable_pcs or [root_pc])
     if pick_pc in avoid_pcs:
         pick_pc = root_pc
     return _pc_to_bass_register(pick_pc, octave=2)
@@ -154,7 +155,9 @@ def generate_bass_phrase_v2(
     bass_player: str | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
+    seed: int | None = None,
 ) -> tuple[bytes, str]:
+    rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
     player = normalize_bass_player(bass_player)
     bi = normalize_bass_instrument(bass_instrument)
@@ -178,7 +181,7 @@ def generate_bass_phrase_v2(
                 pressure = slot_pressure(context, bar, slot)
                 kick = drum_kick_weight(context, bar, slot) if context.anchor_lane == "drums" else 0.0
                 # Rest-space rule: avoid busy non-kick slots.
-                if pressure > 0.72 and kick < 0.18 and slot % 4 != 0 and random.random() < 0.45:
+                if pressure > 0.72 and kick < 0.18 and slot % 4 != 0 and rng.random() < 0.45:
                     continue
             pitch = _pick_pitch(
                 slot,
@@ -188,11 +191,12 @@ def generate_bass_phrase_v2(
                 passing_pcs=passing_pcs,
                 avoid_pcs=avoid_pcs,
                 conf=conf,
+                rng=rng,
             )
             start = bar_t0 + slot * sixteenth
             if context is not None and context.anchor_lane == "drums":
                 start += sixteenth * 0.05 * drum_kick_weight(context, bar, slot)
-            start += random.uniform(0.0, 0.008) * spb
+            start += rng.uniform(0.0, 0.008) * spb
             dur = sixteenth * (1.2 if slot % 4 == 0 else 0.85)
             if role == "release":
                 dur *= 0.9
@@ -206,7 +210,7 @@ def generate_bass_phrase_v2(
                 vel -= 5
             inst.notes.append(
                 pretty_midi.Note(
-                    velocity=max(54, min(112, vel + random.randint(-6, 6))),
+                    velocity=max(54, min(112, vel + rng.randint(-6, 6))),
                     pitch=pitch,
                     start=start,
                     end=end,

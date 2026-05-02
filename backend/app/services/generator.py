@@ -55,6 +55,7 @@ def generate_bass(
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
     conditioning: UnifiedConditioning | None = None,
+    seed: int | None = None,
 ) -> tuple[bytes, str]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
     return generate_bass_impl(
@@ -70,6 +71,7 @@ def generate_bass(
         session_preset=session_preset,
         context=context,
         conditioning=conditioning,
+        seed=seed,
     )
 
 
