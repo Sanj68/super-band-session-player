@@ -11,7 +11,7 @@ preserves pitch/velocity/start/end exactly with no articulation behavior.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal
 
 import pretty_midi
@@ -81,9 +81,75 @@ def performance_note_to_pretty_midi_note(note: BassPerformanceNote) -> pretty_mi
     )
 
 
+def infer_bass_articulations(
+    notes: tuple[BassPerformanceNote, ...],
+    *,
+    tempo: int,
+    style: str | None = None,
+    source: BassPerformanceSource | None = None,
+) -> tuple[BassPerformanceNote, ...]:
+    """Return copies with conservative metadata-only articulation labels.
+
+    This does not render articulations and must not change any musical fields.
+    Step 3 only infers ``grace`` and ``ghost``; all other notes remain normal.
+    """
+    if not notes:
+        return notes
+    _ = style, source
+    sixteenth = 60.0 / float(max(1, tempo)) / 4.0
+    out: list[BassPerformanceNote] = []
+    ordered = tuple(sorted(enumerate(notes), key=lambda item: (item[1].start, item[1].pitch, item[1].end)))
+    next_by_original_index: dict[int, BassPerformanceNote | None] = {}
+    for pos, (orig_idx, _note) in enumerate(ordered):
+        next_by_original_index[orig_idx] = ordered[pos + 1][1] if pos + 1 < len(ordered) else None
+
+    for idx, note in enumerate(notes):
+        articulation: BassArticulation = "normal"
+        dur = float(note.end) - float(note.start)
+        next_note = next_by_original_index.get(idx)
+        if _is_grace_note(note, next_note, sixteenth=sixteenth):
+            articulation = "grace"
+        elif _is_ghost_note(note, sixteenth=sixteenth):
+            articulation = "ghost"
+        out.append(replace(note, articulation=articulation))
+    return tuple(out)
+
+
+def _is_grace_note(
+    note: BassPerformanceNote,
+    next_note: BassPerformanceNote | None,
+    *,
+    sixteenth: float,
+) -> bool:
+    if next_note is None:
+        return False
+    dur = float(note.end) - float(note.start)
+    gap = float(next_note.start) - float(note.end)
+    pitch_distance = abs(int(next_note.pitch) - int(note.pitch))
+    return (
+        dur <= min(0.09, sixteenth * 0.5)
+        and 0.0 <= gap <= min(0.12, sixteenth * 0.85)
+        and 1 <= pitch_distance <= 3
+        and int(note.velocity) < int(next_note.velocity)
+    )
+
+
+def _is_ghost_note(note: BassPerformanceNote, *, sixteenth: float) -> bool:
+    dur = float(note.end) - float(note.start)
+    slot = int(note.slot_index) if note.slot_index is not None else None
+    role = str(note.role or "")
+    strong_anchor = role == "anchor" and slot in (0, 8)
+    structural_beat = slot in (0, 4, 8, 12)
+    velocity = int(note.velocity)
+    if strong_anchor:
+        return False
+    return velocity <= 62 and dur <= max(0.08, sixteenth * 0.95) and not (structural_beat and velocity > 52)
+
+
 __all__ = [
     "BassArticulation",
     "BassPerformanceSource",
     "BassPerformanceNote",
+    "infer_bass_articulations",
     "performance_note_to_pretty_midi_note",
 ]

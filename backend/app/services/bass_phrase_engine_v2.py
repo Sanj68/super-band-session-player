@@ -7,7 +7,7 @@ import random
 
 import pretty_midi
 
-from app.services.bass_performance import BassPerformanceNote
+from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.session_context import (
     SessionAnchorContext,
     drum_kick_weight,
@@ -245,5 +245,13 @@ def generate_bass_phrase_v2(
         "kick-aware phrase roles, rest-space gating, and bar-level harmonic targets."
     )
     if return_performance_notes:
+        perf_notes = list(
+            infer_bass_articulations(
+                tuple(perf_notes),
+                tempo=tempo,
+                style=style,
+                source="phrase_v2",
+            )
+        )
         return buf.getvalue(), preview, tuple(perf_notes)
     return buf.getvalue(), preview

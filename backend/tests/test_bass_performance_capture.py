@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from app.services import generator
 from app.services.bass_generator import generate_bass
-from app.services.bass_performance import BassPerformanceNote
+from app.services.bass_performance import BassPerformanceNote, _VALID_ARTICULATIONS
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.midi_note_extract import extract_lane_notes
 
@@ -160,16 +160,16 @@ def test_baseline_routed_via_generate_bass_engine_phrase_v2_keeps_source() -> No
     assert all(p.source == "phrase_v2" for p in perf)
 
 
-def test_articulation_is_always_normal_in_step2_baseline() -> None:
+def test_articulation_vocabulary_is_valid_baseline() -> None:
     _, _, perf = generate_bass(seed=12345, return_performance_notes=True, **_BASELINE_KW)
     assert perf
-    assert {p.articulation for p in perf} == {"normal"}
+    assert {p.articulation for p in perf}.issubset(_VALID_ARTICULATIONS)
 
 
-def test_articulation_is_always_normal_in_step2_phrase_v2() -> None:
+def test_articulation_vocabulary_is_valid_phrase_v2() -> None:
     _, _, perf = generate_bass_phrase_v2(seed=4242, return_performance_notes=True, **_PHRASE_V2_KW)
     assert perf
-    assert {p.articulation for p in perf} == {"normal"}
+    assert {p.articulation for p in perf}.issubset(_VALID_ARTICULATIONS)
 
 
 def test_baseline_bar_and_slot_indexes_in_range() -> None:

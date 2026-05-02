@@ -14,7 +14,7 @@ from app.services.anchor_lane_roles import (
     merge_bass_profile,
 )
 from app.services.bass_articulation import ghost_eligibility, shape_note
-from app.services.bass_performance import BassPerformanceNote
+from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
 from app.services.conditioning import UnifiedConditioning
@@ -1861,6 +1861,14 @@ def generate_bass(
                     confidence=None,
                 )
             )
+        perf_notes = list(
+            infer_bass_articulations(
+                tuple(perf_notes),
+                tempo=tempo,
+                style=style,
+                source="baseline",
+            )
+        )
     preview = _preview(
         style,
         key,
