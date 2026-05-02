@@ -561,6 +561,14 @@ class RegenerateLaneBody(BaseModel):
     pass
 
 
+class RegenerateBassBarsBody(BaseModel):
+    """Request body for POST /api/sessions/{id}/lanes/bass/regenerate-bars."""
+
+    bar_start: int = Field(description="Inclusive zero-based start bar.")
+    bar_end: int = Field(description="Exclusive zero-based end bar.")
+    seed: int | None = Field(default=None, description="Optional seed for repeatable bar regeneration.")
+
+
 class LaneLocksPatch(BaseModel):
     """Partial update of per-lane lock flags (PATCH /lane-locks). At least one key required."""
 

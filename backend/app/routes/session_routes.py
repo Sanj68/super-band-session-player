@@ -27,6 +27,7 @@ from app.models.session import (
     LaneState,
     ReferenceAudioState,
     RegenerateLaneResult,
+    RegenerateBassBarsBody,
     RegenerateSelectedBody,
     SessionCreate,
     SessionCreated,
@@ -36,6 +37,7 @@ from app.models.session import (
 )
 from app.services import generator
 from app.services import bass_candidate_store
+from app.services.bass_bar_splice import splice_bass_bars
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
 from app.services.audio_source_analysis import analyze_reference_audio
 from app.services.bass_quality import analyze_bass_take
@@ -821,6 +823,65 @@ def regenerate_lane(session_id: str, lane: LaneName) -> RegenerateLaneResult:
     s = _get_session_or_404(session_id)
     _regenerate_lane_on_stored_session(s, lane, context=_context_for_lane_regeneration(s, lane))
     return RegenerateLaneResult(session=_to_state(s, message=f"Lane {lane.value} regenerated."), lane=lane)
+
+
+@router.post("/{session_id}/lanes/bass/regenerate-bars", response_model=SessionState)
+def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> SessionState:
+    s = _get_session_or_404(session_id)
+    if body.bar_start < 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_bar_range", "message": "bar_start must be greater than or equal to 0."},
+        )
+    if body.bar_end <= body.bar_start:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_bar_range", "message": "bar_end must be greater than bar_start."},
+        )
+    if body.bar_end > s.bar_count:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_bar_range", "message": "bar_end must be less than or equal to session.bar_count."},
+        )
+    if not s.bass_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "bass_lane_missing", "message": "Generate the bass lane before regenerating selected bars."},
+        )
+
+    seed = int(body.seed) if body.seed is not None else _new_bass_seed()
+    ctx = _context_for_lane_regeneration(s, LaneName.bass)
+    cond = _conditioning_for_generation(s, context=ctx)
+    replacement_bytes, replacement_preview = generator.generate_bass(
+        tempo=s.tempo,
+        bar_count=s.bar_count,
+        key=s.key,
+        scale=s.scale,
+        bass_style=s.bass_style,
+        bass_instrument=s.bass_instrument,
+        bass_player=s.bass_player,
+        bass_engine=s.bass_engine,
+        chord_progression=s.chord_progression,
+        session_preset=s.session_preset,
+        context=ctx,
+        conditioning=cond,
+        seed=seed,
+    )
+    s.bass_bytes = splice_bass_bars(
+        existing_midi=s.bass_bytes,
+        replacement_midi=replacement_bytes,
+        tempo=s.tempo,
+        bar_start=body.bar_start,
+        bar_end=body.bar_end,
+    )
+    s.bass_preview = replacement_preview
+    s.bass_seed = seed
+    s.current_bass_candidate_run_id = None
+    s.current_bass_candidate_take_id = None
+    return _to_state(
+        s,
+        message=f"Regenerated bass bars {body.bar_start}-{body.bar_end - 1}.",
+    )
 
 
 def _render_bass_take_with_seed(
