@@ -509,6 +509,10 @@ class SessionState(BaseModel):
         default="baseline",
         description="Active bass engine mode (baseline or phrase_v2).",
     )
+    bass_seed: int | None = Field(
+        default=None,
+        description="Seed used to render the current bass lane, when generated.",
+    )
     drum_player: str | None = Field(
         default=None,
         description="Optional drum player profile id (stubblefield, questlove, dilla), or null when unset.",

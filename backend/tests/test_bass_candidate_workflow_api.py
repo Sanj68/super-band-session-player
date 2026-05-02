@@ -115,9 +115,88 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert state["id"] == session_id
     assert state["current_bass_candidate_run_id"] == run["run_id"]
     assert state["current_bass_candidate_take_id"] == first_take["take_id"]
+    assert state["bass_seed"] == first_take["seed"]
     assert state["lanes"]["bass"]["generated"] is True
     assert isinstance(state["lanes"]["bass"]["notes"], list)
     assert len(state["lanes"]["bass"]["notes"]) > 0
+
+
+def test_session_state_tracks_bass_seed_for_generation_and_regeneration(tmp_path: Path, monkeypatch) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    seeds = iter([10101, 20202])
+    monkeypatch.setattr(session_routes, "_new_bass_seed", lambda: next(seeds))
+
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 112, "key": "C", "scale": "major", "bar_count": 4},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+    assert created.json()["session"]["bass_seed"] is None
+
+    generated = client.post(f"/api/sessions/{session_id}/generate")
+    assert generated.status_code == 200
+    first_seed = generated.json()["session"]["bass_seed"]
+    assert first_seed == 10101
+
+    regenerated = client.post(f"/api/sessions/{session_id}/lanes/bass/regenerate")
+    assert regenerated.status_code == 200
+    second_seed = regenerated.json()["session"]["bass_seed"]
+    assert second_seed == 20202
+    assert second_seed != first_seed
+
+
+def test_bass_candidate_generation_is_deterministic_for_same_take_seed(tmp_path: Path) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 100,
+            "key": "D",
+            "scale": "minor",
+            "bar_count": 4,
+            "bass_style": "supportive",
+            "bass_engine": "baseline",
+        },
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+
+    first = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 60606},
+    )
+    second = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 60606},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_run = first.json()
+    second_run = second.json()
+    assert [t["seed"] for t in first_run["takes"]] == [t["seed"] for t in second_run["takes"]]
+
+    first_take = first_run["takes"][0]
+    second_take = second_run["takes"][0]
+    first_notes = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{first_run['run_id']}/{first_take['take_id']}/notes"
+    )
+    second_notes = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{second_run['run_id']}/{second_take['take_id']}/notes"
+    )
+    assert first_notes.status_code == 200
+    assert second_notes.status_code == 200
+    assert first_notes.json() == second_notes.json()
 
 
 def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:

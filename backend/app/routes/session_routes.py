@@ -70,6 +70,10 @@ _REFERENCE_AUDIO_ROOT = Path(__file__).resolve().parents[2] / "data" / "referenc
 _ALLOWED_REFERENCE_EXTS: Final[set[str]] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
 
 
+def _new_bass_seed() -> int:
+    return random.randint(1, 2_000_000_000)
+
+
 @dataclass
 class StoredSession:
     id: str
@@ -88,6 +92,7 @@ class StoredSession:
     bass_instrument: str = _DEFAULT_BASS_INSTRUMENT
     bass_player: str | None = None
     bass_engine: str = "baseline"
+    bass_seed: int | None = None
     drum_player: str | None = None
     chord_instrument: str = _DEFAULT_CHORD_INSTRUMENT
     chord_player: str | None = None
@@ -214,6 +219,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
+        bass_seed=s.bass_seed,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
         chord_player=s.chord_player,
@@ -265,6 +271,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_instrument=src.bass_instrument,
         bass_player=src.bass_player,
         bass_engine=src.bass_engine,
+        bass_seed=src.bass_seed,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
         chord_player=src.chord_player,
@@ -603,6 +610,7 @@ def _regenerate_lane_on_stored_session(
         s.drum_bytes = d_bytes
         s.drum_preview = d_prev
     elif lane == LaneName.bass:
+        seed = _new_bass_seed()
         b_bytes, b_prev = generator.generate_bass(
             tempo=s.tempo,
             bar_count=s.bar_count,
@@ -616,9 +624,11 @@ def _regenerate_lane_on_stored_session(
             session_preset=s.session_preset,
             context=context,
             conditioning=cond,
+            seed=seed,
         )
         s.bass_bytes = b_bytes
         s.bass_preview = b_prev
+        s.bass_seed = seed
         s.current_bass_candidate_run_id = None
         s.current_bass_candidate_take_id = None
     elif lane == LaneName.chords:
@@ -820,25 +830,21 @@ def _render_bass_take_with_seed(
     conditioning: UnifiedConditioning | None,
     context: SessionAnchorContext | None,
 ) -> tuple[bytes, str]:
-    state = random.getstate()
-    random.seed(int(seed))
-    try:
-        return generator.generate_bass(
-            tempo=s.tempo,
-            bar_count=s.bar_count,
-            key=s.key,
-            scale=s.scale,
-            bass_style=s.bass_style,
-            bass_instrument=s.bass_instrument,
-            bass_player=s.bass_player,
-            bass_engine=s.bass_engine,
-            chord_progression=s.chord_progression,
-            session_preset=s.session_preset,
-            context=context,
-            conditioning=conditioning,
-        )
-    finally:
-        random.setstate(state)
+    return generator.generate_bass(
+        tempo=s.tempo,
+        bar_count=s.bar_count,
+        key=s.key,
+        scale=s.scale,
+        bass_style=s.bass_style,
+        bass_instrument=s.bass_instrument,
+        bass_player=s.bass_player,
+        bass_engine=s.bass_engine,
+        chord_progression=s.chord_progression,
+        session_preset=s.session_preset,
+        context=context,
+        conditioning=conditioning,
+        seed=int(seed),
+    )
 
 
 def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
@@ -985,7 +991,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     s = _get_session_or_404(session_id)
     ctx = build_session_context(s)
     cond = _conditioning_for_generation(s, context=ctx)
-    base_seed = int(body.seed) if body.seed is not None else random.randint(1, 2_000_000_000)
+    base_seed = int(body.seed) if body.seed is not None else _new_bass_seed()
     run_id = f"cand_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
     created_at = datetime.now(timezone.utc).isoformat()
 
@@ -1217,6 +1223,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
     data = _take_bytes_or_400(take)
     s.bass_bytes = bytes(data)
     s.bass_preview = str(take.get("preview", "") or f"Promoted candidate take {take_id}.")
+    s.bass_seed = int(take["seed"]) if take.get("seed") is not None else None
     s.current_bass_candidate_run_id = str(run_id)
     s.current_bass_candidate_take_id = str(take_id)
     return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
