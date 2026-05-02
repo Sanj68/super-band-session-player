@@ -6,6 +6,7 @@ import io
 import pretty_midi
 
 from app.services.bass_generator import generate_bass as generate_bass_impl
+from app.services.bass_performance import BassPerformanceNote
 from app.services.chord_generator import generate_chords as generate_chords_impl
 from app.services.conditioning import UnifiedConditioning
 from app.services.drum_generator import generate_drums as generate_drums_impl
@@ -56,7 +57,8 @@ def generate_bass(
     context: SessionAnchorContext | None = None,
     conditioning: UnifiedConditioning | None = None,
     seed: int | None = None,
-) -> tuple[bytes, str]:
+    return_performance_notes: bool = False,
+) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
     return generate_bass_impl(
         tempo=tempo,
@@ -72,6 +74,7 @@ def generate_bass(
         context=context,
         conditioning=conditioning,
         seed=seed,
+        return_performance_notes=return_performance_notes,
     )
 
 
