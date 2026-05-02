@@ -6,6 +6,7 @@ import {
   listBassCandidates,
   promoteBassCandidate,
   referenceAudioUrl,
+  regenerateBassBars,
 } from "../api/client.js";
 import PianoRollPreview from "./PianoRollPreview.jsx";
 
@@ -21,6 +22,9 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const [candidateTakeCount, setCandidateTakeCount] = useState(4);
   const [candidateSeed, setCandidateSeed] = useState("");
   const [candidateClipId, setCandidateClipId] = useState("");
+  const [adjustBarStart, setAdjustBarStart] = useState("2");
+  const [adjustBarEnd, setAdjustBarEnd] = useState("4");
+  const [adjustSeed, setAdjustSeed] = useState("");
   const [bassCandidateRuns, setBassCandidateRuns] = useState([]);
   const [openTakeRolls, setOpenTakeRolls] = useState({});
   const [takeNotesByKey, setTakeNotesByKey] = useState({});
@@ -607,6 +611,40 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     [session?.id, refreshBassCandidates, setBusy, setError, setSession, setStatus],
   );
 
+  const onAdjustSelectedBassBars = useCallback(async () => {
+    if (!session?.id) return;
+    const barStart = Number(adjustBarStart);
+    const barEnd = Number(adjustBarEnd);
+    if (!Number.isInteger(barStart) || !Number.isInteger(barEnd)) {
+      setError("Start bar and end bar must be whole numbers.");
+      return;
+    }
+    const body = {
+      bar_start: barStart,
+      bar_end: barEnd,
+    };
+    if (adjustSeed.trim()) {
+      const seed = Number(adjustSeed.trim());
+      if (!Number.isInteger(seed)) {
+        setError("Variation seed must be a whole number.");
+        return;
+      }
+      body.seed = seed;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await regenerateBassBars(session.id, body);
+      setSession(updated);
+      setStatus("Bars regenerated.");
+    } catch (e) {
+      const detail = e?.detail?.detail;
+      setError(detail?.message || e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [session?.id, adjustBarStart, adjustBarEnd, adjustSeed, setBusy, setError, setSession, setStatus]);
+
   return (
     <details
       style={{
@@ -646,6 +684,56 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
           <button type="button" onClick={refreshBassCandidates} disabled={busy || !session?.id}>
             Refresh Candidate Runs
           </button>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gap: 8,
+            padding: "0.55rem 0.65rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: 8,
+            background: "#f8fafc",
+          }}
+        >
+          <strong style={{ fontSize: 13, color: "#334155" }}>Adjust Selected Bass Bars</strong>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
+            <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+              Start bar
+              <input
+                type="number"
+                min={0}
+                max={Math.max(0, (session?.bar_count ?? 1) - 1)}
+                value={adjustBarStart}
+                onChange={(e) => setAdjustBarStart(e.target.value)}
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+              End bar
+              <input
+                type="number"
+                min={1}
+                max={session?.bar_count ?? 1}
+                value={adjustBarEnd}
+                onChange={(e) => setAdjustBarEnd(e.target.value)}
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+              Variation seed
+              <input value={adjustSeed} onChange={(e) => setAdjustSeed(e.target.value)} placeholder="fresh" />
+            </label>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={onAdjustSelectedBassBars}
+              disabled={busy || !session?.id || !session?.lanes?.bass?.generated}
+            >
+              Regenerate Selected Bars
+            </button>
+            <span style={{ fontSize: 12, color: "#64748b" }}>
+              Bars are zero-based; end bar is not included.
+            </span>
+          </div>
         </div>
         {session?.reference_audio ? (
           <div

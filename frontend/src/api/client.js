@@ -86,6 +86,16 @@ export async function regenerateLane(sessionId, lane) {
   return res.json();
 }
 
+export async function regenerateBassBars(sessionId, body) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/lanes/bass/regenerate-bars`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
 export async function generateBassCandidates(sessionId, body) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/bass-candidates`, {
     method: "POST",
