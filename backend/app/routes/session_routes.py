@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import random
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+import pretty_midi
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
@@ -38,6 +40,8 @@ from app.models.session import (
 from app.services import generator
 from app.services import bass_candidate_store
 from app.services.bass_bar_splice import splice_bass_bars
+from app.services.bass_performance import BassPerformanceNote
+from app.services.bass_performance_render import render_performance_bass_midi
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
 from app.services.audio_source_analysis import analyze_reference_audio
 from app.services.bass_quality import analyze_bass_take
@@ -101,6 +105,7 @@ class StoredSession:
     drum_kit: str = _DEFAULT_DRUM_KIT
     drum_bytes: bytes | None = None
     bass_bytes: bytes | None = None
+    bass_performance_bytes: bytes | None = None
     chords_bytes: bytes | None = None
     lead_bytes: bytes | None = None
     drum_preview: str = ""
@@ -254,6 +259,30 @@ def _copy_midi_bytes(data: bytes | None) -> bytes | None:
     return bytes(bytearray(data))
 
 
+_DEFAULT_BASS_PROGRAM = 33  # Electric Bass (finger), GM
+
+
+def _bass_program_from_clean_bytes(clean_bytes: bytes) -> int:
+    try:
+        pm = pretty_midi.PrettyMIDI(io.BytesIO(clean_bytes))
+    except Exception:
+        return _DEFAULT_BASS_PROGRAM
+    for inst in pm.instruments:
+        if not inst.is_drum:
+            return int(inst.program)
+    return _DEFAULT_BASS_PROGRAM
+
+
+def _render_bass_performance_bytes(
+    *,
+    clean_bytes: bytes,
+    perf_notes: tuple[BassPerformanceNote, ...],
+    tempo: int,
+) -> bytes:
+    program = _bass_program_from_clean_bytes(clean_bytes)
+    return render_performance_bass_midi(perf_notes, tempo=int(tempo), program=program)
+
+
 def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
     """Deep-copy settings and lane MIDI bytes/previews into a new StoredSession."""
     return StoredSession(
@@ -280,6 +309,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         drum_kit=src.drum_kit,
         drum_bytes=_copy_midi_bytes(src.drum_bytes),
         bass_bytes=_copy_midi_bytes(src.bass_bytes),
+        bass_performance_bytes=_copy_midi_bytes(src.bass_performance_bytes),
         chords_bytes=_copy_midi_bytes(src.chords_bytes),
         lead_bytes=_copy_midi_bytes(src.lead_bytes),
         drum_preview=src.drum_preview,
@@ -613,7 +643,7 @@ def _regenerate_lane_on_stored_session(
         s.drum_preview = d_prev
     elif lane == LaneName.bass:
         seed = _new_bass_seed()
-        b_bytes, b_prev = generator.generate_bass(
+        b_bytes, b_prev, perf_notes = generator.generate_bass(
             tempo=s.tempo,
             bar_count=s.bar_count,
             key=s.key,
@@ -627,10 +657,16 @@ def _regenerate_lane_on_stored_session(
             context=context,
             conditioning=cond,
             seed=seed,
+            return_performance_notes=True,
         )
         s.bass_bytes = b_bytes
         s.bass_preview = b_prev
         s.bass_seed = seed
+        s.bass_performance_bytes = _render_bass_performance_bytes(
+            clean_bytes=b_bytes,
+            perf_notes=perf_notes,
+            tempo=s.tempo,
+        )
         s.current_bass_candidate_run_id = None
         s.current_bass_candidate_take_id = None
     elif lane == LaneName.chords:
@@ -874,6 +910,10 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         bar_start=body.bar_start,
         bar_end=body.bar_end,
     )
+    # Performance MIDI is rendered from a coherent full-take articulation
+    # plan; partial-bar splices invalidate that plan. Force regeneration of
+    # the full lane (or candidate promotion) to recover performance MIDI.
+    s.bass_performance_bytes = None
     s.bass_preview = replacement_preview
     s.bass_seed = seed
     s.current_bass_candidate_run_id = None
@@ -1287,12 +1327,72 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
     s.bass_seed = int(take["seed"]) if take.get("seed") is not None else None
     s.current_bass_candidate_run_id = str(run_id)
     s.current_bass_candidate_take_id = str(take_id)
+    # Re-render performance MIDI from the candidate seed so the promoted
+    # lane has an audition path. Candidate clean bytes remain authoritative
+    # in s.bass_bytes; the performance overlay is a parallel render derived
+    # from the same seed under current session settings.
+    s.bass_performance_bytes = None
+    if s.bass_seed is not None:
+        ctx = _context_for_lane_regeneration(s, LaneName.bass)
+        cond = _conditioning_for_generation(s, context=ctx)
+        try:
+            _, _, perf_notes = generator.generate_bass(
+                tempo=s.tempo,
+                bar_count=s.bar_count,
+                key=s.key,
+                scale=s.scale,
+                bass_style=s.bass_style,
+                bass_instrument=s.bass_instrument,
+                bass_player=s.bass_player,
+                bass_engine=s.bass_engine,
+                chord_progression=s.chord_progression,
+                session_preset=s.session_preset,
+                context=ctx,
+                conditioning=cond,
+                seed=int(s.bass_seed),
+                return_performance_notes=True,
+            )
+            s.bass_performance_bytes = _render_bass_performance_bytes(
+                clean_bytes=s.bass_bytes,
+                perf_notes=perf_notes,
+                tempo=s.tempo,
+            )
+        except Exception:
+            # If re-render fails for any reason, leave performance bytes
+            # absent rather than poison the promotion. Clean MIDI is
+            # unaffected.
+            s.bass_performance_bytes = None
     return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
 
 
 @router.get("/{session_id}/midi/{lane}")
-def download_lane_midi(session_id: str, lane: LaneName):
+def download_lane_midi(session_id: str, lane: LaneName, mode: str | None = None):
     s = _get_session_or_404(session_id)
+    if mode is not None and mode not in ("clean", "performance"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_mode", "message": "mode must be 'clean' or 'performance'."},
+        )
+    if mode == "performance":
+        if lane != LaneName.bass:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "performance_midi_unsupported_lane",
+                    "lane": lane.value,
+                    "message": "Performance MIDI is only available for the bass lane in v0.5.",
+                },
+            )
+        if not s.bass_performance_bytes:
+            reason = "invalidated" if s.bass_bytes else "missing"
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "performance_midi_unavailable", "reason": reason},
+            )
+        return lane_midi_response(
+            s.bass_performance_bytes,
+            f"{session_id}_bass_performance.mid",
+        )
     if lane == LaneName.drums:
         data, name = s.drum_bytes, f"{session_id}_drums.mid"
     elif lane == LaneName.bass:

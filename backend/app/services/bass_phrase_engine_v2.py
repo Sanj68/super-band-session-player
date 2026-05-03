@@ -7,6 +7,7 @@ import random
 
 import pretty_midi
 
+from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.session_context import (
     SessionAnchorContext,
     drum_kick_weight,
@@ -156,7 +157,8 @@ def generate_bass_phrase_v2(
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
     seed: int | None = None,
-) -> tuple[bytes, str]:
+    return_performance_notes: bool = False,
+) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
     player = normalize_bass_player(bass_player)
@@ -167,6 +169,7 @@ def generate_bass_phrase_v2(
     sixteenth = spb / 4.0
     bar_anchor = float(context.bar_start_anchor_sec) if context is not None else 0.0
     role_span = 4 if bar_count >= 4 else 2
+    perf_notes: list[BassPerformanceNote] = []
 
     for bar in range(max(1, bar_count)):
         role = _bar_role(bar, role_span)
@@ -208,14 +211,30 @@ def generate_bass_phrase_v2(
                 vel += 4
             elif role == "release":
                 vel -= 5
+            final_vel = max(54, min(112, vel + rng.randint(-6, 6)))
             inst.notes.append(
                 pretty_midi.Note(
-                    velocity=max(54, min(112, vel + rng.randint(-6, 6))),
+                    velocity=final_vel,
                     pitch=pitch,
                     start=start,
                     end=end,
                 )
             )
+            if return_performance_notes:
+                perf_notes.append(
+                    BassPerformanceNote(
+                        pitch=int(pitch),
+                        velocity=int(final_vel),
+                        start=float(start),
+                        end=float(end),
+                        articulation="normal",
+                        role=str(role),
+                        bar_index=int(bar),
+                        slot_index=int(slot),
+                        source="phrase_v2",
+                        confidence=None,
+                    )
+                )
 
     pm.instruments.append(inst)
     buf = io.BytesIO()
@@ -225,4 +244,14 @@ def generate_bass_phrase_v2(
         f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, {bar_count} bar(s), {tempo} BPM — "
         "kick-aware phrase roles, rest-space gating, and bar-level harmonic targets."
     )
+    if return_performance_notes:
+        perf_notes = list(
+            infer_bass_articulations(
+                tuple(perf_notes),
+                tempo=tempo,
+                style=style,
+                source="phrase_v2",
+            )
+        )
+        return buf.getvalue(), preview, tuple(perf_notes)
     return buf.getvalue(), preview

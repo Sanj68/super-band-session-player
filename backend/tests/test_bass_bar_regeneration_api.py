@@ -117,8 +117,9 @@ def test_regenerate_bass_bars_requires_existing_bass_bytes() -> None:
     assert res.json()["detail"]["error"] == "bass_lane_missing"
 
 
-def test_regenerate_bass_bars_changes_only_selected_bars_and_updates_seed() -> None:
+def test_regenerate_bass_bars_changes_only_selected_bars_and_updates_seed(monkeypatch) -> None:
     client = _client()
+    monkeypatch.setattr(session_routes, "_new_bass_seed", lambda: 33333)
     session_id = _create_session(client)
     original = _generate_session_bass(client, session_id)
     original_notes = original["lanes"]["bass"]["notes"]

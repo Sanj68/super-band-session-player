@@ -14,6 +14,7 @@ from app.services.anchor_lane_roles import (
     merge_bass_profile,
 )
 from app.services.bass_articulation import ghost_eligibility, shape_note
+from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
 from app.services.conditioning import UnifiedConditioning
@@ -926,7 +927,8 @@ def generate_bass(
     context: SessionAnchorContext | None = None,
     conditioning: UnifiedConditioning | None = None,
     seed: int | None = None,
-) -> tuple[bytes, str]:
+    return_performance_notes: bool = False,
+) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
     if engine_mode == "phrase_v2":
@@ -941,6 +943,7 @@ def generate_bass(
             session_preset=session_preset,
             context=context,
             seed=seed,
+            return_performance_notes=return_performance_notes,
         )
 
     soul_preset = (session_preset or "").strip().lower() == "rare_groove_soul"
@@ -954,7 +957,6 @@ def generate_bass(
         has_midi_anchor=context is not None,
     )
     reference_guidance_applied = False
-
     bi = normalize_bass_instrument(bass_instrument)
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
     program = bass_midi_program(bi, style)
@@ -1831,6 +1833,42 @@ def generate_bass(
     pm.instruments.append(inst)
     buf = io.BytesIO()
     pm.write(buf)
+    midi_bytes = buf.getvalue()
+    if return_performance_notes:
+        final_pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+        final_notes = sorted(
+            (n for final_inst in final_pm.instruments for n in final_inst.notes),
+            key=lambda n: (float(n.start), int(n.pitch), float(n.end), int(n.velocity)),
+        )
+        perf_notes = []
+        for note in final_notes:
+            rel_start = max(0.0, float(note.start) - float(bar_anchor))
+            bar_idx = max(0, min(max(1, bar_count) - 1, int(rel_start // (4.0 * spb))))
+            bar_t0 = float(bar_anchor) + (bar_idx * 4.0 * spb)
+            slot_idx = max(0, min(15, int(round((float(note.start) - bar_t0) / sixteenth))))
+            phrase_bar = phrase_plan[bar_idx] if bar_idx < len(phrase_plan) else phrase_plan[-1]
+            perf_notes.append(
+                BassPerformanceNote(
+                    pitch=int(note.pitch),
+                    velocity=int(note.velocity),
+                    start=float(note.start),
+                    end=float(note.end),
+                    articulation="normal",
+                    role=str(phrase_bar.role),
+                    bar_index=int(bar_idx),
+                    slot_index=int(slot_idx),
+                    source="baseline",
+                    confidence=None,
+                )
+            )
+        perf_notes = list(
+            infer_bass_articulations(
+                tuple(perf_notes),
+                tempo=tempo,
+                style=style,
+                source="baseline",
+            )
+        )
     preview = _preview(
         style,
         key,
@@ -1844,4 +1882,6 @@ def generate_bass(
     )
     if reference_guidance_applied and conditioning is not None:
         preview += f" (ref groove: {conditioning.groove_profile.pocket_feel}, conf {conditioning.groove_profile.confidence:.2f})"
-    return buf.getvalue(), preview
+    if return_performance_notes:
+        return midi_bytes, preview, tuple(perf_notes)
+    return midi_bytes, preview
