@@ -222,6 +222,34 @@ export async function downloadSessionMidi(sessionId) {
   return res.blob();
 }
 
+export async function listMidiOutputs() {
+  const res = await fetch(`${API_BASE}/api/midi/outputs`);
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function auditionBass(sessionId, body) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/audition/bass`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function stopMidiAudition() {
+  const res = await fetch(`${API_BASE}/api/midi/stop`, { method: "POST" });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function getMidiAuditionState() {
+  const res = await fetch(`${API_BASE}/api/midi/audition/state`);
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
 /** @returns {{ setups: Array<Record<string, unknown>> }} */
 export async function listSetups() {
   const res = await fetch(`${API_BASE}/api/setups`);
