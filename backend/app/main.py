@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes.evaluation_routes import router as evaluation_router
+from app.routes.midi_routes import router as midi_router
 from app.routes.session_routes import router as session_router
 from app.routes.setup_routes import router as setup_router
 
@@ -34,6 +35,7 @@ app.add_middleware(
 app.include_router(session_router, prefix="/api/sessions")
 app.include_router(setup_router, prefix="/api/setups")
 app.include_router(evaluation_router, prefix="/api/evaluations")
+app.include_router(midi_router, prefix="/api/midi")
 
 
 @app.get("/health")
