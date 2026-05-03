@@ -69,10 +69,19 @@ useful leverage.
 | v0.3b   | Reference-aware bass groove | Drum loop / reference audio in → bass that locks to the kick, breathes around the snare, resolves through the chord chart. |
 | v0.4    | Variation manager + bar-range regeneration | Complete: deterministic bass seeds, candidate promotion, selected-bar regeneration, and compact frontend controls. |
 | v0.5    | Bass Performance MIDI / Articulation Layer | Make bass MIDI feel played: ghost/dead notes, slides, grace notes, timing push/pull, velocity phrasing, and clean vs performance MIDI modes. |
-| v0.6    | Instrument / VST profile engine | Translate universal performance intent into plugin-specific MIDI behavior for common instruments and generic fallbacks. |
-| v0.7    | Assisted calibration / learned profiles | Guided setup learns a user's instruments without making them manually map keyswitches, notes, articulations, or CCs. |
-| v0.8    | Live audition bridge | Audition generated parts into Logic / Trilian / Kontakt / MODO / other instruments via IAC or plugin route. |
+| v0.6    | Live audition bridge + first profile rendering | IAC/MIDI bridge into Logic / Trilian / MODO / Logic Studio Bass, plus a small set of hand-built profiles that render v0.5 performance intent through real instruments. |
+| v0.7    | Instrument profile engine + Articulation Set / Expression Map import | Generalise the profile schema, ship the data-driven profile engine, and import existing Logic Pro Articulation Sets and Cubase Expression Maps for instant compatibility. |
+| v0.8    | Assisted calibration / learned profiles | Guided, producer-friendly calibration that learns a user's instrument without manual keyswitch / note / CC configuration. Audio-response probing rides on the v0.6 bridge. |
+| v0.9    | Prompt assistant | Prompt → structured edit, bounded by an allowlist of engine operations. Local-first / BYO-key. |
 | v1.0    | DAW-native / plugin direction | AU/VST shell over the existing engine; MIDI in/out + sidechain; engine stays the brain. |
+
+Re-staging note: v0.6 and v0.7 swapped roles relative to the previous
+plan, and the audition bridge moved earlier. The reason is that
+calibration cannot ship before the bridge — without an audio return loop
+into the user's actual instrument, calibration degrades to "play this and
+tell me what you heard," which is the nerdy UX this product explicitly
+rejects. The bridge is the spine; profile work and calibration both
+depend on it. Build the spine first.
 
 ## 5. v0.3a — Validation Pack First
 
@@ -301,76 +310,136 @@ Product rule:
 > If a feature makes the user manually configure technical mapping, it is
 > not default-product-ready.
 
-## 10. v0.6 — Instrument / VST Profile Engine
+## 10. v0.6 — Live Audition Bridge + First Profile Rendering
 
-Goal: make universal performance intent play correctly through real user
-instruments.
+Goal: send v0.5 performance MIDI directly into the user's real instrument
+and hear it played correctly, with a small set of hand-tested profiles.
 
-This comes after v0.5 because articulation metadata must exist before
-profiles can translate it. v0.6 should not invent new musical intent; it
-should map the v0.5 intent to target instruments.
+Bridge before calibration. Calibration only makes sense once the user can
+audition quickly through their actual instrument; without that loop,
+calibration becomes "play this and tell me what you heard," which is
+exactly the nerdy UX this product rejects. v0.6 builds the spine that
+v0.7 and v0.8 both ride on.
+
+This comes after v0.5 because articulation intent must exist before any
+profile can translate it. v0.6 does not invent new musical intent; it
+makes the v0.5 intent audible through real instruments.
 
 Priorities:
 
-- Define the profile schema around musical intent first:
-  `ghost`, `dead`, `slide_from`, `slide_to`, `hammer`, `grace`, velocity
-  ranges, note lengths, drum note names, and CC/keyswitch behavior.
-- Ship built-in profiles for the most likely demo targets before adding
-  profile editing UI.
-- Include generic bass, generic drums, and generic keys fallbacks.
-- Keep profile output deterministic: same performance notes + same
-  profile = same MIDI bytes.
-- Manual profile files are allowed, but only as an advanced option.
+- **IAC / virtual-MIDI bridge out.** Session Player should be able to send
+  generated MIDI directly to Logic, Trilian, MODO, or another target
+  instrument for fast audition — without drag-and-drop.
+- **First supported profiles, hand-tested:**
+  - Trilian
+  - MODO Bass
+  - Logic Studio Bass
+  Addictive Drums (or another drum target) is a candidate later in the
+  milestone if bass is solid. Bass first.
+- **Three profiles tuned obsessively** beats thirty mediocre ones. These
+  profiles set the bar for what "good" means before any importer or
+  calibrator exists.
+- Profile output is deterministic: same `(performance notes, profile)`
+  pair produces identical MIDI bytes.
+- The bridge is for audition, not real-time generation. The engine still
+  renders bars on demand.
+
+Platform note: IAC is macOS-only. Windows requires loopMIDI or a bundled
+virtual MIDI driver and is explicitly deferred. Do not promise Windows
+audition in v0.6 marketing.
+
+Exit criterion: generate a bass performance, send it to Trilian / MODO /
+Logic Studio Bass over IAC, and hear the v0.5 articulation intent
+expressed correctly through that instrument. Same performance, three
+profiles, three musically-correct readings.
+
+## 11. v0.7 — Instrument Profile Engine + Articulation Set / Expression Map Import
+
+Goal: generalise the v0.6 hand-built profiles into a data-driven engine,
+and unlock instant compatibility with hundreds of community-built maps by
+importing existing DAW articulation files.
+
+Profile system rules:
+
+- **Profiles are data, not code.** JSON Schema + validator. Adding a
+  profile must never require editing engine code.
+- **Versioned profile schema.** Every profile declares its schema version;
+  the engine refuses unknown future versions cleanly.
+- **Golden tests for profile translation.** For each profile, assert that
+  a fixed performance input produces fixed MIDI bytes. Without golden
+  tests, profiles drift silently when the engine changes.
+- **Generic fallback profiles** per family: `generic_bass`, `generic_drums`,
+  `generic_keys`. An unknown instrument always gets a working part, never
+  an error.
+- **Do not try to support every instrument at launch.** Top targets plus
+  fallbacks. Quality over coverage.
+- **Versioned, fetched profile bundle.** Profiles ship as a versioned data
+  bundle that can be patched without an app release. A bad profile must
+  be fixable without shipping a binary.
+
+Import strategy — the high-leverage shortcut:
+
+- **Logic Pro Articulation Set import** (`.plist`, typically under
+  `~/Music/Audio Music Apps/Articulation Settings/`).
+- **Cubase Expression Map import** (`.expressionmap`).
+- Importing a user-local map is acceptable. Mapping the user's existing
+  configuration is the fastest path to "it just works."
+
+Licensing rule:
+
+> Do not redistribute third-party articulation maps unless properly
+> licensed. Importing user-local maps is acceptable; bundling other
+> vendors' maps in the app is not.
+
+Decide and document the line in v0.7. Get it right early.
 
 Exit criterion: the same generated bass performance can be exported as
-clean MIDI and as profile-targeted MIDI for at least one real bass
-instrument without changing the musical notes.
+clean MIDI and as profile-targeted MIDI for any of the v0.6 profiles plus
+at least one user-imported Logic Articulation Set, without changing the
+musical notes.
 
-## 11. v0.7 — Assisted Calibration / Learned Profiles
+## 12. v0.8 — Assisted Calibration / Learned Profiles
 
 Goal: teach Session Player a user's instrument without asking them to
 manually map technical details.
 
-The user-facing flow should be guided and musical:
+Calibration is guided, short, and producer-friendly. Manual JSON/profile
+editing is advanced-only. There is no default manual mapping path.
 
-- Play a probe.
-- Ask what the user heard.
+The user-facing flow should sound like a producer checking a sound:
+
+- Play a probe through the v0.6 bridge.
+- Ask what the user heard, in plain language ("did that sound like a
+  ghost note?", "did you hear a kick?").
 - Try another mapping when the answer is wrong.
-- Save the learned profile when the answer is right.
+- Save the learned profile, with a vibe name, when the answer is right.
 
-Calibration starts with MIDI probing:
+Constraints:
+
+- **Five questions max** before "your instrument is ready." Calibration
+  longer than ~90 seconds will be abandoned.
+- **First probe must already sound musical.** Generic-family fallback has
+  to be demo-grade before calibration begins.
+- **Always recoverable.** "This profile isn't right anymore" → restart
+  with one button.
+
+Calibration starts with MIDI probing (riding on the v0.6 bridge):
 
 - note ranges
 - drum-note maps
 - likely keyswitch zones
 - articulation trigger notes
 - velocity response bands
-- CC response where obvious
 
-Audio response probing comes later, once the app can reliably hear the
-instrument output through the bridge. That can validate whether a probe
-actually sounded like a slide, ghost note, kick, snare, or closed hat.
+Audio response probing comes second, once the bridge can reliably capture
+the instrument's audio return. Audio analysis is heuristic and fallible:
+always confirm with the user ("I think this was a ghost — yes / no?"),
+never assert without confirmation. Skip ML; heuristic features are enough
+for the first cut.
 
 Exit criterion: a user can calibrate an unsupported bass or drum
-instrument through guided questions and reuse the learned profile.
-
-## 12. v0.8 — Live Audition Bridge
-
-Goal: audition generated parts through the user's real instruments before
-exporting.
-
-Likely routes:
-
-- IAC / virtual MIDI bridge into Logic and external instruments.
-- Plugin route once the DAW-native shell exists.
-- Later audio return for response probing.
-
-The bridge is for audition and calibration, not a promise of real-time
-performance generation. The engine still renders bars on demand.
-
-Exit criterion: generate or adjust a bass part, send it to Trilian /
-Kontakt / MODO / Logic through a bridge, hear it immediately, then commit
-or revise.
+instrument through guided questions in under 90 seconds and reuse the
+learned profile across sessions.
 
 ## 13. v0.9 — SDK / Prompt Assistant
 
@@ -510,6 +579,25 @@ Refactor rules specifically:
 - A bass-engine merge "for cleanliness" before a milestone forces it.
 - New analysis surfaces in v0.3b. Use what `SessionAnchorContext` already
   exposes.
+
+v0.6+ specific exclusions:
+
+- **No profile editor UI in v0.6.** Hand-build profiles in JSON to let
+  the schema settle. Editor UI is a v0.7 question at earliest.
+- **No full plugin host inside Tauri.** Wait for the v1.0 JUCE shell.
+  Tauri talks to the user's DAW via IAC; it does not load AUs/VSTs
+  itself.
+- **No audio probing before the MIDI bridge works.** Audio response
+  capture rides on top of v0.6, not in front of it.
+- **No ML articulation detection yet.** Heuristic features + user
+  confirmation are enough through v0.8.
+- **No marketplace or profile sharing yet.** Local-first. Sharing is a
+  v1.x conversation.
+- **No support for 50 instruments at launch.** Top targets plus generic
+  fallbacks. Quality of three profiles beats coverage of thirty.
+- **No redistribution of third-party articulation maps without proper
+  licensing.** Importing user-local maps is fine; bundling vendor maps
+  is not.
 
 ## 19. Immediate Next Step
 
