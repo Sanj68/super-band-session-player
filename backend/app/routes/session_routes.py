@@ -9,11 +9,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import pretty_midi
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from app.models.session import (
     AddPartToSuitBody,
@@ -37,6 +38,7 @@ from app.models.session import (
     SessionState,
     lane_styles_for_session_preset,
 )
+from app.routes.midi_routes import get_audition_player
 from app.services import generator
 from app.services import bass_candidate_store
 from app.services.bass_bar_splice import splice_bass_bars
@@ -48,11 +50,25 @@ from app.services.bass_quality import analyze_bass_take
 from app.services.midi_note_extract import extract_lane_notes
 from app.services.lead_generator import normalize_lead_style
 from app.services.midi_export import lane_midi_response, merge_lane_midis, zip_all_lanes
+from app.services.midi_audition import MidiOutputUnavailable
 from app.services.source_analysis import build_groove_profile, build_harmony_plan, build_source_analysis
 from app.services.session_context import SessionAnchorContext, build_session_context, normalize_anchor_lane
 from app.utils import music_theory as mt
 
 router = APIRouter()
+
+
+class AuditionBassBody(BaseModel):
+    output: str
+    mode: Literal["clean", "performance"] | None = None
+
+
+class AuditionBassResponse(BaseModel):
+    status: str
+    session_id: str
+    mode: Literal["clean", "performance"]
+    output: str
+    duration_seconds: float
 
 _LANE_REGENERATION_ORDER: Final[tuple[LaneName, ...]] = (
     LaneName.drums,
@@ -1363,6 +1379,48 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
             # unaffected.
             s.bass_performance_bytes = None
     return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
+
+
+@router.post("/{session_id}/audition/bass", response_model=AuditionBassResponse)
+def audition_bass(session_id: str, body: AuditionBassBody) -> AuditionBassResponse:
+    s = _get_session_or_404(session_id)
+    if not s.bass_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "bass_lane_missing", "message": "Generate the bass lane before auditioning it."},
+        )
+
+    mode = body.mode or ("performance" if s.bass_performance_bytes else "clean")
+    if mode == "performance":
+        if not s.bass_performance_bytes:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "performance_midi_unavailable", "reason": "invalidated"},
+            )
+        midi_bytes = s.bass_performance_bytes
+    else:
+        midi_bytes = s.bass_bytes
+
+    try:
+        started = get_audition_player().start(
+            session_id=session_id,
+            mode=mode,
+            output_id=body.output,
+            midi_bytes=midi_bytes,
+        )
+    except MidiOutputUnavailable as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "midi_output_unavailable", "message": str(exc)},
+        ) from exc
+
+    return AuditionBassResponse(
+        status=started.status,
+        session_id=started.session_id,
+        mode=mode,
+        output=started.output,
+        duration_seconds=started.duration_seconds,
+    )
 
 
 @router.get("/{session_id}/midi/{lane}")

@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  auditionBass,
   downloadBassCandidateMidi,
   generateBassCandidates,
   getBassCandidateTakeNotes,
+  getMidiAuditionState,
+  listMidiOutputs,
   listBassCandidates,
   promoteBassCandidate,
   referenceAudioUrl,
   regenerateBassBars,
+  stopMidiAudition,
 } from "../api/client.js";
 import PianoRollPreview from "./PianoRollPreview.jsx";
 
@@ -17,6 +21,13 @@ const STAGE_LABELS = {
   relaxed: "Alt Groove",
   final_fill: "Fallback Take",
 };
+
+function apiErrorMessage(error) {
+  const detail = error?.detail?.detail;
+  if (detail?.message) return detail.message;
+  if (detail?.error) return `${detail.error}${detail.reason ? `: ${detail.reason}` : ""}`;
+  return error?.message || String(error);
+}
 
 export default function BassCandidatePanel({ session, setSession, busy, setBusy, setError, setStatus }) {
   const [candidateTakeCount, setCandidateTakeCount] = useState(4);
@@ -36,6 +47,13 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const [downloadingTakeKey, setDownloadingTakeKey] = useState("");
   const [sourceLevel, setSourceLevel] = useState(0.55);
   const [bassContextLevel, setBassContextLevel] = useState(0.26);
+  const [midiOutputs, setMidiOutputs] = useState([]);
+  const [selectedMidiOutput, setSelectedMidiOutput] = useState("");
+  const [midiHint, setMidiHint] = useState("");
+  const [auditionMode, setAuditionMode] = useState("performance");
+  const [auditionState, setAuditionState] = useState({ playing: false });
+  const [auditionBusy, setAuditionBusy] = useState(false);
+  const [auditionMessage, setAuditionMessage] = useState("");
   const audioContextRef = useRef(null);
   const sourceAudioRef = useRef(null);
   const activeNodesRef = useRef([]);
@@ -47,6 +65,30 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     if (!session?.id) return;
     setCandidateClipId(session.id);
   }, [session?.id]);
+
+  const refreshMidiAudition = useCallback(async () => {
+    try {
+      const [outputsRes, stateRes] = await Promise.all([listMidiOutputs(), getMidiAuditionState()]);
+      const outputs = Array.isArray(outputsRes.outputs) ? outputsRes.outputs : [];
+      setMidiOutputs(outputs);
+      setMidiHint(outputsRes.hint || "");
+      setAuditionState(stateRes || { playing: false });
+      setSelectedMidiOutput((current) => {
+        if (current && outputs.some((output) => output.id === current || output.name === current)) {
+          return current;
+        }
+        return outputsRes.default || outputs[0]?.id || outputs[0]?.name || "";
+      });
+    } catch (e) {
+      setMidiOutputs([]);
+      setSelectedMidiOutput("");
+      setMidiHint(apiErrorMessage(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMidiAudition().catch(() => {});
+  }, [session?.id, refreshMidiAudition]);
 
   const refreshBassCandidates = useCallback(async () => {
     if (!session?.id) return;
@@ -645,6 +687,47 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     }
   }, [session?.id, adjustBarStart, adjustBarEnd, adjustSeed, setBusy, setError, setSession, setStatus]);
 
+  const onAuditionBass = useCallback(async () => {
+    if (!session?.id) return;
+    setAuditionBusy(true);
+    setAuditionMessage("");
+    setError(null);
+    try {
+      const started = await auditionBass(session.id, {
+        output: selectedMidiOutput,
+        mode: auditionMode,
+      });
+      setAuditionState({ playing: true, ...started });
+      setAuditionMessage(`Playing ${started.mode} bass through ${started.output}.`);
+      setStatus(`Auditioning ${started.mode} bass.`);
+    } catch (e) {
+      const message = apiErrorMessage(e);
+      setAuditionMessage(message);
+      setError(message);
+    } finally {
+      setAuditionBusy(false);
+    }
+  }, [session?.id, selectedMidiOutput, auditionMode, setError, setStatus]);
+
+  const onStopMidiAudition = useCallback(async () => {
+    setAuditionBusy(true);
+    setAuditionMessage("");
+    setError(null);
+    try {
+      await stopMidiAudition();
+      const state = await getMidiAuditionState();
+      setAuditionState(state || { playing: false });
+      setAuditionMessage("Audition stopped.");
+      setStatus("Audition stopped.");
+    } catch (e) {
+      const message = apiErrorMessage(e);
+      setAuditionMessage(message);
+      setError(message);
+    } finally {
+      setAuditionBusy(false);
+    }
+  }, [setError, setStatus]);
+
   return (
     <details
       style={{
@@ -734,6 +817,73 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
               Bars are zero-based; end bar is not included.
             </span>
           </div>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gap: 8,
+            padding: "0.55rem 0.65rem",
+            border: "1px solid #e2e8f0",
+            borderRadius: 8,
+            background: "#f8fafc",
+          }}
+        >
+          <strong style={{ fontSize: 13, color: "#334155" }}>Live Audition</strong>
+          <span style={{ fontSize: 12, color: "#64748b" }}>
+            Send bass MIDI to a Logic/IAC instrument track for quick audition.
+          </span>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.4fr) minmax(120px, 0.8fr)", gap: 8 }}>
+            <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+              MIDI output
+              <select
+                value={selectedMidiOutput}
+                onChange={(e) => setSelectedMidiOutput(e.target.value)}
+                disabled={auditionBusy || midiOutputs.length === 0}
+              >
+                {midiOutputs.length === 0 ? (
+                  <option value="">No MIDI outputs</option>
+                ) : (
+                  midiOutputs.map((output) => (
+                    <option key={output.id} value={output.id}>
+                      {output.name}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+              Mode
+              <select value={auditionMode} onChange={(e) => setAuditionMode(e.target.value)} disabled={auditionBusy}>
+                <option value="clean">Clean</option>
+                <option value="performance">Performance</option>
+              </select>
+            </label>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={onAuditionBass}
+              disabled={busy || auditionBusy || !session?.id || !session?.lanes?.bass?.generated || !selectedMidiOutput}
+            >
+              Audition
+            </button>
+            <button type="button" onClick={onStopMidiAudition} disabled={auditionBusy}>
+              Stop
+            </button>
+            <button type="button" onClick={refreshMidiAudition} disabled={auditionBusy}>
+              Refresh
+            </button>
+            <span style={{ fontSize: 12, color: auditionState?.playing ? "#166534" : "#64748b" }}>
+              {auditionState?.playing
+                ? `Playing ${auditionState.mode ?? "bass"} through ${auditionState.output ?? "MIDI"}`
+                : "Idle"}
+            </span>
+          </div>
+          {(midiHint || auditionMessage) && (
+            <span style={{ fontSize: 12, color: midiOutputs.length === 0 ? "#92400e" : "#475569" }}>
+              {auditionMessage || midiHint}
+            </span>
+          )}
         </div>
         {session?.reference_audio ? (
           <div
