@@ -140,7 +140,7 @@ def test_deterministic_same_input_yields_identical_bytes() -> None:
 
 
 @pytest.mark.parametrize(
-    "articulation", ["dead", "slide_from", "slide_to", "hammer"]
+    "articulation", ["slide_from", "slide_to", "hammer"]
 )
 def test_deferred_articulations_pass_through_as_normal(articulation: str) -> None:
     src = (
@@ -159,6 +159,93 @@ def test_deferred_articulations_pass_through_as_normal(articulation: str) -> Non
     assert rendered.velocity == 90
     assert rendered.start == pytest.approx(0.0, abs=_TICK_EPSILON)
     assert rendered.end == pytest.approx(0.5, abs=_TICK_EPSILON)
+
+
+def test_dead_articulation_is_short_and_quiet() -> None:
+    src = (
+        _note(
+            pitch=40,
+            start=0.0,
+            end=0.5,
+            velocity=90,
+            articulation="dead",
+        ),
+    )
+    data = render_performance_bass_midi(src, tempo=_TEMPO, program=_PROGRAM)
+    rendered = _read(data).instruments[0].notes[0]
+
+    assert rendered.pitch == 40
+    assert 10 <= rendered.velocity <= 36
+    assert rendered.end - rendered.start < 0.5
+
+
+def test_role_bar_slot_metadata_applies_bounded_deterministic_feel() -> None:
+    src = (
+        _note(
+            pitch=40,
+            start=0.25,
+            end=0.75,
+            velocity=80,
+            articulation="normal",
+        ),
+    )
+    src = (
+        BassPerformanceNote(
+            pitch=src[0].pitch,
+            start=src[0].start,
+            end=src[0].end,
+            velocity=src[0].velocity,
+            articulation=src[0].articulation,
+            role="anchor",
+            bar_index=2,
+            slot_index=4,
+        ),
+    )
+
+    a = render_performance_bass_midi(src, tempo=_TEMPO, program=_PROGRAM)
+    b = render_performance_bass_midi(src, tempo=_TEMPO, program=_PROGRAM)
+    rendered = _read(a).instruments[0].notes[0]
+
+    assert a == b
+    assert rendered.pitch == 40
+    assert rendered.velocity != 80
+    assert 75 <= rendered.velocity <= 95
+    assert abs(rendered.start - 0.25) <= 0.0055 + _TICK_EPSILON
+    assert rendered.end > rendered.start
+
+
+def test_source_maps_affect_velocity_and_duration() -> None:
+    src = (
+        BassPerformanceNote(
+            pitch=40,
+            start=0.25,
+            end=0.75,
+            velocity=80,
+            articulation="normal",
+            role="anchor",
+            bar_index=2,
+            slot_index=4,
+        ),
+    )
+    row = tuple(0.0 for _ in range(16))
+    kick_row = tuple(1.0 if i == 4 else 0.0 for i in range(16))
+    pressure_row = tuple(1.0 if i == 4 else 0.0 for i in range(16))
+    source_kick = (row, row, kick_row)
+    source_pressure = (row, row, pressure_row)
+
+    baseline = _read(render_performance_bass_midi(src, tempo=_TEMPO, program=_PROGRAM)).instruments[0].notes[0]
+    shaped = _read(
+        render_performance_bass_midi(
+            src,
+            tempo=_TEMPO,
+            program=_PROGRAM,
+            source_kick_per_bar=source_kick,
+            source_pressure_per_bar=source_pressure,
+        )
+    ).instruments[0].notes[0]
+
+    assert shaped.velocity >= baseline.velocity
+    assert (shaped.end - shaped.start) >= (baseline.end - baseline.start)
 
 
 def test_input_order_does_not_affect_output_bytes() -> None:

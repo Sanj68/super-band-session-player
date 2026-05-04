@@ -294,9 +294,17 @@ def _render_bass_performance_bytes(
     clean_bytes: bytes,
     perf_notes: tuple[BassPerformanceNote, ...],
     tempo: int,
+    conditioning: UnifiedConditioning | None = None,
 ) -> bytes:
     program = _bass_program_from_clean_bytes(clean_bytes)
-    return render_performance_bass_midi(perf_notes, tempo=int(tempo), program=program)
+    return render_performance_bass_midi(
+        perf_notes,
+        tempo=int(tempo),
+        program=program,
+        source_kick_per_bar=conditioning.source_kick_weight if conditioning else None,
+        source_snare_per_bar=conditioning.source_snare_weight if conditioning else None,
+        source_pressure_per_bar=conditioning.source_slot_pressure if conditioning else None,
+    )
 
 
 def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
@@ -682,6 +690,7 @@ def _regenerate_lane_on_stored_session(
             clean_bytes=b_bytes,
             perf_notes=perf_notes,
             tempo=s.tempo,
+            conditioning=cond,
         )
         s.current_bass_candidate_run_id = None
         s.current_bass_candidate_take_id = None
@@ -1372,6 +1381,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 clean_bytes=s.bass_bytes,
                 perf_notes=perf_notes,
                 tempo=s.tempo,
+                conditioning=cond,
             )
         except Exception:
             # If re-render fails for any reason, leave performance bytes
