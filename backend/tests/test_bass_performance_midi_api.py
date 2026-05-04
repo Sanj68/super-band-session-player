@@ -21,6 +21,7 @@ import pretty_midi
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.session import SourceAnalysis
 from app.routes import session_routes
 from app.services import bass_candidate_store
 
@@ -48,6 +49,74 @@ def _create_generated_session(client: TestClient) -> str:
     session_id = str(created.json()["session"]["id"])
     generated = client.post(f"/api/sessions/{session_id}/generate")
     assert generated.status_code == 200
+    return session_id
+
+
+def _source_analysis_with_groove(bar_count: int = 4) -> SourceAnalysis:
+    kick_rows = [[0.0] * 16 for _ in range(bar_count)]
+    snare_rows = [[0.0] * 16 for _ in range(bar_count)]
+    pressure_rows = [[0.2] * 16 for _ in range(bar_count)]
+    onset_rows = [[0.0] * 16 for _ in range(bar_count)]
+    for bar in range(bar_count):
+        kick_rows[bar][0] = 1.0
+        kick_rows[bar][8] = 0.7
+        snare_rows[bar][4] = 0.9
+        snare_rows[bar][12] = 0.8
+        pressure_rows[bar][0] = 0.95
+        pressure_rows[bar][4] = 0.85
+        onset_rows[bar][0] = 1.0
+        onset_rows[bar][4] = 0.8
+
+    return SourceAnalysis(
+        source_lane="reference_audio",
+        tempo=96,
+        tempo_estimate_bpm=96.0,
+        tempo_confidence=0.8,
+        beat_grid_seconds=[i * 0.625 for i in range(bar_count * 4)],
+        bar_starts_seconds=[i * 2.5 for i in range(bar_count)],
+        beat_phase_offset_beats=0,
+        beat_phase_scores=[1.0, 0.0, 0.0, 0.0],
+        beat_phase_confidence=0.8,
+        phase_offset_used_for_generation_beats=0,
+        bar_start_anchor_used_seconds=0.0,
+        generation_aligned_to_anchor=False,
+        downbeat_guess_bar_index=0,
+        downbeat_confidence=0.7,
+        bar_start_confidence=0.8,
+        tonal_center_pc_guess=0,
+        tonal_center_confidence=0.7,
+        scale_mode_guess="major",
+        scale_mode_confidence=0.7,
+        sections=[],
+        bar_energy=[0.5] * bar_count,
+        bar_accent_profile=[0.5] * bar_count,
+        bar_confidence_profile=[0.7] * bar_count,
+        source_groove_resolution=16,
+        source_onset_weight=onset_rows,
+        source_kick_weight=kick_rows,
+        source_snare_weight=snare_rows,
+        source_slot_pressure=pressure_rows,
+        source_groove_confidence=[0.8] * bar_count,
+    )
+
+
+def _create_session_with_source_analysis(client: TestClient) -> str:
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 96,
+            "key": "C",
+            "scale": "major",
+            "bar_count": 4,
+            "bass_style": "supportive",
+            "bass_engine": "baseline",
+        },
+    )
+    assert created.status_code == 200
+    session_id = str(created.json()["session"]["id"])
+    session_routes._SESSIONS[session_id].source_analysis_override = (  # type: ignore[attr-defined]
+        _source_analysis_with_groove(bar_count=4)
+    )
     return session_id
 
 
@@ -199,6 +268,69 @@ def test_candidate_promotion_materializes_performance_midi(tmp_path: Path) -> No
     perf = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
     assert perf.status_code == 200
     assert len(perf.content) > 0
+
+
+def test_full_generation_passes_source_maps_to_performance_renderer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_session_with_source_analysis(client)
+    original_render = session_routes.render_performance_bass_midi
+    calls: list[dict[str, object]] = []
+
+    def spy_render(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(session_routes, "render_performance_bass_midi", spy_render)
+
+    generated = client.post(f"/api/sessions/{session_id}/generate")
+
+    assert generated.status_code == 200
+    assert calls
+    kwargs = calls[-1]
+    assert kwargs["source_kick_per_bar"] is not None
+    assert kwargs["source_snare_per_bar"] is not None
+    assert kwargs["source_pressure_per_bar"] is not None
+
+
+def test_candidate_promotion_passes_source_maps_to_performance_renderer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_session_with_source_analysis(client)
+    generated = client.post(f"/api/sessions/{session_id}/generate")
+    assert generated.status_code == 200
+
+    cands = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 7777},
+    )
+    assert cands.status_code == 200
+    run_id = cands.json()["run_id"]
+    take_id = cands.json()["takes"][0]["take_id"]
+
+    original_render = session_routes.render_performance_bass_midi
+    calls: list[dict[str, object]] = []
+
+    def spy_render(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(session_routes, "render_performance_bass_midi", spy_render)
+
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
+    )
+
+    assert promoted.status_code == 200
+    assert calls
+    kwargs = calls[-1]
+    assert kwargs["source_kick_per_bar"] is not None
+    assert kwargs["source_snare_per_bar"] is not None
+    assert kwargs["source_pressure_per_bar"] is not None
 
 
 def test_combined_session_export_remains_clean_only(tmp_path: Path) -> None:
