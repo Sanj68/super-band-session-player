@@ -17,7 +17,13 @@ from app.services.bass_articulation import ghost_eligibility, shape_note
 from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
-from app.services.conditioning import UnifiedConditioning
+from app.services.conditioning import (
+    UnifiedConditioning,
+    has_source_groove,
+    source_kick_weight,
+    source_snare_weight,
+    source_slot_pressure,
+)
 from app.services.reference_guidance import ReferenceGrooveGuidance, build_reference_guidance
 from app.services.session_context import (
     SessionAnchorContext,
@@ -339,6 +345,52 @@ def _deg_pitch_map(r: int, t: int, f: int, idx: int) -> int:
 
 def _drum_anchor_ctx(ctx: SessionAnchorContext | None) -> bool:
     return ctx is not None and ctx.anchor_lane == "drums"
+
+
+def _source_groove_rhythm(
+    conditioning: UnifiedConditioning | None,
+    context: SessionAnchorContext | None,
+) -> bool:
+    return conditioning is not None and has_source_groove(conditioning) and not _drum_anchor_ctx(context)
+
+
+def _source_bar_mean_pressure(conditioning: UnifiedConditioning, bar: int) -> float:
+    return sum(source_slot_pressure(conditioning, bar, s) for s in range(16)) / 16.0
+
+
+def _source_bar_groove_conf(conditioning: UnifiedConditioning, bar: int) -> float:
+    if not conditioning.source_groove_confidence:
+        return 0.0
+    b = max(0, min(bar, len(conditioning.source_groove_confidence) - 1))
+    return float(conditioning.source_groove_confidence[b])
+
+
+def _apply_source_groove_intent_nudge(
+    intent: PhraseIntentBar,
+    *,
+    conditioning: UnifiedConditioning,
+    context: SessionAnchorContext | None,
+    bar: int,
+) -> PhraseIntentBar:
+    if not _source_groove_rhythm(conditioning, context):
+        return intent
+    mp = _source_bar_mean_pressure(conditioning, bar)
+    gc = _source_bar_groove_conf(conditioning, bar)
+    w = 0.45 * max(0.15, min(1.0, gc))
+    dm = float(intent["density_mult"])
+    rb = float(intent["rest_bias"])
+    delta = (mp - 0.38) * 0.11 * w
+    dm = max(0.55, min(1.35, dm + delta))
+    rb = max(0.0, min(0.65, rb - delta * 0.35))
+    out = cast(PhraseIntentBar, dict(intent))
+    out["density_mult"] = dm
+    out["rest_bias"] = rb
+    return out
+
+
+def _source_kick_window_max(conditioning: UnifiedConditioning, bar: int, slot: int, radius: int = 2) -> float:
+    lo, hi = max(0, slot - radius), min(15, slot + radius)
+    return max(source_kick_weight(conditioning, bar, j) for j in range(lo, hi + 1))
 
 
 def _drum_profile_groove(player_key: str | None) -> tuple[float, float, float]:
@@ -816,6 +868,27 @@ def _rhythmic_drum_slot_keep(
     return True
 
 
+def _rhythmic_source_slot_keep(
+    conditioning: UnifiedConditioning,
+    bar: int,
+    slot: int,
+    *,
+    rng: random.Random | object,
+) -> bool:
+    """Soft pocket gate from upload groove maps (lighter than drum-anchor gate)."""
+    kw = source_kick_weight(conditioning, bar, slot)
+    nk = _source_kick_window_max(conditioning, bar, slot, radius=2)
+    pr = source_slot_pressure(conditioning, bar, slot)
+    if kw > 0.34 or (slot % 4 == 0 and nk > 0.4):
+        return rng.random() < min(0.96, 0.82 + 0.1 * kw)
+    if pr > 0.54 and kw < 0.17:
+        skip_p = 0.1 + 0.26 * pr
+        return rng.random() > min(0.52, skip_p)
+    if pr > 0.66 and kw < 0.24:
+        return rng.random() > 0.45
+    return True
+
+
 def _supportive_slot_may_apply_rest_drop(
     *,
     role: str,
@@ -1025,7 +1098,9 @@ def generate_bass(
         chord_progression=chord_progression,
     )
     _ = segments  # keep named list for diagnostics/debug readability
-    phrase_plan = build_phrase_plan(bar_count=bar_count, style=style, salt=salt, context=context)
+    phrase_plan = build_phrase_plan(
+        bar_count=bar_count, style=style, salt=salt, context=context, conditioning=conditioning
+    )
     prev_structural_pitch: int | None = None
 
     for bar, deg in enumerate(degrees):
@@ -1044,6 +1119,8 @@ def generate_bass(
         if style == "supportive" and reference_guidance.available and conditioning is not None:
             intent = _apply_reference_groove_nudge(intent, reference_guidance, conditioning, bar)
             reference_guidance_applied = reference_guidance_applied or reference_guidance.should_apply_bar(bar)
+        if style == "supportive" and conditioning is not None:
+            intent = _apply_source_groove_intent_nudge(intent, conditioning=conditioning, context=context, bar=bar)
         root = mt.bass_root_midi(key, scale, deg, octave=2)
         ojp = oct_jump_p()
         if style in ("rhythmic", "fusion") and rng.random() < ojp:
@@ -1131,18 +1208,27 @@ def generate_bass(
                             leg_use *= 1.0 + 0.035 * restraint_m * (1.15 if player_key == "pino" else 1.0)
                         if dd > 14.0:
                             leg_use = min(0.97, leg_use * 1.025)
+                    elif _source_groove_rhythm(conditioning, context):
+                        sk = source_kick_weight(conditioning, bar, slot_b)
+                        late += sixteenth * 0.09 * sk
                     t_j = rng.uniform(0, 0.006) * spb
                     t0 = bar_t0 + beat * spb + late + t_j
                     t1 = t0 + spb * leg_use
                     p = root
                     if beat == 2.0:
                         m = (salt + bar * 3) % 7
-                        kw8 = drum_kick_weight(context, bar, 8) if _drum_anchor_ctx(context) else 0.0
-                        if m == 1 and not (_drum_anchor_ctx(context) and kw8 > 0.42):
+                        if _drum_anchor_ctx(context):
+                            kw8 = drum_kick_weight(context, bar, 8)
+                        elif _source_groove_rhythm(conditioning, context):
+                            kw8 = source_kick_weight(conditioning, bar, 8)
+                        else:
+                            kw8 = 0.0
+                        grid_ref = _drum_anchor_ctx(context) or _source_groove_rhythm(conditioning, context)
+                        if m == 1 and not (grid_ref and kw8 > 0.42):
                             p = t
-                        elif m == 5 and not (_drum_anchor_ctx(context) and kw8 > 0.5):
+                        elif m == 5 and not (grid_ref and kw8 > 0.5):
                             p = f
-                        elif _drum_anchor_ctx(context) and kw8 > 0.38 and rng.random() < 0.55 * kick_lock_m:
+                        elif grid_ref and kw8 > 0.38 and rng.random() < 0.55 * (kick_lock_m if _drum_anchor_ctx(context) else 0.88):
                             p = f if rng.random() < 0.45 else root
                     vb = (88, 80)
                     vel = max(72, min(100, (vb[0] if beat == 0 else vb[1]) + rng.randint(-5, 5)))
@@ -1184,6 +1270,18 @@ def generate_bass(
                     if _drum_anchor_ctx(context):
                         if not _rhythmic_drum_slot_keep(
                             context, bar, s, d_drum=d_drum, kick_lock=kick_lock_m, restraint=restraint_m, rng=rng
+                        ):
+                            continue
+                    elif _source_groove_rhythm(conditioning, context):
+                        if not _rhythmic_source_slot_keep(conditioning, bar, s, rng=rng):
+                            continue
+                        sk_av = source_kick_weight(conditioning, bar, s)
+                        sn_av = source_snare_weight(conditioning, bar, s)
+                        if (
+                            s % 4 != 0
+                            and sn_av > 0.52
+                            and sk_av < 0.30
+                            and rng.random() < 0.16 + sn_av * 0.28
                         ):
                             continue
                     elif context and s % 4 != 0:
@@ -1243,6 +1341,9 @@ def generate_bass(
                         kw = drum_kick_weight(context, bar, s)
                         late += sixteenth * (0.14 * kw - 0.05 * drum_kick_weight(context, bar, (s + 3) % 16)) * kick_lock_m
                         late += sixteenth * 0.06 * bounce_m * (0.55 if player_key == "bootsy" else 0.35)
+                    elif _source_groove_rhythm(conditioning, context):
+                        sk = source_kick_weight(conditioning, bar, s)
+                        late += sixteenth * 0.1 * sk
                     t_j = rng.uniform(0, 0.018) * spb
                     t0 = bar_t0 + s * sixteenth + late + t_j
                     if pr_role == "anchor" and s in (0, 8):
@@ -1254,6 +1355,13 @@ def generate_bass(
                     leg_use = rng.uniform(0.86, 0.95) * art * float(intent["sustain_mult"])
                     if _drum_anchor_ctx(context) and d_drum > 11.0:
                         leg_use *= 1.0 + 0.028 * restraint_m * (1.1 if player_key == "pino" else 1.0)
+                    elif _source_groove_rhythm(conditioning, context):
+                        mp = _source_bar_mean_pressure(conditioning, bar)
+                        gc = _source_bar_groove_conf(conditioning, bar)
+                        if mp > 0.44:
+                            leg_use *= 1.0 + 0.018 * max(0.12, min(1.0, gc)) * (mp - 0.44)
+                        elif mp < 0.22:
+                            leg_use *= 1.0 - 0.012 * max(0.12, min(1.0, gc)) * (0.22 - mp)
                     if d_drum > 14.0:
                         leg_use = min(0.97, leg_use * 1.02)
                     if pr_role == "release" and s == 14:
@@ -1322,6 +1430,10 @@ def generate_bass(
                 sw_cad = 0.0
                 if _drum_anchor_ctx(context):
                     sw_cad = (drum_snare_weight(context, bar, 4) + drum_snare_weight(context, bar, 12)) * 0.5
+                elif _source_groove_rhythm(conditioning, context):
+                    sw_cad = (
+                        source_snare_weight(conditioning, bar, 4) + source_snare_weight(conditioning, bar, 12)
+                    ) * 0.5
                 stack_pen = min(0.52, stack_pen + 0.1 * min(1.0, sw_cad))
                 had_pick = False
                 had_tail = False
@@ -1335,6 +1447,8 @@ def generate_bass(
                     pickup_push = 0.0
                     if _drum_anchor_ctx(context):
                         pickup_push += sixteenth * 0.07 * drum_kick_weight(context, bar, pickup_slot) * kick_lock_m
+                    elif _source_groove_rhythm(conditioning, context):
+                        pickup_push += sixteenth * 0.055 * source_kick_weight(conditioning, bar, pickup_slot)
                     pt0 = bar_t0 + pickup_slot * sixteenth + pickup_push + rng.uniform(0.0, 0.006) * spb
                     pt1 = min(bar_t1 - 1e-4, pt0 + sixteenth * rng.uniform(0.7, 0.98))
                     if pt1 > pt0:
@@ -1366,6 +1480,8 @@ def generate_bass(
                     tail_push = 0.0
                     if _drum_anchor_ctx(context):
                         tail_push += sixteenth * 0.09 * drum_kick_weight(context, bar, cad_slot) * kick_lock_m
+                    elif _source_groove_rhythm(conditioning, context):
+                        tail_push += sixteenth * 0.06 * source_kick_weight(conditioning, bar, cad_slot)
                     ct0 = bar_t0 + cad_slot * sixteenth + tail_push + rng.uniform(0.0, 0.006) * spb
                     ct1 = min(
                         bar_t1 - 1e-4,
@@ -1390,6 +1506,8 @@ def generate_bass(
                     floor_push = 0.0
                     if _drum_anchor_ctx(context):
                         floor_push += sixteenth * 0.06 * drum_kick_weight(context, bar, floor_slot) * kick_lock_m
+                    elif _source_groove_rhythm(conditioning, context):
+                        floor_push += sixteenth * 0.05 * source_kick_weight(conditioning, bar, floor_slot)
                     ft0 = bar_t0 + floor_slot * sixteenth + floor_push + rng.uniform(0.0, 0.004) * spb
                     ft1 = min(bar_t1 - 1e-4, ft0 + sixteenth * rng.uniform(1.06, 1.28))
                     if ft1 > ft0:

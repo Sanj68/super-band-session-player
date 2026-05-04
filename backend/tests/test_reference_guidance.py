@@ -12,6 +12,7 @@ def _conditioning(
     bar_start_confidence: float = 0.8,
     groove_confidence: float = 0.8,
     bar_confidence: tuple[float, ...] = (0.8, 0.8, 0.8, 0.8),
+    source_slot_pressure: tuple[tuple[float, ...], ...] | None = None,
 ) -> UnifiedConditioning:
     bars = len(bar_confidence)
     return UnifiedConditioning(
@@ -36,6 +37,7 @@ def _conditioning(
         bar_energy=tuple(0.7 for _ in range(bars)),
         bar_accent=tuple(0.6 for _ in range(bars)),
         bar_confidence=bar_confidence,
+        source_slot_pressure=source_slot_pressure or (),
     )
 
 
@@ -88,3 +90,18 @@ def test_per_bar_low_confidence_is_not_applied() -> None:
     assert guidance.available is True
     assert guidance.should_apply_bar(1) is False
     assert guidance.should_apply_bar(2) is True
+
+
+def test_has_source_slot_groove_false_without_maps() -> None:
+    guidance = build_reference_guidance(_conditioning(), has_midi_anchor=False)
+    assert guidance.has_source_slot_groove is False
+
+
+def test_has_source_slot_groove_true_when_pressure_maps_present() -> None:
+    bars = 4
+    pressure = tuple(tuple(0.2 for _ in range(16)) for _ in range(bars))
+    guidance = build_reference_guidance(
+        _conditioning(bar_confidence=(0.8,) * bars, source_slot_pressure=pressure),
+        has_midi_anchor=False,
+    )
+    assert guidance.has_source_slot_groove is True

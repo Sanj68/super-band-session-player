@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { analyzeReferenceAudio, uploadReferenceAudio } from "../api/client.js";
+import { getSourceGrooveSummary } from "../utils/sourceGroove.js";
 
 function formatSecs(value) {
   const n = Number(value);
@@ -42,6 +43,8 @@ export default function ReferenceAudioPanel({ session, busy, setBusy, setError, 
 
   const ref = session?.reference_audio;
   const sourceStatus = session?.engine_data?.source_analysis?.source_lane ?? "none";
+  const sa = session?.engine_data?.source_analysis ?? null;
+  const grooveSummary = session && sa ? getSourceGrooveSummary(session) : null;
 
   return (
     <section
@@ -71,6 +74,39 @@ export default function ReferenceAudioPanel({ session, busy, setBusy, setError, 
           {" · "}
           <strong>Head trim:</strong> {formatSecs(ref?.head_trim_seconds)}
         </div>
+        {ref?.analyzed && grooveSummary ? (
+          <div
+            style={{
+              marginTop: 2,
+              padding: "0.45rem 0.55rem",
+              borderRadius: 8,
+              background: "#f1f5f9",
+              fontSize: 12,
+              color: "#334155",
+              lineHeight: 1.45,
+            }}
+          >
+            <div>
+              <strong>Source groove:</strong> {grooveSummary.detected ? "detected" : "not detected"}
+            </div>
+            <div>
+              <strong>Resolution:</strong> {grooveSummary.detected ? `${grooveSummary.resolution} slots/bar` : "—"}
+            </div>
+            <div>
+              <strong>Bars mapped:</strong> {grooveSummary.barsMapped} / {grooveSummary.barCount}
+            </div>
+            <div>
+              <strong>Avg groove confidence:</strong>{" "}
+              {grooveSummary.avgConfidence != null ? grooveSummary.avgConfidence.toFixed(2) : "—"}
+            </div>
+            <div>
+              <strong>Strong kick slots:</strong> {grooveSummary.kickSummary}
+            </div>
+            <div>
+              <strong>Strong snare slots:</strong> {grooveSummary.snareSummary}
+            </div>
+          </div>
+        ) : null}
       </div>
       <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <input

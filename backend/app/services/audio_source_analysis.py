@@ -12,6 +12,8 @@ import numpy as np
 from app.models.session import SectionSpan, SourceAnalysis
 from app.utils import music_theory as mt
 
+_GROOVE_SLOTS = 16
+
 _HOP_LENGTH = 512
 _TARGET_SR = 22050
 _MODE_CANDIDATES: tuple[str, ...] = (
@@ -432,6 +434,123 @@ def _estimate_tonal_center_mode(
     return int(best_tonic), round(tonal_conf, 4), _normalize_mode_label(best_mode), round(mode_conf, 4)
 
 
+def _soft_backbeat_snare_prior() -> np.ndarray:
+    """Gentle weighting around sixteenth slots 4 and 12 (beats 2 and 4); not hard hits."""
+    s = np.arange(_GROOVE_SLOTS, dtype=float)
+    bump = 0.07 * np.exp(-0.5 * ((s - 4.0) / 1.35) ** 2) + 0.07 * np.exp(-0.5 * ((s - 12.0) / 1.35) ** 2)
+    return 1.0 + bump
+
+
+def _derive_source_groove_slot_maps(
+    *,
+    y_perc: np.ndarray,
+    y_trimmed: np.ndarray,
+    sr: int,
+    onset_env: np.ndarray,
+    bar_starts_abs: list[float],
+    bar_count: int,
+    head_trim_seconds: float,
+    tempo_bpm: float,
+    bar_confidence: list[float],
+) -> tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]], list[float]]:
+    """Crude per-bar 16th-slot maps from percussive audio; values are later clamped by ``SourceAnalysis``."""
+    onset_weight: list[list[float]] = [[0.0] * _GROOVE_SLOTS for _ in range(bar_count)]
+    kick_weight: list[list[float]] = [[0.0] * _GROOVE_SLOTS for _ in range(bar_count)]
+    snare_weight: list[list[float]] = [[0.0] * _GROOVE_SLOTS for _ in range(bar_count)]
+    slot_pressure: list[list[float]] = [[0.0] * _GROOVE_SLOTS for _ in range(bar_count)]
+    groove_conf: list[float] = [0.0 for _ in range(bar_count)]
+
+    if bar_count <= 0 or y_trimmed.size < 8:
+        return onset_weight, kick_weight, snare_weight, slot_pressure, groove_conf
+
+    bpm = max(40.0, min(240.0, float(tempo_bpm)))
+    bar_len_sec = 4.0 * (60.0 / bpm)
+
+    onset = np.asarray(onset_env, dtype=float).ravel()
+    n = int(onset.size)
+    if n < 2:
+        return onset_weight, kick_weight, snare_weight, slot_pressure, groove_conf
+
+    S = np.abs(librosa.stft(y_perc, n_fft=2048, hop_length=_HOP_LENGTH, center=True))
+    n = min(n, int(S.shape[1]))
+    onset = onset[:n]
+    S = S[:, :n]
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    low_m = (freqs > 1.0) & (freqs < 220.0)
+    mid_m = (freqs >= 220.0) & (freqs < 7000.0)
+    kick_band = np.mean(S[low_m, :], axis=0) if np.any(low_m) else np.zeros(n, dtype=float)
+    snare_band = np.mean(S[mid_m, :], axis=0) if np.any(mid_m) else np.zeros(n, dtype=float)
+    kick_onset = np.maximum(0.0, np.diff(kick_band, prepend=float(kick_band[0])))
+    snare_onset = np.maximum(0.0, np.diff(snare_band, prepend=float(snare_band[0])))
+
+    rms = librosa.feature.rms(y=y_trimmed, frame_length=2048, hop_length=_HOP_LENGTH, center=True)[0]
+    rms = np.asarray(rms, dtype=float).ravel()
+    if rms.size < n:
+        rms = np.pad(rms, (0, n - int(rms.size)))
+    else:
+        rms = rms[:n]
+
+    def _abs_time_to_frame(t_abs: float) -> int:
+        local_t = max(0.0, float(t_abs) - float(head_trim_seconds))
+        fr_arr = librosa.time_to_frames(local_t, sr=sr, hop_length=_HOP_LENGTH)
+        fr = int(float(np.asarray(fr_arr).ravel()[0]))
+        return max(0, min(n - 1, fr))
+
+    prior = _soft_backbeat_snare_prior()
+    global_onset_peak = float(np.max(onset)) + 1e-9
+
+    for bar_i in range(bar_count):
+        t0 = float(bar_starts_abs[bar_i]) if bar_i < len(bar_starts_abs) else float(head_trim_seconds) + bar_i * bar_len_sec
+        if bar_i + 1 < len(bar_starts_abs):
+            t1 = float(bar_starts_abs[bar_i + 1])
+        else:
+            t1 = t0 + bar_len_sec
+        if t1 <= t0:
+            t1 = t0 + bar_len_sec
+        slot_w = (t1 - t0) / float(_GROOVE_SLOTS)
+
+        o_row = np.zeros(_GROOVE_SLOTS, dtype=float)
+        k_row = np.zeros(_GROOVE_SLOTS, dtype=float)
+        sn_row = np.zeros(_GROOVE_SLOTS, dtype=float)
+        r_row = np.zeros(_GROOVE_SLOTS, dtype=float)
+
+        for s in range(_GROOVE_SLOTS):
+            ts0 = t0 + s * slot_w
+            ts1 = t0 + (s + 1) * slot_w
+            f0 = _abs_time_to_frame(ts0)
+            f1 = _abs_time_to_frame(max(ts0 + 1e-5, ts1 - 1e-6))
+            if f1 < f0:
+                f1 = f0
+            sl = slice(f0, min(n, f1 + 1))
+            o_row[s] = float(np.max(onset[sl])) if sl.stop > sl.start else 0.0
+            k_slot = float(np.max(kick_band[sl])) + 0.55 * float(np.max(kick_onset[sl])) if sl.stop > sl.start else 0.0
+            sn_slot = float(np.max(snare_band[sl])) + 0.45 * float(np.max(snare_onset[sl])) if sl.stop > sl.start else 0.0
+            k_row[s] = k_slot
+            sn_row[s] = sn_slot
+            r_row[s] = float(np.max(rms[sl])) if sl.stop > sl.start else 0.0
+
+        sn_row = sn_row * prior
+        for row in (o_row, k_row, sn_row, r_row):
+            peak = float(np.max(row)) + 1e-9
+            row[:] = row / peak
+
+        p_row = 0.36 * o_row + 0.30 * k_row + 0.27 * sn_row + 0.07 * r_row
+        pp = float(np.max(p_row)) + 1e-9
+        p_row = p_row / pp
+
+        onset_weight[bar_i] = [round(float(x), 6) for x in o_row]
+        kick_weight[bar_i] = [round(float(x), 6) for x in k_row]
+        snare_weight[bar_i] = [round(float(x), 6) for x in sn_row]
+        slot_pressure[bar_i] = [round(float(x), 6) for x in p_row]
+
+        bar_peak = float(np.max(o_row))
+        activity = min(1.0, bar_peak / global_onset_peak)
+        bc = float(bar_confidence[bar_i]) if bar_i < len(bar_confidence) else 0.0
+        groove_conf[bar_i] = round(max(0.0, min(1.0, 0.52 * bc + 0.48 * activity)), 4)
+
+    return onset_weight, kick_weight, snare_weight, slot_pressure, groove_conf
+
+
 def analyze_reference_audio(
     *,
     audio_path: Path,
@@ -532,6 +651,23 @@ def analyze_reference_audio(
     bar_accent = [round((v / max_a) if max_a > 1e-9 else 0.0, 4) for v in bar_accent_raw]
     bar_conf = [round((0.6 * e) + (0.4 * a), 4) for e, a in zip(bar_energy, bar_accent)]
 
+    onset_w, kick_w, snare_w, pressure_w, groove_bar_conf = _derive_source_groove_slot_maps(
+        y_perc=y_perc,
+        y_trimmed=y_trimmed,
+        sr=sr,
+        onset_env=onset_env,
+        bar_starts_abs=bar_starts,
+        bar_count=bar_count,
+        head_trim_seconds=head_trim,
+        tempo_bpm=float(tempo_est),
+        bar_confidence=bar_conf,
+    )
+    groove_meta = {
+        "groove_map_version": "v0.7.0",
+        "groove_slots_per_bar": _GROOVE_SLOTS,
+        "hop_length": _HOP_LENGTH,
+    }
+
     chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=_HOP_LENGTH)
     low_chroma = librosa.feature.chroma_cqt(
         y=y_harm,
@@ -583,6 +719,13 @@ def analyze_reference_audio(
         bar_energy=bar_energy,
         bar_accent_profile=bar_accent,
         bar_confidence_profile=bar_conf,
+        source_groove_resolution=16,
+        source_onset_weight=onset_w,
+        source_kick_weight=kick_w,
+        source_snare_weight=snare_w,
+        source_slot_pressure=pressure_w,
+        source_groove_confidence=groove_bar_conf,
+        source_metadata=groove_meta,
     )
     return AudioAnalysisResult(
         source_analysis=source,

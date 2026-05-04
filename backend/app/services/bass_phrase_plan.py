@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import random
 
+from app.services.conditioning import (
+    UnifiedConditioning,
+    has_source_groove,
+    source_kick_weight,
+    source_snare_weight,
+    source_slot_pressure,
+)
 from app.services.session_context import SessionAnchorContext
 
 
@@ -51,18 +58,45 @@ def _ensure_root(slots: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(out)
 
 
+def _source_groove_slot_merge(
+    slots: tuple[int, ...],
+    conditioning: UnifiedConditioning,
+    bar: int,
+) -> tuple[int, ...]:
+    """Nudge phrase slots toward upload kick/pressure; skip snare-heavy slots without kick support."""
+    kick_order = sorted(range(16), key=lambda i: source_kick_weight(conditioning, bar, i), reverse=True)
+    hits = [i for i in kick_order if source_kick_weight(conditioning, bar, i) >= 0.34][:2]
+    extras: list[int] = list(hits)
+    for i in sorted(range(16), key=lambda j: source_slot_pressure(conditioning, bar, j), reverse=True):
+        if i in extras:
+            continue
+        sk = source_kick_weight(conditioning, bar, i)
+        sn = source_snare_weight(conditioning, bar, i)
+        if sn >= 0.58 and sk < 0.36:
+            continue
+        if source_slot_pressure(conditioning, bar, i) >= 0.42 or sk >= 0.4:
+            extras.append(i)
+        if len(extras) >= 4:
+            break
+    merged = sorted(set(slots).union(extras[:3]))
+    return _ensure_root(tuple(merged))
+
+
 def _kick_merge(
     slots: tuple[int, ...],
     *,
     context: SessionAnchorContext | None,
     bar: int,
+    conditioning: UnifiedConditioning | None = None,
 ) -> tuple[int, ...]:
-    if context is None or context.anchor_lane != "drums":
-        return slots
-    kick_row = context.kick_slot_weight[bar] if bar < len(context.kick_slot_weight) else ()
-    kick_hits = [i for i, v in enumerate(kick_row) if v >= 0.45]
-    merged = sorted(set(slots).union(kick_hits[:2]))
-    return _ensure_root(tuple(merged))
+    if context is not None and context.anchor_lane == "drums":
+        kick_row = context.kick_slot_weight[bar] if bar < len(context.kick_slot_weight) else ()
+        kick_hits = [i for i, v in enumerate(kick_row) if v >= 0.45]
+        merged = sorted(set(slots).union(kick_hits[:2]))
+        return _ensure_root(tuple(merged))
+    if conditioning is not None and has_source_groove(conditioning):
+        return _source_groove_slot_merge(slots, conditioning, bar)
+    return slots
 
 
 def _make_cell(base_slots: tuple[int, ...], rng: random.Random, *, style: str) -> tuple[PhraseBarPlan, ...]:
@@ -148,6 +182,7 @@ def build_phrase_plan(
     style: str,
     salt: int,
     context: SessionAnchorContext | None,
+    conditioning: UnifiedConditioning | None = None,
 ) -> list[PhraseBarPlan]:
     rng = random.Random(int(salt) * 7919 + max(1, bar_count) * 104729)
     base_slots = _style_seed_slots(style)
@@ -158,7 +193,7 @@ def build_phrase_plan(
             bar = cell_start + i
             if bar >= bar_count:
                 break
-            slots = _kick_merge(bar_plan.slots, context=context, bar=bar)
+            slots = _kick_merge(bar_plan.slots, context=context, bar=bar, conditioning=conditioning)
             out.append(
                 PhraseBarPlan(
                     role=bar_plan.role,

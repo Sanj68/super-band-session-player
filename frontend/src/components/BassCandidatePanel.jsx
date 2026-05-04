@@ -13,6 +13,7 @@ import {
   stopMidiAudition,
 } from "../api/client.js";
 import PianoRollPreview from "./PianoRollPreview.jsx";
+import { getSourceAwareBassStatusLine } from "../utils/sourceGroove.js";
 
 const MAX_VISIBLE_RUNS = 10;
 const MAX_PREFETCH_TAKES = 24;
@@ -740,6 +741,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     >
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Bass Candidates (conditioning run)</summary>
       <div style={{ marginTop: 10, display: "grid", gap: "0.6rem", maxWidth: 900 }}>
+        <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>{getSourceAwareBassStatusLine(session)}</p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
           <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
             Take count

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.services.conditioning import UnifiedConditioning
+from app.services.conditioning import UnifiedConditioning, has_source_groove
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class ReferenceGrooveGuidance:
     bar_accent: tuple[float, ...] = ()
     bar_confidence: tuple[float, ...] = ()
     min_bar_conf: float = 0.35
+    has_source_slot_groove: bool = False
 
     def should_apply_bar(self, bar_index: int) -> bool:
         if not self.available:
@@ -43,6 +44,7 @@ def build_reference_guidance(
             source_tag="session_midi",
             reason="midi_anchor_present",
             min_bar_conf=min_bar_conf,
+            has_source_slot_groove=False,
         )
     if conditioning is None:
         return ReferenceGrooveGuidance(
@@ -50,16 +52,19 @@ def build_reference_guidance(
             source_tag="fallback",
             reason="no_reference_audio",
             min_bar_conf=min_bar_conf,
+            has_source_slot_groove=False,
         )
 
     bar_energy = _clean_values(conditioning.bar_energy)
     bar_accent = _clean_values(conditioning.bar_accent)
     bar_confidence = _clean_values(conditioning.bar_confidence)
+    slot_groove_ok = has_source_groove(conditioning)
     base = {
         "bar_energy": bar_energy,
         "bar_accent": bar_accent,
         "bar_confidence": bar_confidence,
         "min_bar_conf": min_bar_conf,
+        "has_source_slot_groove": slot_groove_ok,
     }
 
     tempo_conf = float(conditioning.tempo_confidence)

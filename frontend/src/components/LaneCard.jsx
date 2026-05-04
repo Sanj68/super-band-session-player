@@ -20,6 +20,8 @@ export default function LaneCard({
   notes,
   barCount,
   tempoBpm,
+  /** Informational one-liner (e.g. source-aware bass status). */
+  statusLine,
   /** @type {{ mode: string, onModeChange: (m: string) => void, onSubmit: (m: string) => void } | undefined} */
   suitPart,
 }) {
@@ -75,6 +77,9 @@ export default function LaneCard({
           )}
         </div>
       </div>
+      {statusLine ? (
+        <p style={{ margin: "0.35rem 0 0", fontSize: 12, color: "#64748b", lineHeight: 1.35 }}>{statusLine}</p>
+      ) : null}
       <p style={{ color: "#475569", fontSize: 14, marginTop: "0.75rem", marginBottom: 0 }}>
         {preview || "—"}
       </p>
