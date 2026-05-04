@@ -293,6 +293,89 @@ def _pitch_motion_score(rows: list[list[LaneNote]]) -> float:
     return _clamp(stepish * 0.9 + (1.0 - leaps) * 0.1)
 
 
+def _musicality_adjustment(
+    rows: list[list[LaneNote]],
+    signature: tuple[tuple[int, ...], ...],
+    *,
+    conditioning: UnifiedConditioning | None,
+    key: str,
+    scale: str,
+) -> float:
+    """Small bounded anti-boring nudge for candidate ranking.
+
+    The base scores still dominate; this only separates safe-but-flat root
+    pockets from controlled source-aware riff pockets.
+    """
+    notes = [n for row in rows for n in row]
+    if not notes:
+        return 0.0
+
+    root_hits = 0
+    target_nonroot_hits = 0
+    avoid_hits = 0
+    for bar, bar_notes in enumerate(rows):
+        h = _harmonic_bar(bar, conditioning=conditioning, key=key, scale=scale)
+        root = int(h.root_pc) % 12
+        target = {int(x) % 12 for x in h.target_pcs}
+        avoid = {int(x) % 12 for x in h.avoid_pcs}
+        for n in bar_notes:
+            pc = int(n.pitch) % 12
+            if pc == root:
+                root_hits += 1
+            elif pc in target:
+                target_nonroot_hits += 1
+            if pc in avoid:
+                avoid_hits += 1
+
+    total_notes = max(1, len(notes))
+    root_rate = root_hits / total_notes
+    color_rate = target_nonroot_hits / total_notes
+    avoid_rate = avoid_hits / total_notes
+
+    slots = [s for bar_sig in signature for s in bar_sig]
+    slot_total = max(1, len(slots))
+    slot_0_8_rate = sum(1 for s in slots if s in (0, 8)) / slot_total
+    offbeat_rate = sum(1 for s in slots if s % 4 != 0) / slot_total
+
+    adj = 0.0
+    if root_rate >= 0.92:
+        adj -= 0.095
+    elif root_rate >= 0.82:
+        adj -= 0.055
+    if slot_0_8_rate >= 0.86:
+        adj -= 0.075
+    elif slot_0_8_rate >= 0.72:
+        adj -= 0.045
+    if conditioning is not None and has_source_groove(conditioning) and offbeat_rate < 0.18:
+        adj -= 0.045
+    if 0.16 <= color_rate <= 0.46 and avoid_rate <= 0.04:
+        adj += 0.055
+    if conditioning is not None and has_source_groove(conditioning):
+        aligned = 0
+        source_total = 0
+        for bar, bar_sig in enumerate(signature):
+            for slot in bar_sig:
+                source_total += 1
+                sk = source_kick_weight(conditioning, bar, slot)
+                pr = source_slot_pressure(conditioning, bar, slot)
+                sn = source_snare_weight(conditioning, bar, slot)
+                if (sk >= 0.34 or pr >= 0.48) and not (sn >= 0.58 and sk < 0.32):
+                    aligned += 1
+        align_rate = aligned / max(1, source_total)
+        if align_rate >= 0.58:
+            adj += 0.035
+    if len(signature) >= 4:
+        recalls = []
+        for i in range(2, len(signature)):
+            a = set(signature[i - 2])
+            b = set(signature[i])
+            recalls.append(len(a & b) / (len(a | b) or 1))
+        recall = sum(recalls) / len(recalls) if recalls else 0.0
+        if 0.45 <= recall <= 0.9:
+            adj += 0.025
+    return max(-0.12, min(0.12, adj))
+
+
 def analyze_bass_take(
     notes: list[LaneNote],
     *,
@@ -338,6 +421,7 @@ def analyze_bass_take(
         "space_rest_quality": 0.07,
     }
     total = sum(scores[k] * weights[k] for k in weights)
+    total = _clamp(total + _musicality_adjustment(rows, signature, conditioning=conditioning, key=key, scale=scale))
     strongest = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:2]
     weakest = sorted(scores.items(), key=lambda kv: kv[1])[:2]
     reason = (

@@ -11,7 +11,7 @@ from app.main import app
 from app.models.session import BassCandidateTake, LaneNote
 from app.routes import session_routes
 from app.services import bass_candidate_store
-from app.services.bass_quality import BassTakeQuality
+from app.services.bass_quality import BassTakeQuality, analyze_bass_take
 
 
 QUALITY_KEYS = {
@@ -75,6 +75,41 @@ def test_bass_candidates_return_quality_metadata(tmp_path: Path) -> None:
 
     # Public output should be ranked strongest first.
     assert totals == sorted(totals, reverse=True)
+
+
+def test_quality_scores_controlled_riff_above_root_only_one_and_three() -> None:
+    tempo = 118
+    spb = 60.0 / tempo
+    bar_len = spb * 4.0
+    root_only: list[LaneNote] = []
+    riff: list[LaneNote] = []
+    for bar in range(4):
+        b0 = bar * bar_len
+        for slot in (0, 8):
+            t = b0 + slot * (spb / 4.0)
+            root_only.append(LaneNote(pitch=42, start=t, end=t + 0.35, velocity=90))
+        for slot, pitch in ((0, 42), (7, 54), (8, 49), (10, 45)):
+            t = b0 + slot * (spb / 4.0)
+            riff.append(LaneNote(pitch=pitch, start=t, end=t + 0.22, velocity=86))
+
+    q_root = analyze_bass_take(
+        root_only,
+        tempo=tempo,
+        bar_count=4,
+        key="F#",
+        scale="natural_minor",
+        style="supportive",
+    )
+    q_riff = analyze_bass_take(
+        riff,
+        tempo=tempo,
+        bar_count=4,
+        key="F#",
+        scale="natural_minor",
+        style="supportive",
+    )
+
+    assert q_riff.total > q_root.total
 
 
 def test_bass_candidates_hidden_pool_dedupe_structure(tmp_path: Path, monkeypatch) -> None:

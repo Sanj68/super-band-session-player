@@ -123,6 +123,14 @@ def _note_count_at_slot(midi_bytes: bytes, *, tempo: int, bar: int, slot: int) -
     return c
 
 
+def _notes(midi_bytes: bytes) -> list[pretty_midi.Note]:
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    return sorted(
+        [n for ins in pm.instruments for n in ins.notes],
+        key=lambda n: (float(n.start), int(n.pitch)),
+    )
+
+
 def test_different_source_kick_maps_change_onset_slots() -> None:
     z = [[0.06] * 16 for _ in range(2)]
     p = [[0.35] * 16 for _ in range(2)]
@@ -352,3 +360,119 @@ def test_analyze_bass_take_boosts_groove_when_aligned_with_source_kick() -> None
         context=None,
     )
     assert q_match.scores["groove_fit"] > q_miss.scores["groove_fit"]
+
+
+def test_repeated_minor_source_groove_generates_more_than_slots_0_and_8() -> None:
+    kick = [[0.08] * 16 for _ in range(8)]
+    pressure = [[0.22] * 16 for _ in range(8)]
+    for bar in range(8):
+        kick[bar][0] = 0.92
+        kick[bar][8] = 0.72
+        kick[bar][7 if bar % 2 == 0 else 10] = 0.86
+        pressure[bar][7 if bar % 2 == 0 else 10] = 0.78
+    uc = _uc(bar_count=8, kick=kick, pressure=pressure, groove_conf=[0.55] * 8)
+
+    data, _preview = generate_bass(
+        tempo=118,
+        bar_count=8,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"],
+        seed=8101,
+        conditioning=uc,
+    )
+
+    sig = _slots_signature(data, tempo=118, bar_count=8)
+    all_slots = {s for row in sig for s in row}
+    assert 0 in all_slots
+    assert any(s not in (0, 8) for s in all_slots)
+    assert max(len(row) for row in sig) <= 4
+
+
+def test_repeated_minor_source_groove_adds_controlled_colour_or_octave() -> None:
+    kick = [[0.08] * 16 for _ in range(8)]
+    pressure = [[0.22] * 16 for _ in range(8)]
+    for bar in range(8):
+        kick[bar][0] = 0.9
+        kick[bar][8] = 0.74
+        kick[bar][6] = 0.88
+        pressure[bar][6] = 0.82
+    uc = _uc(bar_count=8, kick=kick, pressure=pressure, groove_conf=[0.55] * 8)
+
+    data, _preview = generate_bass(
+        tempo=118,
+        bar_count=8,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"],
+        seed=8102,
+        conditioning=uc,
+    )
+
+    notes = _notes(data)
+    root_pc = 6
+    safe_colour = {1, 4, 9}  # C# fifth, A minor third, E flat-seven.
+    assert any(n.pitch % 12 in safe_colour for n in notes) or any(n.pitch >= 54 and n.pitch % 12 == root_pc for n in notes)
+
+
+def test_repeated_minor_source_groove_follows_strong_offbeat_kick_pressure() -> None:
+    kick = [[0.04] * 16 for _ in range(4)]
+    pressure = [[0.12] * 16 for _ in range(4)]
+    for bar in range(4):
+        kick[bar][0] = 0.9
+        kick[bar][8] = 0.68
+    kick[0][7] = 0.98
+    pressure[0][7] = 0.92
+    uc = _uc(bar_count=4, kick=kick, pressure=pressure, groove_conf=[0.6] * 4)
+
+    data, _preview = generate_bass(
+        tempo=118,
+        bar_count=4,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"],
+        seed=8103,
+        conditioning=uc,
+    )
+
+    assert _note_count_at_slot(data, tempo=118, bar=0, slot=7) >= 1
+
+
+def test_repeated_minor_source_groove_avoids_strong_snare_without_kick() -> None:
+    kick = [[0.04] * 16 for _ in range(4)]
+    pressure = [[0.12] * 16 for _ in range(4)]
+    snare_low = [[0.04] * 16 for _ in range(4)]
+    snare_hot = [[0.04] * 16 for _ in range(4)]
+    for bar in range(4):
+        kick[bar][0] = 0.9
+        kick[bar][8] = 0.68
+    pressure[0][7] = 0.95
+    snare_hot[0][7] = 0.98
+    uc_low = _uc(bar_count=4, kick=[r[:] for r in kick], pressure=pressure, snare=snare_low, groove_conf=[0.6] * 4)
+    uc_hot = _uc(bar_count=4, kick=[r[:] for r in kick], pressure=pressure, snare=snare_hot, groove_conf=[0.6] * 4)
+
+    low, _ = generate_bass(
+        tempo=118,
+        bar_count=4,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"],
+        seed=8104,
+        conditioning=uc_low,
+    )
+    hot, _ = generate_bass(
+        tempo=118,
+        bar_count=4,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"],
+        seed=8104,
+        conditioning=uc_hot,
+    )
+
+    assert _note_count_at_slot(low, tempo=118, bar=0, slot=7) >= _note_count_at_slot(hot, tempo=118, bar=0, slot=7)
