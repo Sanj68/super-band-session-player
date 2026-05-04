@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -409,6 +409,40 @@ class SectionSpan(BaseModel):
     end_bar: int = Field(ge=0)
 
 
+_GROOVE_SLOTS = 16
+
+
+def _clamp01(x: float) -> float:
+    if x != x:  # NaN
+        return 0.0
+    return max(0.0, min(1.0, float(x)))
+
+
+def _ensure_groove_rows(rows: list[list[float]] | None, n_bars: int) -> list[list[float]]:
+    """Exactly ``n_bars`` rows of ``_GROOVE_SLOTS`` floats in 0..1."""
+    raw = rows or []
+    out: list[list[float]] = []
+    for i in range(n_bars):
+        if i < len(raw) and raw[i] is not None:
+            r = [_clamp01(float(v)) for v in raw[i]][:_GROOVE_SLOTS]
+            r.extend([0.0] * (_GROOVE_SLOTS - len(r)))
+        else:
+            r = [0.0] * _GROOVE_SLOTS
+        out.append(r)
+    return out
+
+
+def _ensure_groove_confidence(vals: list[float] | None, n_bars: int) -> list[float]:
+    raw = vals or []
+    out: list[float] = []
+    for i in range(n_bars):
+        if i < len(raw):
+            out.append(_clamp01(float(raw[i])))
+        else:
+            out.append(0.0)
+    return out
+
+
 class SourceAnalysis(BaseModel):
     source_lane: str = Field(description="Lane used as analysis source (or 'none').")
     tempo: int = Field(ge=40, le=240)
@@ -433,6 +467,62 @@ class SourceAnalysis(BaseModel):
     bar_energy: list[float] = Field(default_factory=list, description="Per-bar normalized energy 0..1.")
     bar_accent_profile: list[float] = Field(default_factory=list, description="Per-bar normalized first-beat accent strength 0..1.")
     bar_confidence_profile: list[float] = Field(default_factory=list, description="Per-bar confidence in rhythm/grid evidence 0..1.")
+    source_groove_resolution: int = Field(
+        default=16,
+        ge=1,
+        le=64,
+        description="Subdivision slots per bar for source groove maps (16 = sixteenths).",
+    )
+    source_onset_weight: list[list[float]] = Field(
+        default_factory=list,
+        description="Per-bar sixteenth-slot percussive onset emphasis 0..1.",
+    )
+    source_kick_weight: list[list[float]] = Field(
+        default_factory=list,
+        description="Per-bar low-band percussive energy / onset proxy 0..1.",
+    )
+    source_snare_weight: list[list[float]] = Field(
+        default_factory=list,
+        description="Per-bar mid/high-band percussive energy / onset proxy 0..1.",
+    )
+    source_slot_pressure: list[list[float]] = Field(
+        default_factory=list,
+        description="Combined rhythmic slot pressure 0..1 for conditioning.",
+    )
+    source_groove_confidence: list[float] = Field(
+        default_factory=list,
+        description="Per-bar confidence in groove-slot maps 0..1.",
+    )
+    source_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional small metadata bag for analysis versioning and diagnostics.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_source_groove_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        bar_e = out.get("bar_energy") or []
+        bar_s = out.get("bar_starts_seconds") or []
+        bar_c = out.get("bar_confidence_profile") or []
+        bar_a = out.get("bar_accent_profile") or []
+        n_bars = max(len(bar_e), len(bar_s), len(bar_c), len(bar_a), 1)
+        raw_res = out.get("source_groove_resolution", 16)
+        if raw_res is None:
+            raw_res = 16
+        try:
+            res = int(raw_res)
+        except (TypeError, ValueError):
+            res = 16
+        out["source_groove_resolution"] = max(1, min(64, res))
+        out["source_onset_weight"] = _ensure_groove_rows(out.get("source_onset_weight"), n_bars)
+        out["source_kick_weight"] = _ensure_groove_rows(out.get("source_kick_weight"), n_bars)
+        out["source_snare_weight"] = _ensure_groove_rows(out.get("source_snare_weight"), n_bars)
+        out["source_slot_pressure"] = _ensure_groove_rows(out.get("source_slot_pressure"), n_bars)
+        out["source_groove_confidence"] = _ensure_groove_confidence(out.get("source_groove_confidence"), n_bars)
+        return out
 
 
 class GrooveProfile(BaseModel):

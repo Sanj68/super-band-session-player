@@ -6,6 +6,7 @@ import {
   patchSession,
   uploadReferenceAudio,
 } from "../api/client.js";
+import { getSourceGrooveSummary } from "../utils/sourceGroove.js";
 
 const PC_TO_KEY = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -35,6 +36,7 @@ export default function UploadFirstEntryPanel({
   const [selectedFile, setSelectedFile] = useState(null);
   const source = session?.engine_data?.source_analysis ?? null;
   const refAudio = session?.reference_audio ?? null;
+  const grooveSummary = session && source ? getSourceGrooveSummary(session) : null;
 
   const warnings = useMemo(() => {
     if (!source) return [];
@@ -176,6 +178,16 @@ export default function UploadFirstEntryPanel({
         <div>
           <strong>Source-analysis status:</strong> {source?.source_lane ?? "none"}
         </div>
+        {refAudio?.analyzed && grooveSummary ? (
+          <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.45 }}>
+            <strong>Source groove:</strong> {grooveSummary.detected ? "detected" : "not detected"} ·{" "}
+            <strong>resolution</strong> {grooveSummary.detected ? `${grooveSummary.resolution}/bar` : "—"} ·{" "}
+            <strong>bars</strong> {grooveSummary.barsMapped}/{grooveSummary.barCount} ·{" "}
+            <strong>avg conf</strong>{" "}
+            {grooveSummary.avgConfidence != null ? grooveSummary.avgConfidence.toFixed(2) : "—"} ·{" "}
+            <strong>kick</strong> {grooveSummary.kickSummary} · <strong>snare</strong> {grooveSummary.snareSummary}
+          </div>
+        ) : null}
         {warnings.length > 0 ? (
           <div style={{ color: "#b45309" }}>
             <strong>Warnings:</strong> {warnings.join(" · ")}

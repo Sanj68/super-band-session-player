@@ -30,6 +30,7 @@ import SavedSetupsPanel from "./components/SavedSetupsPanel.jsx";
 import SessionComparePanel from "./components/SessionComparePanel.jsx";
 import SessionControls from "./components/SessionControls.jsx";
 import UploadFirstEntryPanel from "./components/UploadFirstEntryPanel.jsx";
+import { getSourceAwareBassStatusLine } from "./utils/sourceGroove.js";
 
 const ACTIVE_LEAD_OPTIONS = [
   { value: "melodic", label: "Melodic" },
@@ -2106,6 +2107,7 @@ export default function App() {
               onRegenerate={onRegenerate}
               onGenerateAround={onGenerateAroundLane}
               onSetLocked={onSetLaneLock}
+              statusLine={getSourceAwareBassStatusLine(session)}
             />
             <LaneCard
               title="Chords"

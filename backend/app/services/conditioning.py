@@ -37,12 +37,70 @@ class UnifiedConditioning:
     bar_energy: tuple[float, ...] | None = None
     bar_accent: tuple[float, ...] | None = None
     bar_confidence: tuple[float, ...] | None = None
+    source_groove_resolution: int | None = None
+    source_onset_weight: tuple[tuple[float, ...], ...] = ()
+    source_kick_weight: tuple[tuple[float, ...], ...] = ()
+    source_snare_weight: tuple[tuple[float, ...], ...] = ()
+    source_slot_pressure: tuple[tuple[float, ...], ...] = ()
+    source_groove_confidence: tuple[float, ...] = ()
 
     def harmonic_bar(self, bar: int) -> ConditioningHarmonicBar | None:
         if not self.harmonic_bars:
             return None
         i = max(0, min(bar, len(self.harmonic_bars) - 1))
         return self.harmonic_bars[i]
+
+
+def _groove_bar_slot_indices(conditioning: UnifiedConditioning, bar_index: int, slot_index: int) -> tuple[int, int]:
+    """Clamp bar and slot like ``harmonic_bar`` clamps bar index."""
+    bars = max(1, int(conditioning.bar_count))
+    b = max(0, min(bar_index, bars - 1))
+    s = max(0, min(int(slot_index), 15))
+    return b, s
+
+
+def has_source_groove(conditioning: UnifiedConditioning | None) -> bool:
+    if conditioning is None:
+        return False
+    rows = conditioning.source_slot_pressure
+    if not rows:
+        return False
+    if len(rows) < int(conditioning.bar_count):
+        return False
+    return any(float(x) > 1e-6 for row in rows for x in row)
+
+
+def source_kick_weight(conditioning: UnifiedConditioning | None, bar_index: int, slot_index: int) -> float:
+    if conditioning is None or not conditioning.source_kick_weight:
+        return 0.0
+    b, s = _groove_bar_slot_indices(conditioning, bar_index, slot_index)
+    row = conditioning.source_kick_weight[b] if b < len(conditioning.source_kick_weight) else ()
+    if not row or s >= len(row):
+        return 0.0
+    v = float(row[s])
+    return v if v == v else 0.0
+
+
+def source_snare_weight(conditioning: UnifiedConditioning | None, bar_index: int, slot_index: int) -> float:
+    if conditioning is None or not conditioning.source_snare_weight:
+        return 0.0
+    b, s = _groove_bar_slot_indices(conditioning, bar_index, slot_index)
+    row = conditioning.source_snare_weight[b] if b < len(conditioning.source_snare_weight) else ()
+    if not row or s >= len(row):
+        return 0.0
+    v = float(row[s])
+    return v if v == v else 0.0
+
+
+def source_slot_pressure(conditioning: UnifiedConditioning | None, bar_index: int, slot_index: int) -> float:
+    if conditioning is None or not conditioning.source_slot_pressure:
+        return 0.0
+    b, s = _groove_bar_slot_indices(conditioning, bar_index, slot_index)
+    row = conditioning.source_slot_pressure[b] if b < len(conditioning.source_slot_pressure) else ()
+    if not row or s >= len(row):
+        return 0.0
+    v = float(row[s])
+    return v if v == v else 0.0
 
 
 def build_unified_conditioning(
@@ -108,4 +166,10 @@ def build_unified_conditioning(
         sections=tuple(source.sections),
         groove_profile=groove,
         harmonic_bars=tuple(harm_rows),
+        source_groove_resolution=source.source_groove_resolution,
+        source_onset_weight=tuple(tuple(float(x) for x in row) for row in source.source_onset_weight),
+        source_kick_weight=tuple(tuple(float(x) for x in row) for row in source.source_kick_weight),
+        source_snare_weight=tuple(tuple(float(x) for x in row) for row in source.source_snare_weight),
+        source_slot_pressure=tuple(tuple(float(x) for x in row) for row in source.source_slot_pressure),
+        source_groove_confidence=tuple(float(x) for x in source.source_groove_confidence),
     )

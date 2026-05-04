@@ -6,7 +6,14 @@ from dataclasses import dataclass
 import math
 
 from app.models.session import LaneNote
-from app.services.conditioning import ConditioningHarmonicBar, UnifiedConditioning
+from app.services.conditioning import (
+    ConditioningHarmonicBar,
+    UnifiedConditioning,
+    has_source_groove,
+    source_kick_weight,
+    source_snare_weight,
+    source_slot_pressure,
+)
 from app.services.session_context import SessionAnchorContext, drum_kick_weight, slot_pressure
 from app.utils import music_theory as mt
 
@@ -127,7 +134,14 @@ def _harmonic_score(rows: list[list[LaneNote]], *, conditioning: UnifiedConditio
     return _clamp(weighted / total), _clamp(1.0 - (avoid_rate * 2.2))
 
 
-def _groove_score(rows: list[list[LaneNote]], *, context: SessionAnchorContext | None, tempo: int, bar_anchor: float) -> float:
+def _groove_score(
+    rows: list[list[LaneNote]],
+    *,
+    context: SessionAnchorContext | None,
+    tempo: int,
+    bar_anchor: float,
+    conditioning: UnifiedConditioning | None = None,
+) -> float:
     if not rows:
         return 0.0
     spb = 60.0 / float(max(40, min(240, tempo)))
@@ -148,6 +162,13 @@ def _groove_score(rows: list[list[LaneNote]], *, context: SessionAnchorContext |
                 kick = drum_kick_weight(context, bar, slot)
                 pressure = slot_pressure(context, bar, slot)
                 score += _clamp(0.35 + 0.75 * kick - 0.3 * max(0.0, pressure - kick))
+            elif conditioning is not None and has_source_groove(conditioning) and (
+                context is None or context.anchor_lane != "drums"
+            ):
+                sk = source_kick_weight(conditioning, bar, slot)
+                pr = source_slot_pressure(conditioning, bar, slot)
+                sn = source_snare_weight(conditioning, bar, slot)
+                score += _clamp(0.35 + 0.42 * sk + 0.22 * pr - 0.2 * max(0.0, sn - sk))
             else:
                 score += 0.9 if slot % 4 == 0 else 0.62
     return _clamp(score / max(total, 1e-9))
@@ -290,7 +311,7 @@ def analyze_bass_take(
     rows = _group_notes_by_bar(notes, bar_count=bars, tempo=tempo, bar_anchor=anchor)
     signature = _rhythm_signature(rows, tempo=tempo, bar_anchor=anchor)
     harmonic, avoid = _harmonic_score(rows, conditioning=conditioning, key=key, scale=scale)
-    groove = _groove_score(rows, context=context, tempo=tempo, bar_anchor=anchor)
+    groove = _groove_score(rows, context=context, tempo=tempo, bar_anchor=anchor, conditioning=conditioning)
     phrase = _phrase_score(signature)
     register = _register_score(notes)
     repvar = _repetition_variation_score(signature)
