@@ -393,6 +393,167 @@ def _source_kick_window_max(conditioning: UnifiedConditioning, bar: int, slot: i
     return max(source_kick_weight(conditioning, bar, j) for j in range(lo, hi + 1))
 
 
+def _repeated_minor_chord_root_pc(chord_progression: list[str] | None, bar_count: int) -> int | None:
+    """Return the repeated manual minor root pc, or None when not a one-chord minor vamp."""
+    try:
+        chords = mt.progression_chords_for_bars(chord_progression, max(1, int(bar_count)))
+    except ValueError:
+        return None
+    if not chords:
+        return None
+    root = int(chords[0].root_pc) % 12
+    quality = str(chords[0].quality)
+    if not quality.startswith("minor"):
+        return None
+    for chord in chords[1:]:
+        if int(chord.root_pc) % 12 != root or str(chord.quality) != quality:
+            return None
+    return root
+
+
+def _supportive_source_minor_riff_active(
+    *,
+    style: str,
+    context: SessionAnchorContext | None,
+    conditioning: UnifiedConditioning | None,
+    chord_progression: list[str] | None,
+    bar_count: int,
+) -> int | None:
+    if style != "supportive":
+        return None
+    if not _source_groove_rhythm(conditioning, context):
+        return None
+    return _repeated_minor_chord_root_pc(chord_progression, bar_count)
+
+
+def _source_riff_slot_score(conditioning: UnifiedConditioning, bar: int, slot: int) -> float:
+    sk = source_kick_weight(conditioning, bar, slot)
+    pr = source_slot_pressure(conditioning, bar, slot)
+    sn = source_snare_weight(conditioning, bar, slot)
+    neighbor = _source_kick_window_max(conditioning, bar, slot, radius=1)
+    score = (0.58 * sk) + (0.28 * pr) + (0.16 * neighbor)
+    if sn >= 0.5 and sk < 0.32:
+        score -= 0.55 * sn
+    if slot in (0, 8):
+        score -= 0.45
+    if slot % 4 == 0:
+        score -= 0.08
+    return score
+
+
+def _source_riff_pick_slots(
+    conditioning: UnifiedConditioning,
+    *,
+    bar: int,
+    salt: int,
+    prefer_from: tuple[int, ...] = (),
+) -> tuple[int, ...]:
+    candidates = tuple(s for s in range(1, 16) if s != 8)
+    ranked = sorted(
+        candidates,
+        key=lambda s: (
+            _source_riff_slot_score(conditioning, bar, s),
+            -abs(s - 8),
+            -((salt + bar * 17 + s * 31) % 11),
+        ),
+        reverse=True,
+    )
+    picked: list[int] = []
+    for s in prefer_from:
+        if s in candidates and _source_riff_slot_score(conditioning, bar, s) >= 0.12:
+            picked.append(int(s))
+        if len(picked) >= 2:
+            break
+    for s in ranked:
+        if s in picked:
+            continue
+        if _source_riff_slot_score(conditioning, bar, s) < 0.16 and picked:
+            continue
+        sk = source_kick_weight(conditioning, bar, s)
+        sn = source_snare_weight(conditioning, bar, s)
+        if sn >= 0.58 and sk < 0.34:
+            continue
+        picked.append(int(s))
+        if len(picked) >= 2:
+            break
+    if not picked:
+        fallback = (6, 10, 14, 15, 5, 11)
+        picked = [fallback[(salt + bar) % len(fallback)]]
+    return tuple(sorted(set(picked[:2])))
+
+
+def _build_supportive_source_minor_riff_slots(
+    conditioning: UnifiedConditioning,
+    *,
+    bar_count: int,
+    salt: int,
+) -> tuple[tuple[int, ...], ...]:
+    bars = max(1, int(bar_count))
+    cell_len = 2 if bars >= 2 else 1
+    cell_extras = tuple(
+        _source_riff_pick_slots(conditioning, bar=bar, salt=salt)
+        for bar in range(cell_len)
+    )
+    out: list[tuple[int, ...]] = []
+    for bar in range(bars):
+        extras = set(cell_extras[bar % cell_len])
+        hot = _source_riff_pick_slots(conditioning, bar=bar, salt=salt, prefer_from=tuple(sorted(extras)))
+        for s in hot:
+            if _source_riff_slot_score(conditioning, bar, s) >= 0.34:
+                extras.add(s)
+        if (bar + 1) % 4 == 0:
+            release_pick = _source_riff_pick_slots(conditioning, bar=bar, salt=salt + 19, prefer_from=(14, 15, 12))
+            extras.add(release_pick[-1])
+        slots = sorted({0, 8, *extras})
+        if len(slots) > 4:
+            protected = {0, 8}
+            extras_ranked = sorted(
+                (s for s in slots if s not in protected),
+                key=lambda s: (_source_riff_slot_score(conditioning, bar, s), s >= 12),
+                reverse=True,
+            )
+            slots = sorted({0, 8, *extras_ranked[:2]})
+        out.append(tuple(slots))
+    return tuple(out)
+
+
+def _supportive_source_minor_pitch(
+    *,
+    slot: int,
+    note_index: int,
+    role: str,
+    root_pitch: int,
+    fifth_pitch: int,
+    third_pitch: int,
+    avoid_pcs: tuple[int, ...],
+    scale: str,
+    rng: random.Random | object,
+) -> int:
+    if slot == 0:
+        return root_pitch
+    root_pc = root_pitch % 12
+    scale_pcs = {(root_pc + interval) % 12 for interval in mt.scale_intervals(scale)}
+    flat7_pc = (root_pc + 10) % 12
+    octave = root_pitch + 12 if root_pitch + 12 <= 58 else root_pitch
+    choices: list[int] = [root_pitch, fifth_pitch, octave, third_pitch]
+    if flat7_pc in scale_pcs and flat7_pc not in set(avoid_pcs):
+        choices.append(_nearest_pitch_for_pc(flat7_pc, root_pitch, lo=30, hi=62))
+    if slot == 8:
+        weights = (0.34, 0.28, 0.26, 0.12) + ((0.10,) if len(choices) > 4 else ())
+    elif role == "release" and slot >= 12:
+        weights = (0.38, 0.24, 0.14, 0.10) + ((0.22,) if len(choices) > 4 else ())
+    elif note_index % 2 == 0:
+        weights = (0.18, 0.28, 0.36, 0.16) + ((0.14,) if len(choices) > 4 else ())
+    else:
+        weights = (0.22, 0.30, 0.20, 0.24) + ((0.14,) if len(choices) > 4 else ())
+    if len(weights) != len(choices):
+        weights = tuple(1.0 for _ in choices)
+    pitch = rng.choices(tuple(choices), weights=weights, k=1)[0]
+    if avoid_pcs and (pitch % 12) in set(avoid_pcs):
+        return root_pitch
+    return pitch
+
+
 def _drum_profile_groove(player_key: str | None) -> tuple[float, float, float]:
     """(kick_lock, bounce, restraint) multipliers for drum-anchor pocket shaping."""
     if player_key == "bootsy":
@@ -1101,6 +1262,22 @@ def generate_bass(
     phrase_plan = build_phrase_plan(
         bar_count=bar_count, style=style, salt=salt, context=context, conditioning=conditioning
     )
+    source_minor_riff_root_pc = _supportive_source_minor_riff_active(
+        style=style,
+        context=context,
+        conditioning=conditioning,
+        chord_progression=chord_progression,
+        bar_count=bar_count,
+    )
+    source_minor_riff_slots = (
+        _build_supportive_source_minor_riff_slots(
+            conditioning,
+            bar_count=bar_count,
+            salt=salt,
+        )
+        if source_minor_riff_root_pc is not None and conditioning is not None
+        else ()
+    )
     prev_structural_pitch: int | None = None
 
     for bar, deg in enumerate(degrees):
@@ -1255,6 +1432,8 @@ def generate_bass(
                 pat = tuple(
                     sorted({int(x) for x in phrase_bar.slots if 0 <= int(x) <= 15}),
                 )
+                if source_minor_riff_slots:
+                    pat = source_minor_riff_slots[bar] if bar < len(source_minor_riff_slots) else source_minor_riff_slots[-1]
                 if not pat:
                     pat = (0, 8)
                 pr_role = str(phrase_bar.role)
@@ -1314,6 +1493,18 @@ def generate_bass(
                             avoid_pcs=avoid_pcs,
                             harm_conf=float(harm_conf),
                             prev_pitch=prev_structural_pitch,
+                            rng=rng,
+                        )
+                    if source_minor_riff_slots:
+                        p = _supportive_source_minor_pitch(
+                            slot=s,
+                            note_index=j,
+                            role=pr_role,
+                            root_pitch=r,
+                            fifth_pitch=f,
+                            third_pitch=t,
+                            avoid_pcs=avoid_pcs,
+                            scale=scale,
                             rng=rng,
                         )
                     if reg_sh == 12 and pr_role == "push" and s not in (0, 8) and p == r and rng.random() < 0.35:
