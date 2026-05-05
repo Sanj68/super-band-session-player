@@ -980,7 +980,19 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
               {run.conditioning_phase_offset}/4 · sections {run.conditioning_sections_count}
             </div>
             <div style={{ display: "grid", gap: 4 }}>
-              {(run.takes ?? []).map((take) => {
+              {(() => {
+                const allTakes = Array.isArray(run.takes) ? run.takes : [];
+                const labelledTakes = allTakes.filter((take) => {
+                  const hasLabel = take?.label != null && String(take.label).trim();
+                  const hasTemplate = take?.template_id != null && String(take.template_id).trim();
+                  return !!(hasLabel || hasTemplate);
+                });
+                const otherTakes = allTakes.filter((take) => {
+                  const hasLabel = take?.label != null && String(take.label).trim();
+                  const hasTemplate = take?.template_id != null && String(take.template_id).trim();
+                  return !(hasLabel || hasTemplate);
+                });
+                const renderTakeCard = (take) => {
                 const isCurrent =
                   session?.current_bass_candidate_run_id === run.run_id &&
                   session?.current_bass_candidate_take_id === take.take_id;
@@ -1012,6 +1024,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                   take?.template_id != null && String(take.template_id).trim()
                     ? String(take.template_id).trim()
                     : null;
+                const isSubOneVocabulary = !!(vocabLabel || templateId);
                 return (
                   <div
                     key={take.take_id}
@@ -1026,8 +1039,23 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                   >
                     {vocabLabel || templateId ? (
                       <div style={{ display: "grid", gap: 2 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span
+                            style={{
+                              background: "#ede9fe",
+                              color: "#5b21b6",
+                              border: "1px solid #c4b5fd",
+                              borderRadius: 999,
+                              padding: "1px 8px",
+                              fontSize: 11,
+                              fontWeight: 700,
+                            }}
+                          >
+                            Sub One Vocabulary
+                          </span>
+                        </div>
                         {vocabLabel ? (
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", lineHeight: 1.25 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", lineHeight: 1.25 }}>
                             {vocabLabel}
                           </div>
                         ) : null}
@@ -1059,8 +1087,8 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                       <span>{take.note_count} notes</span>
                       <span
                         style={{
-                          background: "#e2e8f0",
-                          color: "#334155",
+                          background: isSubOneVocabulary ? "#ede9fe" : "#e2e8f0",
+                          color: isSubOneVocabulary ? "#5b21b6" : "#334155",
                           borderRadius: 999,
                           padding: "1px 8px",
                           fontSize: 12,
@@ -1205,7 +1233,43 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                     ) : null}
                   </div>
                 );
-              })}
+                };
+
+                return (
+                  <>
+                    <div style={{ display: "grid", gap: 4 }}>
+                      <strong style={{ fontSize: 12, color: "#334155" }}>Sub One Vocabulary Takes</strong>
+                      {labelledTakes.length === 0 ? (
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: "#92400e",
+                            border: "1px solid #fcd34d",
+                            background: "#fffbeb",
+                            borderRadius: 8,
+                            padding: "0.45rem 0.55rem",
+                          }}
+                        >
+                          No Sub One vocabulary takes returned — check source groove, supportive bass style, repeated
+                          minor chord progression.
+                        </div>
+                      ) : (
+                        labelledTakes.map((take) => renderTakeCard(take))
+                      )}
+                    </div>
+                    {otherTakes.length > 0 ? (
+                      <details style={{ fontSize: 12, color: "#64748b" }}>
+                        <summary style={{ cursor: "pointer" }}>
+                          Other Takes / Advanced ({otherTakes.length})
+                        </summary>
+                        <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+                          {otherTakes.map((take) => renderTakeCard(take))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </>
+                );
+              })()}
             </div>
           </div>
         ))}
