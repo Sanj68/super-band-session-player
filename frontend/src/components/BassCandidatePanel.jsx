@@ -1006,6 +1006,12 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                 const qualityScores =
                   take?.quality_scores && typeof take.quality_scores === "object" ? take.quality_scores : {};
                 const qualityReason = String(take?.quality_reason || "").trim();
+                const vocabLabel =
+                  take?.label != null && String(take.label).trim() ? String(take.label).trim() : null;
+                const templateId =
+                  take?.template_id != null && String(take.template_id).trim()
+                    ? String(take.template_id).trim()
+                    : null;
                 return (
                   <div
                     key={take.take_id}
@@ -1018,6 +1024,20 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                       padding: "0.45rem 0.55rem",
                     }}
                   >
+                    {vocabLabel || templateId ? (
+                      <div style={{ display: "grid", gap: 2 }}>
+                        {vocabLabel ? (
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", lineHeight: 1.25 }}>
+                            {vocabLabel}
+                          </div>
+                        ) : null}
+                        {templateId ? (
+                          <div style={{ fontSize: 11, color: "#64748b", lineHeight: 1.25 }}>
+                            Template: {templateId}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
                       <code style={{ background: "#e2e8f0", borderRadius: 4, padding: "2px 6px" }}>{take.take_id}</code>
                       {isCurrent ? (
