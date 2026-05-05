@@ -274,6 +274,8 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     root_midi = 42
     uc = _uc_vocabulary_phrase(bar_count=bar_count, tempo=tempo)
     t = templates_by_id()["dark_slinky_grit_01"]
+    assert t.rules.get("groove_feel") == "dark_slinky_swing"
+    assert abs(float(t.rules.get("swing_amount", 0.0)) - 0.56) < 1e-9
     notes = generate_template_candidate_events(
         template=t,
         tempo=tempo,
@@ -284,6 +286,18 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
         conditioning=uc,
     )
     assert notes
+    notes_2 = generate_template_candidate_events(
+        template=t,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        chord_quality="minor",
+        harmonic_root_pc=root_pc,
+        conditioning=uc,
+    )
+    assert [(n.pitch, round(n.start, 6), round(n.end, 6), n.velocity) for n in notes] == [
+        (n.pitch, round(n.start, 6), round(n.end, 6), n.velocity) for n in notes_2
+    ]
     # first anchor at bar 0 slot 0
     spb = 60.0 / float(tempo)
     sixteenth = spb / 4.0
@@ -297,22 +311,26 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     assert short_notes
     assert min(int(n.velocity) for n in short_notes) >= 58
     assert min(float(n.end - n.start) for n in short_notes) >= sixteenth * 0.75
-    # timing is tightened for dark slinky:
-    # - slot 0 anchors on-grid
-    # - dead/ghost-like short slots are within tiny offset
-    # - normal notes keep subtle microtiming only
+    # timing is tightened with deterministic swing quantize:
+    # - slot 0/4/8/12 anchors on-grid
+    # - dead/ghost slots bounded very tightly
+    # - normal offbeats swing later than grid
     for n in notes:
         bar = max(0, min(bar_count - 1, int(float(n.start) // bar_len)))
         rel = float(n.start) - (bar * bar_len)
         slot = max(0, min(15, int(round(rel / sixteenth))))
         expected = (bar * bar_len) + (slot * sixteenth)
-        offset = abs(float(n.start) - expected)
+        offset = float(n.start) - expected
         if slot == 0:
-            assert offset <= 1e-6
+            assert abs(offset) <= 1e-6
+        elif slot in (4, 8, 12):
+            assert abs(offset) <= 1e-6
         elif slot == 5 or (float(n.end) - float(n.start)) <= (sixteenth * 0.9):
-            assert offset <= 0.0025
+            assert 0.0 <= offset <= 0.0025
         else:
-            assert offset <= 0.0045
+            assert 0.0 <= offset <= 0.0205
+        if slot in (11, 14):
+            assert offset >= 0.006
     # density remains controlled (template count plus possible one boundary reinforcement)
     counts = [len([n for n in notes if (bar * bar_len) <= n.start < ((bar + 1) * bar_len)]) for bar in range(bar_count)]
     assert max(counts) <= 6

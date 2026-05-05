@@ -61,6 +61,8 @@ SUB_ONE_BASS_TEMPLATES: Final[tuple[BassVocabularyTemplate, ...]] = (
             "dead_slots": (5,),
             "velocity_boost": 8,
             "short_note_min_duration_scale": 0.78,
+            "groove_feel": "dark_slinky_swing",
+            "swing_amount": 0.56,
         },
     ),
     BassVocabularyTemplate(

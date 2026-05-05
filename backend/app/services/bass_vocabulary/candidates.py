@@ -163,11 +163,30 @@ def _timing_offset_seconds(
         return 0.0
     if not is_dark_slinky:
         return sixteenth * 0.035 * max(0.0, min(1.0, source_weight))
-    w = max(0.0, min(1.0, float(source_weight)))
-    centered = (w * 2.0) - 1.0
+    # Dark Slinky uses deterministic tight swing quantize, not source-weight jitter.
+    groove_feel = str(template.rules.get("groove_feel", "") or "")
+    swing_amount = float(template.rules.get("swing_amount", 0.56) or 0.56)
+    swing_push = max(0.0, min(0.07, swing_amount - 0.5))
+    if groove_feel != "dark_slinky_swing":
+        swing_push = max(0.0, min(0.06, swing_push))
+
+    # Lock main grid anchors.
+    if slot in (0, 4, 8, 12):
+        return 0.0
+
+    sub = slot % 4
+    if sub == 2:
+        base = sixteenth * (swing_push * 4.0)
+    elif sub == 3:
+        base = sixteenth * (swing_push * 2.0)
+    elif sub == 1:
+        base = sixteenth * (swing_push * 0.8)
+    else:
+        base = 0.0
+
     if role in {"ghost", "dead"}:
-        return max(-0.0020, min(0.0020, centered * 0.0020))
-    return max(-0.0040, min(0.0040, centered * 0.0040))
+        return max(0.0, min(0.0020, base))
+    return max(0.0, min(0.0200, base))
 
 
 _RESOLVING_PITCH_ROLES: Final[frozenset[str]] = frozenset(
