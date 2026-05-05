@@ -9,6 +9,7 @@ from typing import Final
 import pretty_midi
 
 from app.models.session import LaneNote
+from app.services.bass_loop_boundary import normalize_bass_lane_notes
 from app.services.bass_vocabulary.pitch_roles import template_to_note_events
 from app.services.bass_vocabulary.templates import BassVocabularyTemplate, templates_by_id
 from app.services.conditioning import (
@@ -427,6 +428,23 @@ def generate_vocabulary_candidates(
         )
         if not notes:
             continue
+        normalized = tuple(
+            normalize_bass_lane_notes(
+                list(notes),
+                tempo=tempo,
+                bar_count=bar_count,
+                harmonic_root_pc=root_pc,
+                allow_delayed_entry=_template_delayed_entry(template),
+            )
+        )
+        if not normalized:
+            continue
+        # Re-apply the minor-7 harmonic guard in case normalization
+        # inserted a fallback root anchor with a stray pitch class.
+        normalized_list = _apply_vocabulary_minor7_harmonic_guard(
+            list(normalized), harmonic_root_pc=int(root_pc) % 12
+        )
+        normalized = tuple(normalized_list)
         label = _LABEL_BY_TEMPLATE_ID.get(template.id, template.display_name)
         preview = f"Sub One vocabulary: {label} ({template.id})"
         out.append(
@@ -434,8 +452,8 @@ def generate_vocabulary_candidates(
                 template_id=template.id,
                 label=label,
                 seed=int(seed) + 10_000 + idx,
-                notes=notes,
-                midi_bytes=_render_notes_to_midi(notes, tempo=tempo),
+                notes=normalized,
+                midi_bytes=_render_notes_to_midi(normalized, tempo=tempo),
                 preview=preview,
             )
         )

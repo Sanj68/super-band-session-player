@@ -42,6 +42,7 @@ from app.routes.midi_routes import get_audition_player
 from app.services import generator
 from app.services import bass_candidate_store
 from app.services.bass_bar_splice import splice_bass_bars
+from app.services.bass_loop_boundary import normalize_bass_loop_bytes
 from app.services.bass_vocabulary.candidates import generate_vocabulary_candidates
 from app.services.bass_performance import BassPerformanceNote
 from app.services.bass_performance_render import render_performance_bass_midi
@@ -305,6 +306,33 @@ def _render_bass_performance_bytes(
         source_kick_per_bar=conditioning.source_kick_weight if conditioning else None,
         source_snare_per_bar=conditioning.source_snare_weight if conditioning else None,
         source_pressure_per_bar=conditioning.source_slot_pressure if conditioning else None,
+    )
+
+
+def _bass_normalization_root_pc(s: "StoredSession") -> int | None:
+    """First-chord root pitch class for boundary normalization, or None."""
+    progression = list(getattr(s, "chord_progression", []) or [])
+    if progression:
+        try:
+            chords = mt.progression_chords_for_bars(progression, max(1, int(s.bar_count)))
+            if chords:
+                return int(chords[0].root_pc) % 12
+        except (ValueError, AttributeError):
+            return None
+    return None
+
+
+def _normalize_bass_bytes_for_session(
+    midi_bytes: bytes | None,
+    s: "StoredSession",
+) -> bytes:
+    if not midi_bytes:
+        return midi_bytes or b""
+    return normalize_bass_loop_bytes(
+        midi_bytes,
+        tempo=int(s.tempo),
+        bar_count=int(s.bar_count),
+        harmonic_root_pc=_bass_normalization_root_pc(s),
     )
 
 
@@ -684,15 +712,17 @@ def _regenerate_lane_on_stored_session(
             seed=seed,
             return_performance_notes=True,
         )
+        b_bytes = _normalize_bass_bytes_for_session(b_bytes, s)
         s.bass_bytes = b_bytes
         s.bass_preview = b_prev
         s.bass_seed = seed
-        s.bass_performance_bytes = _render_bass_performance_bytes(
+        perf_bytes = _render_bass_performance_bytes(
             clean_bytes=b_bytes,
             perf_notes=perf_notes,
             tempo=s.tempo,
             conditioning=cond,
         )
+        s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
         s.current_bass_candidate_run_id = None
         s.current_bass_candidate_take_id = None
     elif lane == LaneName.chords:
@@ -929,13 +959,14 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         conditioning=cond,
         seed=seed,
     )
-    s.bass_bytes = splice_bass_bars(
+    spliced = splice_bass_bars(
         existing_midi=s.bass_bytes,
         replacement_midi=replacement_bytes,
         tempo=s.tempo,
         bar_start=body.bar_start,
         bar_end=body.bar_end,
     )
+    s.bass_bytes = _normalize_bass_bytes_for_session(spliced, s)
     # Performance MIDI is rendered from a coherent full-take articulation
     # plan; partial-bar splices invalidate that plan. Force regeneration of
     # the full lane (or candidate promotion) to recover performance MIDI.
@@ -957,7 +988,7 @@ def _render_bass_take_with_seed(
     conditioning: UnifiedConditioning | None,
     context: SessionAnchorContext | None,
 ) -> tuple[bytes, str]:
-    return generator.generate_bass(
+    raw_bytes, preview = generator.generate_bass(
         tempo=s.tempo,
         bar_count=s.bar_count,
         key=s.key,
@@ -972,6 +1003,7 @@ def _render_bass_take_with_seed(
         conditioning=conditioning,
         seed=int(seed),
     )
+    return _normalize_bass_bytes_for_session(raw_bytes, s), preview
 
 
 def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
@@ -1435,14 +1467,15 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
     data = _take_bytes_or_400(take)
-    s.bass_bytes = bytes(data)
+    normalized_take = _normalize_bass_bytes_for_session(bytes(data), s)
+    s.bass_bytes = normalized_take
     s.bass_preview = str(take.get("preview", "") or f"Promoted candidate take {take_id}.")
     s.bass_seed = int(take["seed"]) if take.get("seed") is not None else None
     s.current_bass_candidate_run_id = str(run_id)
     s.current_bass_candidate_take_id = str(take_id)
     if _is_guarded_vocabulary_take(take):
         # Keep labelled vocabulary promotions pitch-stable across clean/performance paths.
-        s.bass_performance_bytes = bytes(data)
+        s.bass_performance_bytes = normalized_take
         return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
     # Re-render performance MIDI from the candidate seed so the promoted
     # lane has an audition path. Candidate clean bytes remain authoritative
@@ -1469,12 +1502,13 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 seed=int(s.bass_seed),
                 return_performance_notes=True,
             )
-            s.bass_performance_bytes = _render_bass_performance_bytes(
+            perf_bytes = _render_bass_performance_bytes(
                 clean_bytes=s.bass_bytes,
                 perf_notes=perf_notes,
                 tempo=s.tempo,
                 conditioning=cond,
             )
+            s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
         except Exception:
             # If re-render fails for any reason, leave performance bytes
             # absent rather than poison the promotion. Clean MIDI is
