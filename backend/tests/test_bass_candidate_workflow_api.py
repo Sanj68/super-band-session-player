@@ -308,6 +308,21 @@ def test_source_minor_candidates_include_sub_one_vocabulary_labels(tmp_path: Pat
     assert notes_res.status_code == 200
     notes = notes_res.json()
     assert notes
+    ordered = sorted(notes, key=lambda n: float(n["start"]))
+    assert int(ordered[0]["pitch"]) % 12 == 6  # F# vocabulary root anchor
+    spb_fn = 60.0 / 100.0
+    sixteenth_fn = spb_fn / 4.0
+    bar_len_fn = 4.0 * spb_fn
+    assert round((float(ordered[0]["start"]) - 0.0) / sixteenth_fn) <= 1
+    last_origin = 3 * bar_len_fn
+    minor7_allow_fsharp = {6, 9, 1, 4}
+    assert all(int(n["pitch"]) % 12 in minor7_allow_fsharp for n in notes)
+    assert any(
+        float(n["start"]) >= last_origin + 11.5 * sixteenth_fn - 1e-6
+        and int(n["pitch"]) % 12 in minor7_allow_fsharp
+        for n in notes
+    )
+
     pitch_classes = {int(note["pitch"]) % 12 for note in notes}
     assert pitch_classes != {6}
     slots = _slot_signature(notes, tempo=100, bar_count=4)

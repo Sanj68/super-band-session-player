@@ -504,15 +504,32 @@ def _build_supportive_source_minor_riff_slots(
         if (bar + 1) % 4 == 0:
             release_pick = _source_riff_pick_slots(conditioning, bar=bar, salt=salt + 19, prefer_from=(14, 15, 12))
             extras.add(release_pick[-1])
-        slots = sorted({0, 8, *extras})
+        slots_set = sorted({0, 8, *extras})
+        slots = slots_set
+        if bar == bars - 1 and not any(s >= 12 for s in slots):
+            tail_slot = 14
+            for s in (14, 12, 15, 13):
+                sk = source_kick_weight(conditioning, bar, s)
+                sn = source_snare_weight(conditioning, bar, s)
+                if sn >= 0.62 and sk < 0.28:
+                    continue
+                tail_slot = s
+                break
+            slots = sorted({*set(slots), tail_slot})
         if len(slots) > 4:
             protected = {0, 8}
+            if bar == bars - 1:
+                late_candidates = [s for s in slots if s >= 12]
+                if late_candidates:
+                    preferred_tail = min(late_candidates, key=lambda s: abs(s - 14))
+                    protected.add(preferred_tail)
             extras_ranked = sorted(
                 (s for s in slots if s not in protected),
                 key=lambda s: (_source_riff_slot_score(conditioning, bar, s), s >= 12),
                 reverse=True,
             )
-            slots = sorted({0, 8, *extras_ranked[:2]})
+            take = max(0, 4 - len(protected))
+            slots = sorted({*protected, *extras_ranked[:take]})
         out.append(tuple(slots))
     return tuple(out)
 
@@ -1037,6 +1054,8 @@ def _rhythmic_source_slot_keep(
     rng: random.Random | object,
 ) -> bool:
     """Soft pocket gate from upload groove maps (lighter than drum-anchor gate)."""
+    if slot == 0:
+        return True
     kw = source_kick_weight(conditioning, bar, slot)
     nk = _source_kick_window_max(conditioning, bar, slot, radius=2)
     pr = source_slot_pressure(conditioning, bar, slot)

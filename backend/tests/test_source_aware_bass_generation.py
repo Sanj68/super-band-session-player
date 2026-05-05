@@ -387,7 +387,8 @@ def test_repeated_minor_source_groove_generates_more_than_slots_0_and_8() -> Non
     all_slots = {s for row in sig for s in row}
     assert 0 in all_slots
     assert any(s not in (0, 8) for s in all_slots)
-    assert max(len(row) for row in sig) <= 4
+    # Downbeat groove-gate preservation + onset nudge can land adjacent slots (e.g. 0/1 binning).
+    assert max(len(row) for row in sig) <= 5
 
 
 def test_repeated_minor_source_groove_adds_controlled_colour_or_octave() -> None:
@@ -476,3 +477,32 @@ def test_repeated_minor_source_groove_avoids_strong_snare_without_kick() -> None
     )
 
     assert _note_count_at_slot(low, tempo=118, bar=0, slot=7) >= _note_count_at_slot(hot, tempo=118, bar=0, slot=7)
+
+
+def test_supportive_minor_riff_keeps_downbeat_and_late_tail_under_source_gate() -> None:
+    bar_count = 8
+    kick = [[0.05] * 16 for _ in range(bar_count)]
+    snare = [[0.05] * 16 for _ in range(bar_count)]
+    pressure = [[0.35] * 16 for _ in range(bar_count)]
+    for b in range(bar_count):
+        kick[b][8] = 0.72
+        snare[b][0] = 0.94
+        kick[b][0] = 0.04
+        snare[b][14] = 0.9
+        kick[b][14] = 0.06
+    uc = _uc(bar_count=bar_count, kick=kick, pressure=pressure, snare=snare, groove_conf=[0.82] * bar_count)
+
+    midi, _preview = generate_bass(
+        tempo=118,
+        bar_count=bar_count,
+        key="F#",
+        scale="natural_minor",
+        bass_style="supportive",
+        chord_progression=["F#m"] * bar_count,
+        seed=9177,
+        conditioning=uc,
+    )
+
+    assert _note_count_at_slot(midi, tempo=118, bar=0, slot=0) >= 1
+    late_hits = sum(_note_count_at_slot(midi, tempo=118, bar=bar_count - 1, slot=s) for s in (12, 13, 14, 15))
+    assert late_hits >= 1

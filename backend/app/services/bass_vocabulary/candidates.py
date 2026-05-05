@@ -143,6 +143,147 @@ def _event_duration(
     return max(sixteenth * 0.5, sixteenth * float(duration_slots) * sustain)
 
 
+_RESOLVING_PITCH_ROLES: Final[frozenset[str]] = frozenset(
+    {"root", "fifth", "flat7", "octave", "minor3"}
+)
+
+# Minor-seven chord vocabulary: root / minor 3rd / fifth / minor 7 (natural minor chord tones).
+_MINOR7_VOCAB_INTERVALS_FROM_ROOT: Final[tuple[int, ...]] = (0, 3, 7, 10)
+
+_DEPRECATED_CHROMATIC_RENDER_ROLES: Final[frozenset[str]] = frozenset(
+    {"chromatic_below_root", "chromatic_above_root"}
+)
+
+
+def _minor7_vocabulary_allowed_pitch_classes(root_pc: int) -> frozenset[int]:
+    rp = int(root_pc) % 12
+    return frozenset((rp + iv) % 12 for iv in _MINOR7_VOCAB_INTERVALS_FROM_ROOT)
+
+
+def _nearest_pitch_to_allowed_classes(pitch: int, *, allowed_pcs: frozenset[int]) -> int:
+    """Prefer smallest MIDI delta to chord-safe pitch classes in bass register."""
+    pc = int(pitch) % 12
+    if pc in allowed_pcs:
+        return max(0, min(127, int(pitch)))
+    best_pitch = max(0, min(127, int(pitch)))
+    best_delta = 128
+    for target in range(22, 64):
+        if int(target) % 12 not in allowed_pcs:
+            continue
+        delta = abs(int(target) - int(pitch))
+        if delta < best_delta:
+            best_delta = delta
+            best_pitch = int(target)
+    return best_pitch
+
+
+def _apply_vocabulary_minor7_harmonic_guard(notes: list[LaneNote], *, harmonic_root_pc: int) -> list[LaneNote]:
+    allowed = _minor7_vocabulary_allowed_pitch_classes(harmonic_root_pc)
+    out: list[LaneNote] = []
+    for note in notes:
+        new_pitch = _nearest_pitch_to_allowed_classes(int(note.pitch), allowed_pcs=allowed)
+        out.append(
+            LaneNote(
+                pitch=new_pitch,
+                start=float(note.start),
+                end=float(note.end),
+                velocity=int(note.velocity),
+            )
+        )
+    return out
+
+
+def _template_delayed_entry(template: BassVocabularyTemplate) -> bool:
+    return bool(template.rules.get("delayed_entry"))
+
+
+def _pick_tail_resolution_slot(conditioning: UnifiedConditioning | None, bar: int) -> int:
+    for slot in (14, 12, 15, 13):
+        if conditioning is None:
+            return slot
+        kick = source_kick_weight(conditioning, bar, slot)
+        snare = source_snare_weight(conditioning, bar, slot)
+        if snare >= 0.62 and kick < 0.28:
+            continue
+        return slot
+    return 14
+
+
+def _finalize_vocabulary_phrase_notes(
+    notes: list[LaneNote],
+    *,
+    template: BassVocabularyTemplate,
+    tempo: int,
+    bar_count: int,
+    root_midi: int,
+    conditioning: UnifiedConditioning | None,
+) -> list[LaneNote]:
+    """Ensure downbeat and loop-tail phrase boundaries when groove gates drop template hits."""
+    if _template_delayed_entry(template):
+        return notes
+    bars = max(1, int(bar_count))
+    spb = 60.0 / float(max(40, min(240, int(tempo))))
+    sixteenth = spb / 4.0
+    anchor = float(conditioning.bar_start_anchor_sec) if conditioning is not None else 0.0
+    bar_len = 4.0 * spb
+    root_pc = int(root_midi) % 12
+    last_b = bars - 1
+    last_origin = anchor + last_b * bar_len
+    loop_end = anchor + bars * bar_len
+
+    def slot_at(bar_index: int, t: float) -> int:
+        origin = anchor + bar_index * bar_len
+        rel = float(t) - origin
+        return max(0, min(15, int(round(rel / sixteenth))))
+
+    bar0 = [n for n in notes if anchor <= n.start < anchor + bar_len]
+    slot0_roots = [
+        n
+        for n in bar0
+        if slot_at(0, n.start) == 0 and int(n.pitch) % 12 == root_pc and n.end > n.start
+    ]
+    if not slot0_roots:
+        sk0 = source_kick_weight(conditioning, 0, 0) if conditioning is not None else 0.0
+        start = anchor + sixteenth * 0.035 * max(0.0, min(1.0, sk0))
+        duration = _event_duration("root", 4, sixteenth, template=template)
+        end = min(anchor + bar_len - 1e-4, start + duration)
+        if end > start:
+            notes.append(
+                LaneNote(
+                    pitch=max(0, min(127, int(root_midi))),
+                    start=float(start),
+                    end=float(end),
+                    velocity=_event_velocity("root", 0, source_weight=sk0, template=template),
+                )
+            )
+
+    last_bar = [n for n in notes if last_origin - 1e-6 <= n.start < loop_end]
+    allowed_tail = _minor7_vocabulary_allowed_pitch_classes(root_pc)
+    has_late_resolve = any(
+        slot_at(last_b, n.start) >= 12 and int(n.pitch) % 12 in allowed_tail for n in last_bar
+    )
+    if not has_late_resolve:
+        tail_slot = _pick_tail_resolution_slot(conditioning, last_b)
+        sk = source_kick_weight(conditioning, last_b, tail_slot) if conditioning is not None else 0.0
+        start = last_origin + tail_slot * sixteenth + sixteenth * 0.035 * max(0.0, min(1.0, sk))
+        duration = _event_duration("root", max(2, 16 - tail_slot), sixteenth, template=template)
+        end = min(loop_end - 1e-4, start + duration)
+        if end > start and not any(
+            abs(float(n.start) - start) < sixteenth * 0.28 and int(n.pitch) % 12 == root_pc for n in last_bar
+        ):
+            notes.append(
+                LaneNote(
+                    pitch=max(0, min(127, int(root_midi))),
+                    start=float(start),
+                    end=float(end),
+                    velocity=_event_velocity("root", tail_slot, source_weight=sk, template=template),
+                )
+            )
+
+    notes.sort(key=lambda n: (n.start, n.pitch))
+    return notes
+
+
 def _render_notes_to_midi(notes: tuple[LaneNote, ...], *, tempo: int) -> bytes:
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
     inst = pretty_midi.Instrument(program=33, name="Bass")
@@ -170,6 +311,7 @@ def generate_template_candidate_events(
     bar_count: int,
     root_midi: int,
     chord_quality: str,
+    harmonic_root_pc: int,
     conditioning: UnifiedConditioning | None,
 ) -> tuple[LaneNote, ...]:
     spb = 60.0 / float(max(40, min(240, int(tempo))))
@@ -177,6 +319,7 @@ def generate_template_candidate_events(
     anchor = float(conditioning.bar_start_anchor_sec) if conditioning is not None else 0.0
     out: list[LaneNote] = []
     bars = max(1, int(bar_count))
+    delayed_entry = _template_delayed_entry(template)
     for bar in range(bars):
         abstract_events = template_to_note_events(
             template,
@@ -185,11 +328,13 @@ def generate_template_candidate_events(
             bar_index=bar,
         )
         for event in abstract_events:
+            if event.pitch_role in _DEPRECATED_CHROMATIC_RENDER_ROLES:
+                continue
             if event.midi_pitch is None:
                 if event.pitch_role == "ghost":
                     pitch = root_midi
                 elif event.pitch_role == "dead":
-                    pitch = max(0, root_midi - 12)
+                    pitch = int(root_midi)
                 else:
                     continue
             else:
@@ -200,7 +345,16 @@ def generate_template_candidate_events(
                 kick = source_kick_weight(conditioning, bar, slot)
                 snare = source_snare_weight(conditioning, bar, slot)
                 if snare >= 0.62 and kick < 0.28 and event.pitch_role not in {"ghost", "dead"}:
-                    continue
+                    phrase_exempt = (
+                        (bar == 0 and slot == 0 and not delayed_entry)
+                        or (
+                            bar == bars - 1
+                            and slot >= 12
+                            and event.pitch_role in _RESOLVING_PITCH_ROLES
+                        )
+                    )
+                    if not phrase_exempt:
+                        continue
                 source_weight = max(0.0, min(1.0, kick))
             start = anchor + (bar * 4.0 * spb) + (slot * sixteenth) + (sixteenth * 0.035 * source_weight)
             duration = _event_duration(
@@ -225,6 +379,16 @@ def generate_template_candidate_events(
                     ),
                 )
             )
+    hrp = int(harmonic_root_pc) % 12
+    out = _apply_vocabulary_minor7_harmonic_guard(out, harmonic_root_pc=hrp)
+    out = _finalize_vocabulary_phrase_notes(
+        out,
+        template=template,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        conditioning=conditioning,
+    )
     return tuple(out)
 
 
@@ -258,6 +422,7 @@ def generate_vocabulary_candidates(
             bar_count=bar_count,
             root_midi=root_midi,
             chord_quality=chord_quality,
+            harmonic_root_pc=root_pc,
             conditioning=conditioning,
         )
         if not notes:
