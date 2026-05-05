@@ -42,6 +42,7 @@ from app.routes.midi_routes import get_audition_player
 from app.services import generator
 from app.services import bass_candidate_store
 from app.services.bass_bar_splice import splice_bass_bars
+from app.services.bass_vocabulary.candidates import generate_vocabulary_candidates
 from app.services.bass_performance import BassPerformanceNote
 from app.services.bass_performance_render import render_performance_bass_midi
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
@@ -987,6 +988,8 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
                     note_count=int(t.get("note_count", 0)),
                     byte_length=int(t.get("byte_length", 0)),
                     preview=str(t.get("preview", "") or ""),
+                    label=(str(t.get("label")) if t.get("label") is not None else None),
+                    template_id=(str(t.get("template_id")) if t.get("template_id") is not None else None),
                     quality_total=float(t.get("quality_total", 0.0) or 0.0),
                     quality_scores=dict(t.get("quality_scores", {}) if isinstance(t.get("quality_scores"), dict) else {}),
                     quality_reason=str(t.get("quality_reason", "") or ""),
@@ -1170,14 +1173,93 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
         scored_pool.append((quality.total, quality.signature, family, take, row))
 
     scored_pool.sort(key=lambda item: (item[0], -item[3].note_count), reverse=True)
+    vocabulary_pool: list[tuple[float, tuple[tuple[int, ...], ...], str, BassCandidateTake, dict[str, object]]] = []
+    for vocab in generate_vocabulary_candidates(
+        tempo=s.tempo,
+        bar_count=s.bar_count,
+        bass_style=s.bass_style,
+        chord_progression=s.chord_progression,
+        conditioning=cond,
+        context=ctx,
+        seed=base_seed,
+    ):
+        notes = list(vocab.notes)
+        quality = analyze_bass_take(
+            notes,
+            tempo=cond.tempo if cond is not None else s.tempo,
+            bar_count=cond.bar_count if cond is not None else s.bar_count,
+            key=s.key,
+            scale=s.scale,
+            style=s.bass_style,
+            conditioning=cond,
+            context=ctx,
+        )
+        family = f"sub_one_{vocab.template_id}"
+        take_id = f"{run_id}_v{len(vocabulary_pool) + 1}"
+        take = BassCandidateTake(
+            take_id=take_id,
+            seed=vocab.seed,
+            note_count=len(notes),
+            byte_length=len(vocab.midi_bytes),
+            preview=vocab.preview,
+            label=vocab.label,
+            template_id=vocab.template_id,
+            quality_total=quality.total,
+            quality_scores=quality.scores,
+            quality_reason=quality.reason,
+        )
+        row = {
+            "take_id": take_id,
+            "seed": vocab.seed,
+            "note_count": len(notes),
+            "byte_length": len(vocab.midi_bytes),
+            "preview": vocab.preview,
+            "label": vocab.label,
+            "template_id": vocab.template_id,
+            "quality_total": quality.total,
+            "quality_scores": quality.scores,
+            "quality_reason": quality.reason,
+            "motif_family": family,
+            "midi_b64": base64.b64encode(vocab.midi_bytes).decode("ascii"),
+        }
+        vocabulary_pool.append((quality.total, quality.signature, family, take, row))
+
     min_distance, max_family_count = _style_diversity_gate(s.bass_style)
     top_pool_score = float(scored_pool[0][0]) if scored_pool else 0.0
+    if vocabulary_pool:
+        top_pool_score = max(top_pool_score, max(float(item[0]) for item in vocabulary_pool))
     floor_cutoff = max(0.0, min(1.0, top_pool_score - _style_floor_margin(s.bass_style)))
     takes: list[BassCandidateTake] = []
     take_rows: list[dict[str, object]] = []
     selected_pool_ids: set[str] = set()
     selected_signatures: list[tuple[tuple[int, ...], ...]] = []
     family_counts: dict[str, int] = {}
+
+    # Vocabulary pass: when eligible, keep the first Sub One labels visible in the run.
+    for score, sig, family, take, row in vocabulary_pool:
+        if len(takes) >= requested:
+            break
+        sig_dist = min(_signature_distance(sig, e) for e in selected_signatures) if selected_signatures else None
+        selected_pool_ids.add(take.take_id)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        selected_signatures.append(sig)
+        public_take_id = f"{run_id}_t{len(takes) + 1}"
+        take = take.model_copy(update={
+            "take_id": public_take_id,
+            "selection_stage": "strict",
+            "motif_family": family,
+            "signature_distance": sig_dist,
+            "quality_floor_cutoff": floor_cutoff,
+            "top_pool_score": top_pool_score,
+        })
+        row = dict(row)
+        row["take_id"] = public_take_id
+        row["selection_stage"] = "strict"
+        row["signature_distance"] = sig_dist
+        row["quality_floor_cutoff"] = floor_cutoff
+        row["top_pool_score"] = top_pool_score
+        takes.append(take)
+        take_rows.append(row)
 
     # Strict pass: style-locked distance + motif-family spread.
     for score, sig, family, take, row in scored_pool:

@@ -6,6 +6,13 @@ from app.services.bass_vocabulary.pitch_roles import (
     resolve_pitch_role,
     template_to_note_events,
 )
+from app.services.bass_vocabulary.candidates import (
+    VocabularyCandidate,
+    generate_template_candidate_events,
+    generate_vocabulary_candidates,
+    select_templates_for_context,
+    should_generate_vocabulary_candidates,
+)
 from app.services.bass_vocabulary.profile import (
     SUB_ONE_BASS_VOCABULARY_PROFILE_V1,
     SUB_ONE_BASS_REFERENCES,
@@ -30,7 +37,12 @@ __all__ = [
     "SUB_ONE_BASS_REFERENCES",
     "SUB_ONE_BASS_TEMPLATES",
     "SUB_ONE_BASS_VOCABULARY_PROFILE_V1",
+    "VocabularyCandidate",
+    "generate_template_candidate_events",
+    "generate_vocabulary_candidates",
     "resolve_pitch_role",
+    "select_templates_for_context",
+    "should_generate_vocabulary_candidates",
     "template_to_note_events",
     "templates_by_id",
     "valid_lanes",
