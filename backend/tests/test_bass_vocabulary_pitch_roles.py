@@ -17,7 +17,8 @@ def test_chromatic_roles_resolve_but_are_not_vocab_render_targets_v092() -> None
     roles = tuple(e.pitch_role for e in template_to_note_events(fusion_tpl, root_midi=root_midi))
     assert "chromatic_above_root" in roles
     roles_s = tuple(e.pitch_role for e in template_to_note_events(slick_tpl, root_midi=root_midi))
-    assert "chromatic_below_root" in roles_s
+    assert "chromatic_below_root" not in roles_s
+    assert "dead" in roles_s
 
 
 def test_f_sharp_minor_pitch_roles_resolve_expected_intervals() -> None:

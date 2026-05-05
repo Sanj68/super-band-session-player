@@ -9,7 +9,6 @@ from typing import Final
 import pretty_midi
 
 from app.models.session import LaneNote
-from app.services.bass_loop_boundary import normalize_bass_lane_notes
 from app.services.bass_vocabulary.pitch_roles import template_to_note_events
 from app.services.bass_vocabulary.templates import BassVocabularyTemplate, templates_by_id
 from app.services.conditioning import (
@@ -120,14 +119,17 @@ def _root_midi_for_pc(root_pc: int, *, lo: int = 30, hi: int = 54) -> int:
 
 
 def _event_velocity(role: str, slot: int, *, source_weight: float, template: BassVocabularyTemplate) -> int:
+    is_dark_slinky = template.id == "dark_slinky_grit_01"
     if role == "ghost":
-        base = 46
+        base = 54 if is_dark_slinky else 46
     elif role == "dead":
-        base = 42
+        base = 58 if is_dark_slinky else 42
     elif slot == 0:
         base = 92
     else:
         base = 76 + (template.energy * 3) + (template.grit * 2)
+    if is_dark_slinky:
+        base += int(template.rules.get("velocity_boost", 0) or 0)
     return max(34, min(108, int(round(base + source_weight * 10))))
 
 
@@ -138,8 +140,10 @@ def _event_duration(
     *,
     template: BassVocabularyTemplate,
 ) -> float:
+    is_dark_slinky = template.id == "dark_slinky_grit_01"
     if role in {"ghost", "dead"}:
-        return sixteenth * 0.55
+        short_scale = float(template.rules.get("short_note_min_duration_scale", 0.55) or 0.55)
+        return sixteenth * max(0.55, short_scale if is_dark_slinky else 0.55)
     sustain = 0.72 if template.density == "high" else 0.92 if template.density == "medium" else 1.12
     return max(sixteenth * 0.5, sixteenth * float(duration_slots) * sustain)
 
@@ -225,7 +229,7 @@ def _finalize_vocabulary_phrase_notes(
     bars = max(1, int(bar_count))
     spb = 60.0 / float(max(40, min(240, int(tempo))))
     sixteenth = spb / 4.0
-    anchor = float(conditioning.bar_start_anchor_sec) if conditioning is not None else 0.0
+    anchor = 0.0
     bar_len = 4.0 * spb
     root_pc = int(root_midi) % 12
     last_b = bars - 1
@@ -245,7 +249,7 @@ def _finalize_vocabulary_phrase_notes(
     ]
     if not slot0_roots:
         sk0 = source_kick_weight(conditioning, 0, 0) if conditioning is not None else 0.0
-        start = anchor + sixteenth * 0.035 * max(0.0, min(1.0, sk0))
+        start = anchor
         duration = _event_duration("root", 4, sixteenth, template=template)
         end = min(anchor + bar_len - 1e-4, start + duration)
         if end > start:
@@ -317,7 +321,8 @@ def generate_template_candidate_events(
 ) -> tuple[LaneNote, ...]:
     spb = 60.0 / float(max(40, min(240, int(tempo))))
     sixteenth = spb / 4.0
-    anchor = float(conditioning.bar_start_anchor_sec) if conditioning is not None else 0.0
+    # Candidate MIDI should be loop-local (bar 1 starts at 0s) for export/audition parity.
+    anchor = 0.0
     out: list[LaneNote] = []
     bars = max(1, int(bar_count))
     delayed_entry = _template_delayed_entry(template)
@@ -357,7 +362,9 @@ def generate_template_candidate_events(
                     if not phrase_exempt:
                         continue
                 source_weight = max(0.0, min(1.0, kick))
-            start = anchor + (bar * 4.0 * spb) + (slot * sixteenth) + (sixteenth * 0.035 * source_weight)
+            start = anchor + (bar * 4.0 * spb) + (slot * sixteenth)
+            if not (bar == 0 and slot == 0 and not delayed_entry):
+                start += sixteenth * 0.035 * source_weight
             duration = _event_duration(
                 event.pitch_role,
                 event.duration_slots,
@@ -428,23 +435,6 @@ def generate_vocabulary_candidates(
         )
         if not notes:
             continue
-        normalized = tuple(
-            normalize_bass_lane_notes(
-                list(notes),
-                tempo=tempo,
-                bar_count=bar_count,
-                harmonic_root_pc=root_pc,
-                allow_delayed_entry=_template_delayed_entry(template),
-            )
-        )
-        if not normalized:
-            continue
-        # Re-apply the minor-7 harmonic guard in case normalization
-        # inserted a fallback root anchor with a stray pitch class.
-        normalized_list = _apply_vocabulary_minor7_harmonic_guard(
-            list(normalized), harmonic_root_pc=int(root_pc) % 12
-        )
-        normalized = tuple(normalized_list)
         label = _LABEL_BY_TEMPLATE_ID.get(template.id, template.display_name)
         preview = f"Sub One vocabulary: {label} ({template.id})"
         out.append(
@@ -452,8 +442,8 @@ def generate_vocabulary_candidates(
                 template_id=template.id,
                 label=label,
                 seed=int(seed) + 10_000 + idx,
-                notes=normalized,
-                midi_bytes=_render_notes_to_midi(normalized, tempo=tempo),
+                notes=notes,
+                midi_bytes=_render_notes_to_midi(notes, tempo=tempo),
                 preview=preview,
             )
         )

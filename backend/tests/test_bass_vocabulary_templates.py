@@ -265,3 +265,38 @@ def test_cinematic_template_rest_slot_emits_no_rest_lane_note() -> None:
     assert notes
     assert len(notes) == 3
     assert {int(n.pitch) % 12 for n in notes}.issubset({6, 9, 1, 4})
+
+
+def test_dark_slinky_grit_is_audible_and_controlled() -> None:
+    tempo = 100
+    bar_count = 4
+    root_pc = 6
+    root_midi = 42
+    uc = _uc_vocabulary_phrase(bar_count=bar_count, tempo=tempo)
+    t = templates_by_id()["dark_slinky_grit_01"]
+    notes = generate_template_candidate_events(
+        template=t,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        chord_quality="minor",
+        harmonic_root_pc=root_pc,
+        conditioning=uc,
+    )
+    assert notes
+    # first anchor at bar 0 slot 0
+    spb = 60.0 / float(tempo)
+    sixteenth = spb / 4.0
+    first = min(notes, key=lambda n: (n.start, n.pitch))
+    assert int(round(first.start / sixteenth)) == 0
+    # guardrail still applies
+    assert {int(n.pitch) % 12 for n in notes}.issubset({6, 9, 1, 4})
+    # short articulations should be audible
+    short_notes = [n for n in notes if (n.end - n.start) <= (sixteenth * 0.9)]
+    assert short_notes
+    assert min(int(n.velocity) for n in short_notes) >= 58
+    assert min(float(n.end - n.start) for n in short_notes) >= sixteenth * 0.75
+    # density remains controlled (template count plus possible one boundary reinforcement)
+    bar_len = 4.0 * spb
+    counts = [len([n for n in notes if (bar * bar_len) <= n.start < ((bar + 1) * bar_len)]) for bar in range(bar_count)]
+    assert max(counts) <= 6

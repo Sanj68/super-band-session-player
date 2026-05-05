@@ -499,6 +499,46 @@ def test_audition_performance_after_labelled_promotion_uses_guarded_bytes(tmp_pa
         midi_routes.set_midi_output_backend(RtMidiBackend())
 
 
+def test_dark_slinky_take_remains_audible_with_guardrails(tmp_path: Path) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 100,
+            "key": "F#",
+            "scale": "minor",
+            "bar_count": 4,
+            "bass_style": "supportive",
+            "bass_engine": "baseline",
+            "chord_progression": ["F#m7", "F#m7", "F#m7", "F#m7"],
+        },
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+    session_routes._SESSIONS[session_id].source_analysis_override = _source_analysis_for_vocabulary(4)  # type: ignore[attr-defined]
+
+    generated = client.post(f"/api/sessions/{session_id}/bass-candidates", json={"take_count": 5, "seed": 9090})
+    assert generated.status_code == 200
+    run = generated.json()
+    dark_take = next((t for t in run["takes"] if t.get("template_id") == "dark_slinky_grit_01"), None)
+    assert dark_take is not None
+    notes_res = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{dark_take['take_id']}/notes"
+    )
+    assert notes_res.status_code == 200
+    notes = notes_res.json()
+    assert notes
+    spb = 60.0 / 100.0
+    sixteenth = spb / 4.0
+    short = [n for n in notes if (float(n["end"]) - float(n["start"])) <= sixteenth * 0.9]
+    assert short
+    assert min(int(n["velocity"]) for n in short) >= 58
+
+
 def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:
     """promote returns 404 for unknown session_id, run_id, or take_id."""
     bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
