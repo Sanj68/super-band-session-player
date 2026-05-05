@@ -334,3 +334,53 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     # density remains controlled (template count plus possible one boundary reinforcement)
     counts = [len([n for n in notes if (bar * bar_len) <= n.start < ((bar + 1) * bar_len)]) for bar in range(bar_count)]
     assert max(counts) <= 6
+
+
+def test_hiphop_soul_restraint_template_is_808_friendly_and_turnaround_enabled() -> None:
+    t = templates_by_id()["hiphop_soul_restraint_01"]
+    assert "ghost" not in set(t.pitch_roles)
+    assert "dead" not in set(t.pitch_roles)
+    assert bool(t.rules.get("final_bar_turnaround")) is True
+    assert t.rules.get("ghost_level") == "off"
+    assert t.rules.get("bass_type") == "808_friendly"
+
+
+def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> None:
+    tempo = 100
+    bar_count = 8
+    root_pc = 6
+    root_midi = 42
+    uc = _uc_vocabulary_phrase(bar_count=bar_count, tempo=tempo)
+    t = templates_by_id()["hiphop_soul_restraint_01"]
+    notes = generate_template_candidate_events(
+        template=t,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        chord_quality="minor",
+        harmonic_root_pc=root_pc,
+        conditioning=uc,
+    )
+    assert notes
+    spb = 60.0 / float(tempo)
+    sixteenth = spb / 4.0
+    bar_len = 4.0 * spb
+    first = min(notes, key=lambda n: (n.start, n.pitch))
+    assert abs(float(first.start) - 0.0) <= 1e-6
+    assert {int(n.pitch) % 12 for n in notes}.issubset({6, 9, 1, 4})
+    bar_slots: list[set[int]] = []
+    for bar in range(bar_count):
+        origin = bar * bar_len
+        slots = {
+            max(0, min(15, int(round((float(n.start) - origin) / sixteenth))))
+            for n in notes
+            if origin <= float(n.start) < (origin + bar_len)
+        }
+        bar_slots.append(slots)
+    # sparse support bassline: low movement in bars 1-7
+    assert max(len(s) for s in bar_slots[:-1]) <= 4
+    # final bar adds turnaround movement while remaining controlled
+    assert len(bar_slots[-1]) >= len(bar_slots[-2])
+    assert len(bar_slots[-1]) <= 5
+    assert 10 in bar_slots[-1]  # injected turnaround pickup
+    assert 14 in bar_slots[-1]  # cadence anchor

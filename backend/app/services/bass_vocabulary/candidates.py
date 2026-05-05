@@ -239,6 +239,59 @@ def _apply_vocabulary_minor7_harmonic_guard(notes: list[LaneNote], *, harmonic_r
     return out
 
 
+def _apply_hiphop_soul_turnaround(
+    notes: list[LaneNote],
+    *,
+    template: BassVocabularyTemplate,
+    tempo: int,
+    bar_count: int,
+    root_midi: int,
+    conditioning: UnifiedConditioning | None,
+) -> list[LaneNote]:
+    if template.id != "hiphop_soul_restraint_01":
+        return notes
+    if not bool(template.rules.get("final_bar_turnaround")):
+        return notes
+    bars = max(1, int(bar_count))
+    if bars <= 1:
+        return notes
+    spb = 60.0 / float(max(40, min(240, int(tempo))))
+    sixteenth = spb / 4.0
+    anchor = 0.0
+    last_b = bars - 1
+    bar_origin = anchor + (last_b * 4.0 * spb)
+    target_slot = 10
+    target_start = bar_origin + (target_slot * sixteenth)
+    # Avoid duplicate near the same position.
+    if any(abs(float(n.start) - target_start) < sixteenth * 0.35 for n in notes):
+        return notes
+    fifth_pitch = int(root_midi) + 7
+    source_weight = source_kick_weight(conditioning, last_b, target_slot) if conditioning is not None else 0.0
+    start = target_start + _timing_offset_seconds(
+        template=template,
+        role="fifth",
+        slot=target_slot,
+        source_weight=source_weight,
+        sixteenth=sixteenth,
+        bar=last_b,
+        delayed_entry=False,
+    )
+    duration = _event_duration("fifth", 2, sixteenth, template=template)
+    end = min(anchor + ((last_b + 1) * 4.0 * spb) - 1e-4, start + duration)
+    if end <= start:
+        return notes
+    notes.append(
+        LaneNote(
+            pitch=max(0, min(127, fifth_pitch)),
+            start=float(start),
+            end=float(end),
+            velocity=_event_velocity("fifth", target_slot, source_weight=source_weight, template=template),
+        )
+    )
+    notes.sort(key=lambda n: (n.start, n.pitch))
+    return notes
+
+
 def _template_delayed_entry(template: BassVocabularyTemplate) -> bool:
     return bool(template.rules.get("delayed_entry"))
 
@@ -443,6 +496,14 @@ def generate_template_candidate_events(
                 )
             )
     hrp = int(harmonic_root_pc) % 12
+    out = _apply_hiphop_soul_turnaround(
+        out,
+        template=template,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        conditioning=conditioning,
+    )
     out = _apply_vocabulary_minor7_harmonic_guard(out, harmonic_root_pc=hrp)
     out = _finalize_vocabulary_phrase_notes(
         out,
