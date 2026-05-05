@@ -253,41 +253,53 @@ def _apply_hiphop_soul_turnaround(
     if not bool(template.rules.get("final_bar_turnaround")):
         return notes
     bars = max(1, int(bar_count))
-    if bars <= 1:
-        return notes
     spb = 60.0 / float(max(40, min(240, int(tempo))))
     sixteenth = spb / 4.0
     anchor = 0.0
-    last_b = bars - 1
-    bar_origin = anchor + (last_b * 4.0 * spb)
-    target_slot = 10
-    target_start = bar_origin + (target_slot * sixteenth)
-    # Avoid duplicate near the same position.
-    if any(abs(float(n.start) - target_start) < sixteenth * 0.35 for n in notes):
-        return notes
-    fifth_pitch = int(root_midi) + 7
-    source_weight = source_kick_weight(conditioning, last_b, target_slot) if conditioning is not None else 0.0
-    start = target_start + _timing_offset_seconds(
-        template=template,
-        role="fifth",
-        slot=target_slot,
-        source_weight=source_weight,
-        sixteenth=sixteenth,
-        bar=last_b,
-        delayed_entry=False,
-    )
-    duration = _event_duration("fifth", 2, sixteenth, template=template)
-    end = min(anchor + ((last_b + 1) * 4.0 * spb) - 1e-4, start + duration)
-    if end <= start:
-        return notes
-    notes.append(
-        LaneNote(
-            pitch=max(0, min(127, fifth_pitch)),
-            start=float(start),
-            end=float(end),
-            velocity=_event_velocity("fifth", target_slot, source_weight=source_weight, template=template),
+    root_pitch = int(root_midi)
+    fifth_pitch = root_pitch + 7
+    flat7_pitch = root_pitch + 10
+
+    def _inject(bar_index: int, slot: int, role: str, pitch: int, dur_slots: int) -> None:
+        bar_origin = anchor + (bar_index * 4.0 * spb)
+        target_start = bar_origin + (slot * sixteenth)
+        if any(abs(float(n.start) - target_start) < sixteenth * 0.35 for n in notes):
+            return
+        source_weight = source_kick_weight(conditioning, bar_index, slot) if conditioning is not None else 0.0
+        start = target_start + _timing_offset_seconds(
+            template=template,
+            role=role,
+            slot=slot,
+            source_weight=source_weight,
+            sixteenth=sixteenth,
+            bar=bar_index,
+            delayed_entry=False,
         )
-    )
+        duration = _event_duration(role, dur_slots, sixteenth, template=template)
+        end = min(anchor + ((bar_index + 1) * 4.0 * spb) - 1e-4, start + duration)
+        if end <= start:
+            return
+        notes.append(
+            LaneNote(
+                pitch=max(0, min(127, int(pitch))),
+                start=float(start),
+                end=float(end),
+                velocity=_event_velocity(role, slot, source_weight=source_weight, template=template),
+            )
+        )
+
+    # Bar 4 gentle answer (index 3) in longer forms.
+    if bars >= 4 and bool(template.rules.get("bar4_answer")):
+        _inject(3, 10, "flat7", flat7_pitch, 2)
+
+    # Bar 8 stronger turnaround.
+    if bars > 1:
+        last_b = bars - 1
+        strength = str(template.rules.get("bar8_turnaround_strength", "") or "").lower()
+        _inject(last_b, 10, "fifth", fifth_pitch, 2)
+        if bars >= 8 and strength == "medium":
+            _inject(last_b, 11, "flat7", flat7_pitch, 1)
+
     notes.sort(key=lambda n: (n.start, n.pitch))
     return notes
 

@@ -97,7 +97,11 @@ SUB_ONE_BASS_TEMPLATES: Final[tuple[BassVocabularyTemplate, ...]] = (
             "max_sustained_notes": 3,
             "ghost_level": "off",
             "bass_type": "808_friendly",
+            "soulquarian_pocket": True,
+            "bar4_answer": True,
             "final_bar_turnaround": True,
+            "bar8_turnaround_strength": "medium",
+            "feel_reference": "dangelo_erykah_dwele_roots",
         },
     ),
     BassVocabularyTemplate(

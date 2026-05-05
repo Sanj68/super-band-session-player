@@ -343,6 +343,10 @@ def test_hiphop_soul_restraint_template_is_808_friendly_and_turnaround_enabled()
     assert bool(t.rules.get("final_bar_turnaround")) is True
     assert t.rules.get("ghost_level") == "off"
     assert t.rules.get("bass_type") == "808_friendly"
+    assert bool(t.rules.get("soulquarian_pocket")) is True
+    assert bool(t.rules.get("bar4_answer")) is True
+    assert t.rules.get("bar8_turnaround_strength") == "medium"
+    assert t.rules.get("feel_reference") == "dangelo_erykah_dwele_roots"
 
 
 def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> None:
@@ -379,8 +383,11 @@ def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> N
         bar_slots.append(slots)
     # sparse support bassline: low movement in bars 1-7
     assert max(len(s) for s in bar_slots[:-1]) <= 4
+    # bar 4 gets a small answer
+    assert 10 in bar_slots[3]
     # final bar adds turnaround movement while remaining controlled
-    assert len(bar_slots[-1]) >= len(bar_slots[-2])
+    assert len(bar_slots[-1]) > len(bar_slots[-2])
     assert len(bar_slots[-1]) <= 5
     assert 10 in bar_slots[-1]  # injected turnaround pickup
+    assert 11 in bar_slots[-1]  # extra turnaround colour (flat7)
     assert 14 in bar_slots[-1]  # cadence anchor
