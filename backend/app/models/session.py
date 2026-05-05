@@ -743,6 +743,8 @@ class BassCandidateTake(BaseModel):
     note_count: int = Field(ge=0)
     byte_length: int = Field(ge=0)
     preview: str = ""
+    label: str | None = None
+    template_id: str | None = None
     quality_total: float = Field(default=0.0, ge=0.0, le=1.0)
     quality_scores: dict[str, float] = Field(default_factory=dict)
     quality_reason: str = ""

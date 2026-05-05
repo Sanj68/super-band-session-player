@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import math
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.session import SourceAnalysis
 from app.routes import session_routes
 from app.services import bass_candidate_store
 
@@ -197,6 +199,126 @@ def test_bass_candidate_generation_is_deterministic_for_same_take_seed(tmp_path:
     assert first_notes.status_code == 200
     assert second_notes.status_code == 200
     assert first_notes.json() == second_notes.json()
+
+
+def _source_analysis_for_vocabulary(bar_count: int) -> SourceAnalysis:
+    pressure = [[0.32] * 16 for _ in range(bar_count)]
+    kick = [[0.08] * 16 for _ in range(bar_count)]
+    snare = [[0.06] * 16 for _ in range(bar_count)]
+    for row in range(bar_count):
+        for slot in (0, 3, 6, 10, 14):
+            pressure[row][slot] = 0.72
+            kick[row][slot] = 0.55
+    return SourceAnalysis(
+        source_lane="reference_audio",
+        tempo=100,
+        tempo_estimate_bpm=100.0,
+        tempo_confidence=0.85,
+        beat_grid_seconds=[0.6 * i for i in range(bar_count * 4)],
+        bar_starts_seconds=[2.4 * i for i in range(bar_count)],
+        beat_phase_offset_beats=0,
+        beat_phase_scores=[1.0, 0.0, 0.0, 0.0],
+        beat_phase_confidence=0.8,
+        phase_offset_used_for_generation_beats=0,
+        bar_start_anchor_used_seconds=0.0,
+        generation_aligned_to_anchor=False,
+        downbeat_guess_bar_index=0,
+        downbeat_confidence=0.7,
+        bar_start_confidence=0.8,
+        tonal_center_pc_guess=6,
+        tonal_center_confidence=0.7,
+        scale_mode_guess="minor",
+        scale_mode_confidence=0.7,
+        sections=[],
+        bar_energy=[0.55] * bar_count,
+        bar_accent_profile=[0.55] * bar_count,
+        bar_confidence_profile=[0.72] * bar_count,
+        source_groove_resolution=16,
+        source_onset_weight=pressure,
+        source_kick_weight=kick,
+        source_snare_weight=snare,
+        source_slot_pressure=pressure,
+        source_groove_confidence=[0.82] * bar_count,
+    )
+
+
+def _slot_signature(notes: list[dict], *, tempo: int, bar_count: int) -> tuple[tuple[int, ...], ...]:
+    spb = 60.0 / float(tempo)
+    bar_len = 4.0 * spb
+    rows: list[list[int]] = [[] for _ in range(bar_count)]
+    for note in notes:
+        bar = max(0, min(bar_count - 1, int(math.floor(float(note["start"]) / bar_len))))
+        rel = float(note["start"]) - (bar * bar_len)
+        slot = max(0, min(15, int(round(rel / (spb / 4.0)))))
+        rows[bar].append(slot)
+    return tuple(tuple(sorted(set(row))) for row in rows)
+
+
+def test_source_minor_candidates_include_sub_one_vocabulary_labels(tmp_path: Path) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 100,
+            "key": "F#",
+            "scale": "minor",
+            "bar_count": 4,
+            "bass_style": "supportive",
+            "bass_engine": "baseline",
+            "chord_progression": ["F#m7", "F#m7", "F#m7", "F#m7"],
+        },
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+    session_routes._SESSIONS[session_id].source_analysis_override = _source_analysis_for_vocabulary(4)  # type: ignore[attr-defined]
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 5, "seed": 9090},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    labels = [take.get("label") for take in run["takes"]]
+    assert labels == [
+        "Warm Jazz-Funk",
+        "Dark Slinky Grit",
+        "Fusion Answer",
+        "Hip-Hop Soul Restraint",
+        "Tight Head-Nod Pocket",
+    ]
+    assert [take.get("template_id") for take in run["takes"]] == [
+        "warm_jazz_funk_01",
+        "dark_slinky_grit_01",
+        "fusion_answer_01",
+        "hiphop_soul_restraint_01",
+        "tight_headnod_pocket_01",
+    ]
+
+    listed = client.get(f"/api/sessions/{session_id}/bass-candidates")
+    assert listed.status_code == 200
+    assert [take.get("label") for take in listed.json()[0]["takes"]] == labels
+
+    notes_res = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{run['takes'][0]['take_id']}/notes"
+    )
+    assert notes_res.status_code == 200
+    notes = notes_res.json()
+    assert notes
+    pitch_classes = {int(note["pitch"]) % 12 for note in notes}
+    assert pitch_classes != {6}
+    slots = _slot_signature(notes, tempo=100, bar_count=4)
+    assert any(set(row) - {0, 8} for row in slots)
+
+    repeated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 5, "seed": 9090},
+    )
+    assert repeated.status_code == 200
+    assert [take.get("label") for take in repeated.json()["takes"]] == labels
 
 
 def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:
