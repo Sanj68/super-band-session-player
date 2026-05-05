@@ -275,7 +275,7 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     uc = _uc_vocabulary_phrase(bar_count=bar_count, tempo=tempo)
     t = templates_by_id()["dark_slinky_grit_01"]
     assert t.rules.get("groove_feel") == "dark_slinky_swing"
-    assert abs(float(t.rules.get("swing_amount", 0.0)) - 0.56) < 1e-9
+    assert abs(float(t.rules.get("swing_amount", 0.0)) - 0.54) < 1e-9
     notes = generate_template_candidate_events(
         template=t,
         tempo=tempo,
