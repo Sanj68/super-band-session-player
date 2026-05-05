@@ -163,6 +163,7 @@ export default function App() {
   const [compareModeOpen, setCompareModeOpen] = useState(false);
   const [abMessage, setAbMessage] = useState("");
   const [leadSuitMode, setLeadSuitMode] = useState("counter");
+  const [selectedInstrument, setSelectedInstrument] = useState("bass");
   const [evalClipId, setEvalClipId] = useState("");
   const [evalReferenceNotes, setEvalReferenceNotes] = useState("");
   const [evalTakeId, setEvalTakeId] = useState("");
@@ -1073,26 +1074,240 @@ export default function App() {
     session.lanes.lead?.generated;
 
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto" }}>
-      <header style={{ marginBottom: "1.5rem" }}>
-        <h1 style={{ margin: 0, fontSize: "1.75rem" }}>Super Band Session Player</h1>
-        <p style={{ margin: "0.35rem 0 0", color: "#64748b" }}>
-          Drums, bass, chords, and lead as separate MIDI lanes.
-        </p>
+    <div className="sp-app">
+      <header className="sp-header">
+        <div>
+          <div className="sp-title">Session Player</div>
+          <p style={{ margin: "0.15rem 0 0", color: "var(--text-faint)", fontSize: 12 }}>
+            Pick an instrument. Upload a reference. Generate takes.
+          </p>
+        </div>
+        <div className="sp-version">v0.10 · bass</div>
       </header>
 
-      <UploadFirstEntryPanel
-        session={session}
-        setSession={setSession}
-        busy={busy}
-        setBusy={setBusy}
-        setError={setError}
-        setStatus={setStatus}
-        setTempo={setTempo}
-        setKeyNote={setKeyNote}
-        setScale={setScale}
-        setBars={setBars}
-      />
+      <nav className="sp-tabs" role="tablist" aria-label="Instrument">
+        {[
+          { key: "bass", label: "Bass" },
+          { key: "drums", label: "Drums" },
+          { key: "keys", label: "Keys" },
+          { key: "lead", label: "Lead" },
+        ].map((opt) => {
+          const active = selectedInstrument === opt.key;
+          return (
+            <button
+              key={opt.key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setSelectedInstrument(opt.key)}
+              className={`sp-tab${active ? " active" : ""}`}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      {error && <div className="sp-error">{error}</div>}
+      {status && !error && (
+        <div className="sp-status">
+          <span>{status}</span>
+          {session?.id && (
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={busy}
+              className="btn-ghost"
+              style={{ marginLeft: "auto", padding: "0.25rem 0.6rem", fontSize: 12 }}
+            >
+              Refresh
+            </button>
+          )}
+        </div>
+      )}
+
+      {selectedInstrument === "bass" ? (
+        <>
+          <section className="sp-panel">
+            <div className="sp-panel-head">
+              <span className="sp-step">Step 1</span>
+              <span className="sp-panel-title">Source / Reference</span>
+            </div>
+            <UploadFirstEntryPanel
+              session={session}
+              setSession={setSession}
+              busy={busy}
+              setBusy={setBusy}
+              setError={setError}
+              setStatus={setStatus}
+              setTempo={setTempo}
+              setKeyNote={setKeyNote}
+              setScale={setScale}
+              setBars={setBars}
+            />
+          </section>
+
+          <section className="sp-panel">
+            <div className="sp-panel-head">
+              <span className="sp-step">Step 2</span>
+              <span className="sp-panel-title">Musical Setup</span>
+            </div>
+            <p className="sp-panel-sub">
+              Tempo, key, scale, bars and chord progression for the active session.
+            </p>
+            <div className="sp-grid">
+              <label className="sp-field">
+                Tempo
+                <input
+                  type="number"
+                  min={40}
+                  max={240}
+                  value={tempo}
+                  onChange={(e) =>
+                    setTempo(Math.max(40, Math.min(240, Number(e.target.value) || 0)))
+                  }
+                  disabled={busy}
+                />
+              </label>
+              <label className="sp-field">
+                Key
+                <select value={keyNote} onChange={(e) => setKeyNote(e.target.value)} disabled={busy}>
+                  {["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"].map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="sp-field">
+                Scale
+                <select value={scale} onChange={(e) => setScale(e.target.value)} disabled={busy}>
+                  {[
+                    "major",
+                    "natural_minor",
+                    "harmonic_minor",
+                    "melodic_minor",
+                    "dorian",
+                    "mixolydian",
+                    "pentatonic_major",
+                    "pentatonic_minor",
+                    "blues",
+                  ].map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="sp-field">
+                Bars
+                <input
+                  type="number"
+                  min={1}
+                  max={128}
+                  value={bars}
+                  onChange={(e) =>
+                    setBars(Math.max(1, Math.min(128, Number(e.target.value) || 1)))
+                  }
+                  disabled={busy}
+                />
+              </label>
+            </div>
+            <label className="sp-field" style={{ marginTop: 10 }}>
+              Chord progression
+              <input
+                value={chordProgression}
+                onChange={(e) => setChordProgression(e.target.value)}
+                placeholder="F#m7 | F#m7 | F#m7 | F#m7"
+                disabled={busy}
+              />
+            </label>
+            <div className="sp-actions">
+              {session?.id ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    setError(null);
+                    try {
+                      const progression = parseChordProgressionInput(chordProgression);
+                      const payload = {
+                        tempo,
+                        key: keyNote,
+                        scale,
+                        bar_count: bars,
+                      };
+                      if (progression.length > 0) payload.chord_progression = progression;
+                      const updated = await patchSession(session.id, payload);
+                      setSession(updated);
+                      setStatus(updated.message ?? "Musical setup applied to session.");
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Apply to Session
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={onGenerate}
+                  disabled={busy}
+                >
+                  Create Session + Generate
+                </button>
+              )}
+            </div>
+          </section>
+
+          <section className="sp-panel">
+            <div className="sp-panel-head">
+              <span className="sp-step">Step 3</span>
+              <span className="sp-panel-title">Generate Bass Takes</span>
+            </div>
+            <p className="sp-panel-sub">
+              Labelled Sub One candidates: Warm Jazz-Funk · Dark Slinky Grit · Fusion Answer · Hip-Hop Soul Restraint · Tight Head-Nod Pocket. Audition / promote / export from each card.
+            </p>
+            {session ? (
+              <BassCandidatePanel
+                session={session}
+                setSession={setSession}
+                busy={busy}
+                setBusy={setBusy}
+                setError={setError}
+                setStatus={setStatus}
+              />
+            ) : (
+              <p style={{ fontSize: 13, color: "var(--text-faint)", margin: 0 }}>
+                Upload a reference and apply detected context (or use Create Session + Generate above) to enable candidate generation.
+              </p>
+            )}
+          </section>
+        </>
+      ) : (
+        <section className="sp-placeholder">
+          <h2>
+            {selectedInstrument === "drums"
+              ? "Drums"
+              : selectedInstrument === "keys"
+              ? "Keys"
+              : "Lead"}{" "}
+            workspace
+          </h2>
+          <p style={{ margin: 0, fontSize: 13 }}>
+            Coming next — use Advanced Controls below for now.
+          </p>
+        </section>
+      )}
+
+      <details className="sp-advanced">
+        <summary>Advanced Controls</summary>
+        <div className="sp-advanced-body">
 
       <SessionControls
         tempo={tempo}
@@ -1151,30 +1366,6 @@ export default function App() {
         activeSessionId={session?.id ?? null}
         onDelete={onDeleteSetup}
       />
-
-      {error && (
-        <pre
-          style={{
-            background: "#fef2f2",
-            color: "#991b1b",
-            padding: "0.75rem 1rem",
-            borderRadius: 8,
-            overflow: "auto",
-          }}
-        >
-          {error}
-        </pre>
-      )}
-      {status && !error && (
-        <p style={{ color: "#15803d", fontSize: 14 }}>
-          {status}{" "}
-          {session?.id && (
-            <button type="button" onClick={refresh} disabled={busy} style={{ marginLeft: 8 }}>
-              Refresh state
-            </button>
-          )}
-        </p>
-      )}
 
       {session && (
         <>
@@ -1364,14 +1555,6 @@ export default function App() {
             setError={setError}
             setStatus={setStatus}
             setSession={setSession}
-          />
-          <BassCandidatePanel
-            session={session}
-            setSession={setSession}
-            busy={busy}
-            setBusy={setBusy}
-            setError={setError}
-            setStatus={setStatus}
           />
           <details
             style={{
@@ -2165,6 +2348,8 @@ export default function App() {
           </div>
         </>
       )}
+        </div>
+      </details>
     </div>
   );
 }

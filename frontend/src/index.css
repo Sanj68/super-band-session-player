@@ -1,8 +1,27 @@
 :root {
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel-2: #1d2230;
+  --panel-3: #232a3a;
+  --border: #2a3040;
+  --border-strong: #3a4256;
+  --text: #e6e8ee;
+  --text-muted: #9aa3b2;
+  --text-faint: #6b7382;
+  --accent: #7c83ff;
+  --accent-strong: #9aa0ff;
+  --accent-soft: rgba(124, 131, 255, 0.14);
+  --danger: #ff6b6b;
+  --success: #6ee7b7;
+  --warn: #f0b35a;
+
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    Roboto, system-ui, sans-serif;
+  font-size: 14px;
   line-height: 1.5;
-  color: #0f172a;
-  background: #f8fafc;
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
 }
 
 * {
@@ -11,9 +30,319 @@
 
 body {
   margin: 0;
-  padding: 1.5rem;
+  padding: 1.25rem;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--text);
+  margin: 0;
+}
+
+p {
+  color: var(--text-muted);
 }
 
 a {
-  color: #2563eb;
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--panel-3);
+  color: var(--text);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+input[type="file"] {
+  padding: 0.25rem;
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+
+button {
+  font: inherit;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease,
+    transform 0.04s ease;
+}
+
+button:hover:not(:disabled) {
+  background: #2c3346;
+  border-color: #4a536b;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+label {
+  color: var(--text-muted);
+}
+
+details {
+  color: var(--text);
+}
+
+summary {
+  outline: none;
+}
+
+summary::-webkit-details-marker {
+  color: var(--text-muted);
+}
+
+/* App layout */
+.sp-app {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.sp-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.sp-title {
+  font-size: 1.35rem;
+  letter-spacing: 0.01em;
+  font-weight: 600;
+}
+
+.sp-version {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Instrument tabs */
+.sp-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--panel);
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 1rem;
+  width: fit-content;
+}
+
+.sp-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 0.4rem 1rem;
+  border-radius: 7px;
+  font-weight: 500;
+}
+
+.sp-tab:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: transparent;
+}
+
+.sp-tab.active {
+  background: var(--panel-3);
+  border-color: var(--border-strong);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent-soft);
+}
+
+/* Section panels */
+.sp-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.sp-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.sp-step {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.sp-panel-title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.sp-panel-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 0.6rem;
+}
+
+.sp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.55rem;
+}
+
+.sp-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sp-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+/* Status banners */
+.sp-error {
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  color: #ffb4b4;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 0.85rem;
+}
+
+.sp-status {
+  background: rgba(110, 231, 183, 0.06);
+  border: 1px solid rgba(110, 231, 183, 0.25);
+  color: var(--success);
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.sp-placeholder {
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  padding: 1.25rem;
+  background: var(--panel);
+  color: var(--text-muted);
+}
+
+.sp-placeholder h2 {
+  font-size: 1rem;
+  color: var(--text);
+  margin-bottom: 0.35rem;
+}
+
+/* Advanced wrapper */
+.sp-advanced {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.65rem 0.85rem;
+  margin-top: 1.25rem;
+}
+
+.sp-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+.sp-advanced[open] > summary {
+  color: var(--text);
+  margin-bottom: 0.75rem;
+}
+
+.sp-advanced-body {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
 }
