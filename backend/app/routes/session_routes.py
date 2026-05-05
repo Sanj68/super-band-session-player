@@ -1046,6 +1046,12 @@ def _take_bytes_or_400(raw_take: dict[str, object]) -> bytes:
         ) from exc
 
 
+def _is_guarded_vocabulary_take(raw_take: dict[str, object]) -> bool:
+    template_id = raw_take.get("template_id")
+    label = raw_take.get("label")
+    return isinstance(template_id, str) and bool(template_id.strip()) and isinstance(label, str) and bool(label.strip())
+
+
 def _signature_distance(a: tuple[tuple[int, ...], ...], b: tuple[tuple[int, ...], ...]) -> float:
     aset = {(bar, int(slot)) for bar, row in enumerate(a) for slot in row}
     bset = {(bar, int(slot)) for bar, row in enumerate(b) for slot in row}
@@ -1434,6 +1440,10 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
     s.bass_seed = int(take["seed"]) if take.get("seed") is not None else None
     s.current_bass_candidate_run_id = str(run_id)
     s.current_bass_candidate_take_id = str(take_id)
+    if _is_guarded_vocabulary_take(take):
+        # Keep labelled vocabulary promotions pitch-stable across clean/performance paths.
+        s.bass_performance_bytes = bytes(data)
+        return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
     # Re-render performance MIDI from the candidate seed so the promoted
     # lane has an audition path. Candidate clean bytes remain authoritative
     # in s.bass_bytes; the performance overlay is a parallel render derived

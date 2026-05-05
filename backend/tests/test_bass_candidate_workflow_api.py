@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import base64
+import io
 import math
+import time
 from pathlib import Path
 
+import pretty_midi
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models.session import SourceAnalysis
+from app.routes import midi_routes
 from app.routes import session_routes
+from app.services.midi_audition import FakeMidiBackend, MidiOutputInfo, RtMidiBackend
 from app.services import bass_candidate_store
 
 
@@ -254,6 +259,26 @@ def _slot_signature(notes: list[dict], *, tempo: int, bar_count: int) -> tuple[t
     return tuple(tuple(sorted(set(row))) for row in rows)
 
 
+def _pitch_classes_from_midi(midi_bytes: bytes) -> set[int]:
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    pcs: set[int] = set()
+    for ins in pm.instruments:
+        if ins.is_drum:
+            continue
+        for note in ins.notes:
+            pcs.add(int(note.pitch) % 12)
+    return pcs
+
+
+def _wait_for(predicate, *, timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    assert predicate()
+
+
 def test_source_minor_candidates_include_sub_one_vocabulary_labels(tmp_path: Path) -> None:
     bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
     bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
@@ -334,6 +359,144 @@ def test_source_minor_candidates_include_sub_one_vocabulary_labels(tmp_path: Pat
     )
     assert repeated.status_code == 200
     assert [take.get("label") for take in repeated.json()["takes"]] == labels
+
+
+def test_promoted_labelled_candidate_keeps_guarded_performance_bytes(tmp_path: Path) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 100,
+            "key": "F#",
+            "scale": "minor",
+            "bar_count": 4,
+            "bass_style": "supportive",
+            "bass_engine": "baseline",
+            "chord_progression": ["F#m7", "F#m7", "F#m7", "F#m7"],
+        },
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+    session_routes._SESSIONS[session_id].source_analysis_override = _source_analysis_for_vocabulary(4)  # type: ignore[attr-defined]
+
+    generated = client.post(f"/api/sessions/{session_id}/bass-candidates", json={"take_count": 5, "seed": 9090})
+    assert generated.status_code == 200
+    run = generated.json()
+    labelled_take = run["takes"][0]
+    assert labelled_take.get("label")
+    assert labelled_take.get("template_id")
+
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{labelled_take['take_id']}/promote"
+    )
+    assert promoted.status_code == 200
+
+    clean = client.get(f"/api/sessions/{session_id}/midi/bass?mode=clean")
+    perf = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
+    assert clean.status_code == 200
+    assert perf.status_code == 200
+    assert clean.content == perf.content
+    assert _pitch_classes_from_midi(clean.content).issubset({6, 9, 1, 4})
+    assert _pitch_classes_from_midi(perf.content).issubset({6, 9, 1, 4})
+
+
+def test_promoting_unlabelled_candidate_keeps_seed_rerender_path(tmp_path: Path, monkeypatch) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    call_count = {"perf_regen": 0}
+    original = session_routes.generator.generate_bass
+
+    def _wrapped_generate_bass(*args, **kwargs):
+        if kwargs.get("return_performance_notes"):
+            call_count["perf_regen"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session_routes.generator, "generate_bass", _wrapped_generate_bass)
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 104,
+            "key": "C",
+            "scale": "major",
+            "bar_count": 4,
+            "bass_style": "melodic",
+            "bass_engine": "baseline",
+        },
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+
+    generated = client.post(f"/api/sessions/{session_id}/bass-candidates", json={"take_count": 2, "seed": 31337})
+    assert generated.status_code == 200
+    run = generated.json()
+    unlabelled_take = run["takes"][0]
+    assert unlabelled_take.get("label") is None
+    assert unlabelled_take.get("template_id") is None
+
+    before = call_count["perf_regen"]
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{unlabelled_take['take_id']}/promote"
+    )
+    assert promoted.status_code == 200
+    assert call_count["perf_regen"] == before + 1
+
+
+def test_audition_performance_after_labelled_promotion_uses_guarded_bytes(tmp_path: Path) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+
+    backend = FakeMidiBackend((MidiOutputInfo(id="iac-1", name="IAC Driver Bus 1"),))
+    midi_routes.set_midi_output_backend(backend)
+    try:
+        client = TestClient(app)
+        created = client.post(
+            "/api/sessions/",
+            json={
+                "tempo": 100,
+                "key": "F#",
+                "scale": "minor",
+                "bar_count": 4,
+                "bass_style": "supportive",
+                "bass_engine": "baseline",
+                "chord_progression": ["F#m7", "F#m7", "F#m7", "F#m7"],
+            },
+        )
+        assert created.status_code == 200
+        session_id = created.json()["session"]["id"]
+        session_routes._SESSIONS[session_id].source_analysis_override = _source_analysis_for_vocabulary(4)  # type: ignore[attr-defined]
+
+        generated = client.post(f"/api/sessions/{session_id}/bass-candidates", json={"take_count": 5, "seed": 9090})
+        assert generated.status_code == 200
+        run = generated.json()
+        labelled = run["takes"][0]
+        assert labelled.get("label")
+        assert labelled.get("template_id")
+        promoted = client.post(
+            f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{labelled['take_id']}/promote"
+        )
+        assert promoted.status_code == 200
+
+        res = client.post(
+            f"/api/sessions/{session_id}/audition/bass",
+            json={"output": "iac-1", "mode": "performance"},
+        )
+        assert res.status_code == 200
+        _wait_for(lambda: any(getattr(m, "type", "") == "note_on" for m in backend.sent_messages))
+        note_ons = [m for m in backend.sent_messages if getattr(m, "type", "") == "note_on"]
+        assert note_ons
+        assert {int(getattr(m, "note", 0)) % 12 for m in note_ons}.issubset({6, 9, 1, 4})
+    finally:
+        midi_routes.get_audition_player().stop()
+        midi_routes.set_midi_output_backend(RtMidiBackend())
 
 
 def test_bass_candidate_promote_404_on_invalid_ids(tmp_path: Path) -> None:
