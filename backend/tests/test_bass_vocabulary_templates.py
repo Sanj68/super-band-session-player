@@ -287,8 +287,9 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     # first anchor at bar 0 slot 0
     spb = 60.0 / float(tempo)
     sixteenth = spb / 4.0
+    bar_len = 4.0 * spb
     first = min(notes, key=lambda n: (n.start, n.pitch))
-    assert int(round(first.start / sixteenth)) == 0
+    assert abs(float(first.start) - 0.0) <= 1e-6
     # guardrail still applies
     assert {int(n.pitch) % 12 for n in notes}.issubset({6, 9, 1, 4})
     # short articulations should be audible
@@ -296,7 +297,22 @@ def test_dark_slinky_grit_is_audible_and_controlled() -> None:
     assert short_notes
     assert min(int(n.velocity) for n in short_notes) >= 58
     assert min(float(n.end - n.start) for n in short_notes) >= sixteenth * 0.75
+    # timing is tightened for dark slinky:
+    # - slot 0 anchors on-grid
+    # - dead/ghost-like short slots are within tiny offset
+    # - normal notes keep subtle microtiming only
+    for n in notes:
+        bar = max(0, min(bar_count - 1, int(float(n.start) // bar_len)))
+        rel = float(n.start) - (bar * bar_len)
+        slot = max(0, min(15, int(round(rel / sixteenth))))
+        expected = (bar * bar_len) + (slot * sixteenth)
+        offset = abs(float(n.start) - expected)
+        if slot == 0:
+            assert offset <= 1e-6
+        elif slot == 5 or (float(n.end) - float(n.start)) <= (sixteenth * 0.9):
+            assert offset <= 0.0025
+        else:
+            assert offset <= 0.0045
     # density remains controlled (template count plus possible one boundary reinforcement)
-    bar_len = 4.0 * spb
     counts = [len([n for n in notes if (bar * bar_len) <= n.start < ((bar + 1) * bar_len)]) for bar in range(bar_count)]
     assert max(counts) <= 6

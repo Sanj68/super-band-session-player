@@ -148,6 +148,28 @@ def _event_duration(
     return max(sixteenth * 0.5, sixteenth * float(duration_slots) * sustain)
 
 
+def _timing_offset_seconds(
+    *,
+    template: BassVocabularyTemplate,
+    role: str,
+    slot: int,
+    source_weight: float,
+    sixteenth: float,
+    bar: int,
+    delayed_entry: bool,
+) -> float:
+    is_dark_slinky = template.id == "dark_slinky_grit_01"
+    if bar == 0 and slot == 0 and not delayed_entry:
+        return 0.0
+    if not is_dark_slinky:
+        return sixteenth * 0.035 * max(0.0, min(1.0, source_weight))
+    w = max(0.0, min(1.0, float(source_weight)))
+    centered = (w * 2.0) - 1.0
+    if role in {"ghost", "dead"}:
+        return max(-0.0020, min(0.0020, centered * 0.0020))
+    return max(-0.0040, min(0.0040, centered * 0.0040))
+
+
 _RESOLVING_PITCH_ROLES: Final[frozenset[str]] = frozenset(
     {"root", "fifth", "flat7", "octave", "minor3"}
 )
@@ -270,7 +292,15 @@ def _finalize_vocabulary_phrase_notes(
     if not has_late_resolve:
         tail_slot = _pick_tail_resolution_slot(conditioning, last_b)
         sk = source_kick_weight(conditioning, last_b, tail_slot) if conditioning is not None else 0.0
-        start = last_origin + tail_slot * sixteenth + sixteenth * 0.035 * max(0.0, min(1.0, sk))
+        start = last_origin + tail_slot * sixteenth + _timing_offset_seconds(
+            template=template,
+            role="root",
+            slot=tail_slot,
+            source_weight=sk,
+            sixteenth=sixteenth,
+            bar=last_b,
+            delayed_entry=False,
+        )
         duration = _event_duration("root", max(2, 16 - tail_slot), sixteenth, template=template)
         end = min(loop_end - 1e-4, start + duration)
         if end > start and not any(
@@ -362,9 +392,15 @@ def generate_template_candidate_events(
                     if not phrase_exempt:
                         continue
                 source_weight = max(0.0, min(1.0, kick))
-            start = anchor + (bar * 4.0 * spb) + (slot * sixteenth)
-            if not (bar == 0 and slot == 0 and not delayed_entry):
-                start += sixteenth * 0.035 * source_weight
+            start = anchor + (bar * 4.0 * spb) + (slot * sixteenth) + _timing_offset_seconds(
+                template=template,
+                role=event.pitch_role,
+                slot=slot,
+                source_weight=source_weight,
+                sixteenth=sixteenth,
+                bar=bar,
+                delayed_entry=delayed_entry,
+            )
             duration = _event_duration(
                 event.pitch_role,
                 event.duration_slots,
