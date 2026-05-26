@@ -334,6 +334,8 @@ def _preview(
         "marcus": "Player «marcus» (slap-forward voice on your style): sharp, syncopated, fill-ready, upper accents.",
         "pino": "Player «pino» (soul-line voice on your style): smooth, selective, elegant contour, high space.",
         "paul_chambers": "Player «paul_chambers» (hard-bop walking voice): quarter-note swing, strong-beat targets, chromatic approaches.",
+        "jaco_pastorius": "Player «jaco_pastorius» (fretless fusion voice): syncopated, melodic, ghosted, upper-extension fills.",
+        "james_jamerson": "Player «james_jamerson» (Motown soul voice): locked pocket, syncopated 16ths, chromatic passing tones, counter-melody motion.",
     }
     tail = blurbs.get(style, blurbs["supportive"])
     if rare_groove_soul and style == "supportive":

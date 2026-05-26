@@ -1,0 +1,49 @@
+{
+  "id": "jaco_pastorius",
+  "name": "Jaco Pastorius",
+  "lane": "bass",
+  "family": "fretless_funk_fusion",
+  "profile": {
+    "base_style": "fusion",
+    "density_ceiling": 5,
+    "groove_repetition_strength": 0.48,
+    "octave_jump_bias": 0.32,
+    "root_anchor_strength": 0.62,
+    "syncopation_bias": 0.86,
+    "fill_activity": 0.82,
+    "rest_preference": 0.12,
+    "register_min": 34,
+    "register_max": 67,
+    "articulation_length_bias": 0.76,
+    "offbeat_bias": 0.82,
+    "ghost_note_bias": 0.22,
+    "contour_preference": 0.88
+  },
+  "fretless_phrasing": {
+    "glide_bias": 0.78,
+    "vibrato_bias": 0.42,
+    "melodic_fill_placement": ["late_bar", "over_bar_line", "post_downbeat_resolution"],
+    "preferred_contours": ["singing_arc", "wide_then_stepwise", "upper_extension_peak"]
+  },
+  "fusion_vocabulary": {
+    "strong_beat_targets": ["root", "third", "fifth", "seventh"],
+    "upper_extensions": ["ninth", "eleventh"],
+    "approach_types": ["chromatic_from_below", "chromatic_from_above", "enclosure", "upper_neighbor"],
+    "run_shapes": ["chromatic_approach_run", "diatonic_scale_fragment", "arpeggio_to_extension"],
+    "over_bar_line_fill_probability": 0.34
+  },
+  "rhythmic_language": {
+    "feel": ["neo_soul", "fusion"],
+    "subdivision_mix": ["quarter_notes", "eighth_notes", "sixteenth_note_bursts"],
+    "syncopation_strength": 0.88,
+    "rhythmic_displacement": ["anticipate_beat_1", "delay_resolution", "offbeat_accent_groups"],
+    "ghost_note_density": "medium_high"
+  },
+  "percussive_elements": {
+    "slap_element_bias": 0.34,
+    "dead_note_bias": 0.22,
+    "harmonic_overtone_bias": 0.38,
+    "accent_devices": ["raked_ghosts", "thumbed_octave_hint", "pinched_harmonic_color"]
+  },
+  "avoid": ["static_root_only_pedal", "straight_quarter_note_walk_only", "overly_low_register_only"]
+}

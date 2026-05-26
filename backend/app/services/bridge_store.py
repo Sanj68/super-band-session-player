@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from app.models.bridge import BridgeHeartbeatRequest, BridgeSourceFeatureFrame, BridgeTransportFrame
+from app.models.bridge import BridgeHarmonicFrame, BridgeHeartbeatRequest, BridgeSourceFeatureFrame, BridgeTransportFrame
 from app.models.groove_frame import GROOVE_SLOTS, GrooveFrame
 
 
@@ -18,6 +18,7 @@ class _BridgeState:
     last_seen_at: str | None = None
     last_transport: dict[str, Any] | None = None
     feature_frames: list[BridgeSourceFeatureFrame] = field(default_factory=list)
+    harmonic_frames: list[BridgeHarmonicFrame] = field(default_factory=list)
 
 
 _STATES: dict[str, _BridgeState] = {}
@@ -65,6 +66,17 @@ def record_source_frame(frame: BridgeSourceFeatureFrame) -> None:
         del st.feature_frames[:excess]
 
 
+def record_harmonic_frame(frame: BridgeHarmonicFrame) -> None:
+    st = _state_for(frame.session_id)
+    st.plugin_instance_id = frame.plugin_instance_id
+    st.source_id = frame.source_id
+    st.last_seen_at = _now_iso()
+    st.harmonic_frames.append(frame)
+    if len(st.harmonic_frames) > _MAX_FRAMES_PER_SESSION:
+        excess = len(st.harmonic_frames) - _MAX_FRAMES_PER_SESSION
+        del st.harmonic_frames[:excess]
+
+
 def get_bridge_state(session_id: str) -> dict[str, Any]:
     st = _STATES.get(session_id)
     if st is None:
@@ -75,6 +87,7 @@ def get_bridge_state(session_id: str) -> dict[str, Any]:
             "source_id": None,
             "last_seen_at": None,
             "frame_count": 0,
+            "harmonic_frame_count": 0,
             "last_transport": None,
         }
     return {
@@ -84,6 +97,7 @@ def get_bridge_state(session_id: str) -> dict[str, Any]:
         "source_id": st.source_id,
         "last_seen_at": st.last_seen_at,
         "frame_count": len(st.feature_frames),
+        "harmonic_frame_count": len(st.harmonic_frames),
         "last_transport": st.last_transport,
     }
 
@@ -197,3 +211,88 @@ def summarize_frames_to_groove_frames(session_id: str) -> list[GrooveFrame]:
             )
         )
     return out
+
+
+def harmonic_frames_for_session(session_id: str) -> list[BridgeHarmonicFrame]:
+    st = _STATES.get(session_id)
+    if st is None:
+        return []
+    return list(st.harmonic_frames)
+
+
+def summarize_harmonic_frames(session_id: str) -> dict[str, Any] | None:
+    frames = harmonic_frames_for_session(session_id)
+    if not frames:
+        return None
+
+    by_bar: dict[int, list[BridgeHarmonicFrame]] = {}
+    for frame in frames:
+        by_bar.setdefault(int(frame.bar_index), []).append(frame)
+
+    bars: list[dict[str, Any]] = []
+    global_chroma = [0.0] * 12
+    global_weight = 0.0
+    key_votes: dict[tuple[int, str], float] = {}
+    tempo_rows: list[tuple[float, float]] = []
+
+    for bar_index in sorted(by_bar):
+        rows = by_bar[bar_index]
+        chroma = [0.0] * 12
+        weight_sum = 0.0
+        for row in rows:
+            conf = max(0.05, min(1.0, 0.5 * float(row.key_confidence) + 0.5 * float(row.scale_confidence)))
+            dur = max(0.001, float(row.duration_seconds))
+            weight = conf * dur
+            for i, value in enumerate(row.chroma):
+                chroma[i] += float(value) * weight
+                global_chroma[i] += float(value) * weight
+            weight_sum += weight
+            global_weight += weight
+            if row.key_pc is not None:
+                scale = str(row.scale or "major")
+                key_votes[(int(row.key_pc) % 12, scale)] = key_votes.get((int(row.key_pc) % 12, scale), 0.0) + weight
+            tempo = row.tempo_bpm if row.tempo_bpm is not None else row.host_tempo
+            if tempo is not None:
+                tempo_rows.append((float(tempo), max(0.05, float(row.tempo_confidence))))
+        if weight_sum > 1e-9:
+            chroma = [round(float(x / weight_sum), 6) for x in chroma]
+        else:
+            chroma = [0.0] * 12
+        last = rows[-1]
+        bars.append(
+            {
+                "bar_index": int(bar_index),
+                "chroma": chroma,
+                "key_pc": int(last.key_pc) if last.key_pc is not None else None,
+                "key": last.key,
+                "scale": last.scale,
+                "key_confidence": float(last.key_confidence),
+                "scale_confidence": float(last.scale_confidence),
+                "cadence": last.cadence,
+                "cadence_confidence": float(last.cadence_confidence),
+                "frame_count": len(rows),
+            }
+        )
+
+    if global_weight > 1e-9:
+        global_chroma = [round(float(x / global_weight), 6) for x in global_chroma]
+    best_key = max(key_votes.items(), key=lambda kv: kv[1])[0] if key_votes else (None, None)
+    if tempo_rows:
+        tw = sum(w for _t, w in tempo_rows)
+        tempo_bpm = round(sum(t * w for t, w in tempo_rows) / max(1e-9, tw), 3)
+        tempo_conf = round(min(1.0, tw / max(1.0, len(tempo_rows))), 4)
+    else:
+        tempo_bpm = None
+        tempo_conf = 0.0
+
+    return {
+        "source": "logic_au_harmonic_listener",
+        "frame_count": len(frames),
+        "bar_count": len(bars),
+        "chroma": global_chroma,
+        "key_pc": best_key[0],
+        "scale": best_key[1],
+        "tempo_bpm": tempo_bpm,
+        "tempo_confidence": tempo_conf,
+        "bars": bars,
+    }

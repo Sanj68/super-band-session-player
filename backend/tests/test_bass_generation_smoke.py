@@ -10,6 +10,7 @@ import pretty_midi
 from app.models.session import BassPlayer, GrooveProfile
 from app.services.bass_generator import generate_bass
 from app.services.conditioning import UnifiedConditioning
+from app.services.style_adapter import StyleAdapter
 
 
 def _reference_conditioning(
@@ -269,3 +270,174 @@ def test_paul_chambers_phrase_v2_walks_in_quarters() -> None:
     assert "quarter-note walking" in preview
     assert len(notes) == 16
     assert [round(n.start / spb) for n in notes[:4]] == [0, 1, 2, 3]
+
+
+def test_pino_persona_loads_with_neo_soul_vocabulary() -> None:
+    personas_dir = Path(__file__).resolve().parents[1] / "app" / "personas"
+    adapter = StyleAdapter(personas_dir=personas_dir)
+    persona = adapter.bass_persona("pino")
+
+    assert persona is not None
+    assert BassPlayer.pino.value == persona["id"]
+    assert persona["profile"]["base_style"] == "melodic"
+    assert persona["profile"]["density_ceiling"] == 3
+    assert "neo_soul" in persona["neo_soul_vocabulary"]["core_feel"]
+    assert persona["rhythmic_language"]["placement"] == "laid_back"
+    assert persona["groove_rules"]["max_notes_per_bar"] == 3
+
+
+def test_pino_baseline_generates_valid_neo_soul_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=92,
+        bar_count=4,
+        key="D",
+        scale="minor",
+        bass_style="melodic",
+        bass_player="pino",
+        seed=2468,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    assert "pino" in preview
+    assert len(notes) >= 4
+    assert all(34 <= n.pitch <= 55 for n in notes)
+    assert all(n.end > n.start for n in notes)
+
+
+def test_pino_phrase_v2_generates_spacious_sustained_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=92,
+        bar_count=4,
+        key="D",
+        scale="minor",
+        bass_style="melodic",
+        bass_player="pino",
+        bass_engine="phrase_v2",
+        seed=2468,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    spb = 60.0 / 92.0
+    assert "pino" in preview
+    assert "neo-soul pocket" in preview
+    assert 4 <= len(notes) <= 12
+    assert all(34 <= n.pitch <= 55 for n in notes)
+    assert all(n.end > n.start for n in notes)
+    assert any((n.end - n.start) >= spb for n in notes)
+    assert notes[0].start > 0.0
+
+
+def test_jaco_pastorius_persona_loads_with_fusion_vocabulary() -> None:
+    personas_dir = Path(__file__).resolve().parents[1] / "app" / "personas"
+    adapter = StyleAdapter(personas_dir=personas_dir)
+    persona = adapter.bass_persona("jaco_pastorius")
+
+    assert persona is not None
+    assert BassPlayer.jaco_pastorius.value == persona["id"]
+    assert persona["profile"]["base_style"] == "fusion"
+    assert persona["profile"]["ghost_note_bias"] > 0.2
+    assert "sixteenth_note_bursts" in persona["rhythmic_language"]["subdivision_mix"]
+    assert "eleventh" in persona["fusion_vocabulary"]["upper_extensions"]
+    assert "pinched_harmonic_color" in persona["percussive_elements"]["accent_devices"]
+
+
+def test_jaco_pastorius_baseline_generates_valid_fusion_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=96,
+        bar_count=4,
+        key="E",
+        scale="minor",
+        bass_style="fusion",
+        bass_player="jaco_pastorius",
+        seed=4321,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    assert "jaco_pastorius" in preview
+    assert len(notes) >= 8
+    assert all(34 <= n.pitch <= 67 for n in notes)
+    assert all(n.end > n.start for n in notes)
+    assert any(n.start % (60.0 / 96.0) > 1e-3 for n in notes)
+
+
+def test_jaco_pastorius_phrase_v2_generates_valid_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=96,
+        bar_count=4,
+        key="E",
+        scale="minor",
+        bass_style="fusion",
+        bass_player="jaco_pastorius",
+        bass_engine="phrase_v2",
+        seed=4321,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = [n for inst in pm.instruments for n in inst.notes]
+    assert "jaco_pastorius" in preview
+    assert len(notes) >= 8
+    assert all(0 <= n.pitch <= 127 for n in notes)
+    assert all(n.end > n.start for n in notes)
+
+
+def test_james_jamerson_persona_loads_with_motown_vocabulary() -> None:
+    personas_dir = Path(__file__).resolve().parents[1] / "app" / "personas"
+    adapter = StyleAdapter(personas_dir=personas_dir)
+    persona = adapter.bass_persona("james_jamerson")
+
+    assert persona is not None
+    assert BassPlayer.james_jamerson.value == persona["id"]
+    assert persona["profile"]["base_style"] == "rhythmic"
+    assert persona["profile"]["syncopation_bias"] > 0.8
+    assert "syncopated_16th_note_runs" in persona["rhythmic_language"]["subdivision_mix"]
+    assert "chromatic_passing_tones" in persona["melodic_language"]["voice_leading"]
+    assert persona["groove_rules"]["lock_to_kick"] is True
+
+
+def test_james_jamerson_baseline_generates_valid_motown_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=104,
+        bar_count=4,
+        key="C",
+        scale="major",
+        bass_style="rhythmic",
+        bass_player="james_jamerson",
+        seed=5678,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    assert "james_jamerson" in preview
+    assert len(notes) >= 8
+    assert all(31 <= n.pitch <= 60 for n in notes)
+    assert all(n.end > n.start for n in notes)
+    assert any(n.start % (60.0 / 104.0) > 1e-3 for n in notes)
+
+
+def test_james_jamerson_phrase_v2_generates_valid_phrase() -> None:
+    data, preview = generate_bass(
+        tempo=104,
+        bar_count=4,
+        key="C",
+        scale="major",
+        bass_style="rhythmic",
+        bass_player="james_jamerson",
+        bass_engine="phrase_v2",
+        seed=5678,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = [n for inst in pm.instruments for n in inst.notes]
+    assert "james_jamerson" in preview
+    assert len(notes) >= 8
+    assert all(0 <= n.pitch <= 127 for n in notes)
+    assert all(n.end > n.start for n in notes)

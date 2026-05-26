@@ -194,6 +194,79 @@ def test_live_source_frames_update_phrase_v2_bass_conditioning(
     assert "live source-groove conditioning" in bass_preview
 
 
+def test_harmonic_frames_update_source_analysis_and_phrase_v2_chambers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    client = TestClient(app)
+    res = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 120,
+            "key": "C",
+            "scale": "major",
+            "bar_count": 2,
+            "bass_style": "melodic",
+            "bass_engine": "phrase_v2",
+            "bass_instrument": "finger_bass",
+            "bass_player": "paul_chambers",
+        },
+    )
+    assert res.status_code == 200, res.text
+    sid = res.json()["session"]["id"]
+
+    chroma = [0.0] * 12
+    chroma[9] = 1.0
+    chroma[0] = 0.7
+    chroma[4] = 0.8
+    frames = [
+        {
+            "plugin_instance_id": "listener-1",
+            "session_id": sid,
+            "source_id": "master-bus",
+            "sample_rate": 48000.0,
+            "tempo": 118.0,
+            "tempo_confidence": 0.8,
+            "playing": True,
+            "bar_position": 0.25 * bar,
+            "bar_index": bar,
+            "duration_seconds": 1.0,
+            "chroma": chroma,
+            "key_pc": 9,
+            "key": "A",
+            "scale": "minor",
+            "key_confidence": 0.82,
+            "scale_confidence": 0.79,
+            "cadence": "tonic",
+            "cadence_confidence": 0.5,
+        }
+        for bar in range(2)
+    ]
+
+    bridge_res = client.post(f"/api/bridge/sessions/{sid}/harmonic", json=frames)
+    assert bridge_res.status_code == 200, bridge_res.text
+    body = bridge_res.json()
+    assert body["accepted"] == 2
+    assert body["harmonic_frame_count"] == 2
+    assert body["live_harmonic_bar_count"] == 2
+    assert body["key"] == "A"
+    assert body["scale"] == "minor"
+
+    stored = session_routes._SESSIONS[sid]  # type: ignore[attr-defined]
+    assert stored.source_analysis_override is not None
+    assert stored.source_analysis_override.tonal_center_pc_guess == 9
+    assert stored.source_analysis_override.scale_mode_guess == "minor"
+    harmony = build_harmony_plan(stored, stored.source_analysis_override)
+    assert harmony.source == "logic_au_harmonic_listener"
+    assert harmony.bars[0].root_pc == 9
+
+    gen_res = client.post(f"/api/sessions/{sid}/regenerate-selected", json={"lanes": ["bass"]})
+    assert gen_res.status_code == 200, gen_res.text
+    bass_preview = gen_res.json()["lanes"]["bass"]["preview"]
+    assert "paul_chambers" in bass_preview
+    assert "live harmonic context" in bass_preview
+
+
 def test_commit_source_groove_updates_session_override_and_visible_to_conditioning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

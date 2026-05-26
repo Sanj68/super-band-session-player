@@ -12,6 +12,7 @@ from app.models.session import (
     SectionSpan,
     SourceAnalysis,
 )
+from app.services.harmonic_analysis import harmonic_targets_for_key, infer_key_scale_from_chroma
 from app.services.midi_note_extract import extract_lane_notes
 from app.services.session_context import SessionAnchorContext, build_session_context, normalize_anchor_lane
 from app.utils import music_theory as mt
@@ -332,6 +333,43 @@ def build_harmony_plan(session: Any, _source: SourceAnalysis) -> HarmonyPlan:
     key = str(getattr(session, "key", "C") or "C")
     scale = str(getattr(session, "scale", "major") or "major")
     bars = max(1, int(getattr(session, "bar_count", 8) or 8))
+    live_harmonic = (_source.source_metadata or {}).get("bridge_harmonic")
+    if isinstance(live_harmonic, dict) and isinstance(live_harmonic.get("bars"), list):
+        out: list[HarmonyPlanBar] = []
+        last_root = int(_source.tonal_center_pc_guess)
+        last_scale = str(_source.scale_mode_guess or scale)
+        for bar in range(bars):
+            row = live_harmonic["bars"][bar] if bar < len(live_harmonic["bars"]) else {}
+            if not isinstance(row, dict):
+                row = {}
+            root_pc = row.get("key_pc")
+            row_scale = row.get("scale") or last_scale
+            conf = max(float(row.get("key_confidence") or 0.0), float(row.get("scale_confidence") or 0.0))
+            if root_pc is None:
+                root_pc, row_scale, inferred_conf = infer_key_scale_from_chroma(row.get("chroma") or live_harmonic.get("chroma") or [0.0] * 12)
+                conf = max(conf, inferred_conf)
+            root = int(root_pc) % 12
+            last_root = root
+            last_scale = str(row_scale or last_scale)
+            stable, passing, avoid = harmonic_targets_for_key(root, last_scale)
+            out.append(
+                HarmonyPlanBar(
+                    bar_index=bar,
+                    root_pc=root,
+                    target_pcs=[int(x) for x in stable],
+                    passing_pcs=[int(x) for x in passing],
+                    avoid_pcs=[int(x) for x in avoid],
+                    confidence=max(0.25, min(1.0, conf)),
+                    source="logic_au_harmonic_listener",
+                )
+            )
+        if out:
+            return HarmonyPlan(
+                key_center=key,
+                scale=scale,
+                source="logic_au_harmonic_listener",
+                bars=out,
+            )
     context = build_session_context(session)
     if context is not None and context.harmonic_target_pcs_per_bar:
         out: list[HarmonyPlanBar] = []

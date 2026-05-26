@@ -1,0 +1,60 @@
+{
+  "id": "pino",
+  "name": "Pino Palladino",
+  "lane": "bass",
+  "family": "neo_soul_rare_groove",
+  "profile": {
+    "base_style": "melodic",
+    "density_ceiling": 3,
+    "groove_repetition_strength": 0.88,
+    "octave_jump_bias": 0.12,
+    "root_anchor_strength": 0.94,
+    "syncopation_bias": 0.34,
+    "fill_activity": 0.1,
+    "rest_preference": 0.5,
+    "register_min": 34,
+    "register_max": 55,
+    "articulation_length_bias": 1.24,
+    "offbeat_bias": 0.32,
+    "ghost_note_bias": 0.05,
+    "contour_preference": 0.84
+  },
+  "neo_soul_vocabulary": {
+    "core_feel": ["neo_soul", "rare_groove", "deep_pocket"],
+    "reference_context": ["dangelo", "erykah_badu"],
+    "foundation_targets": ["root", "third", "fifth", "seventh"],
+    "passing_devices": ["diatonic_passing_note", "chromatic_lower_neighbor", "late_eighth_pickup"],
+    "role": "minimal_melodic_support",
+    "avoid": ["jaco_like_density", "jamerson_like_countermelody_busyness", "slap_octave_pops"]
+  },
+  "fretless_phrasing": {
+    "tone": "warm_singing_sustain",
+    "glide_bias": 0.38,
+    "vibrato_bias": 0.3,
+    "preferred_contours": ["long_root_to_guide_tone", "small_stepwise_answer", "held_cadence_note"],
+    "melodic_fill_placement": ["late_bar", "after_space", "barline_pickup"]
+  },
+  "rhythmic_language": {
+    "subdivision_mix": ["whole_notes", "half_notes", "eighth_note_pickups"],
+    "syncopation_strength": 0.38,
+    "placement": "laid_back",
+    "behind_beat_ms_at_96bpm": 18,
+    "space_as_tool": true,
+    "ghost_note_density": "low"
+  },
+  "groove_rules": {
+    "lock_to_kick": true,
+    "max_notes_per_bar": 3,
+    "root_on_bar_start_probability": 0.94,
+    "long_sustain_probability": 0.74,
+    "passing_note_probability": 0.28,
+    "rest_after_statement_probability": 0.52
+  },
+  "harmonic_language": {
+    "target_priority": ["root", "third", "seventh", "fifth"],
+    "voice_leading": ["chord_tone_targeting", "passing_note_elegance", "small_interval_motion"],
+    "upper_register_bias": "restrained",
+    "less_busy_than": "jaco_pastorius",
+    "more_harmonic_than": "james_jamerson"
+  }
+}

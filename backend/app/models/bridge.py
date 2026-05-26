@@ -104,6 +104,70 @@ class BridgeSourceFeatureFrame(BaseModel):
         return _clamp01(v)
 
 
+class BridgeHarmonicFrame(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    plugin_instance_id: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=128)
+    source_id: str = Field(default="session-player-listener", min_length=1, max_length=128)
+    sample_rate: float | None = Field(default=None, ge=4000.0, le=384000.0)
+    host_tempo: float | None = Field(default=None, ge=20.0, le=400.0)
+    tempo_bpm: float | None = Field(default=None, ge=20.0, le=400.0)
+    tempo_confidence: float = 0.0
+    playing: bool = False
+    ppq_position: float | None = None
+    bar_index: int = Field(default=0, ge=0)
+    beat_index: int | None = Field(default=None, ge=0)
+    bar_position: float | None = None
+    frame_start_seconds: float | None = Field(default=None, ge=0.0)
+    duration_seconds: float = Field(gt=0.0)
+    chroma: list[float] = Field(min_length=12, max_length=12)
+    key_pc: int | None = Field(default=None, ge=0, le=11)
+    key: str | None = Field(default=None, max_length=8)
+    scale: str | None = Field(default=None, max_length=32)
+    key_confidence: float = 0.0
+    scale_confidence: float = 0.0
+    cadence: str | None = Field(default=None, max_length=64)
+    cadence_confidence: float = 0.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_live_harmonic_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        if "host_tempo" not in out and "tempo" in out:
+            out["host_tempo"] = out["tempo"]
+        if "tempo_bpm" not in out and "tempo" in out:
+            out["tempo_bpm"] = out["tempo"]
+        if "ppq_position" not in out and "bar_position" in out:
+            try:
+                bar_pos = float(out["bar_position"])
+                bar_index = int(out.get("bar_index", 0) or 0)
+            except (TypeError, ValueError):
+                bar_pos = 0.0
+                bar_index = 0
+            out["ppq_position"] = (bar_index * 4.0) + (bar_pos * 4.0) if 0.0 <= bar_pos <= 1.0 else bar_pos
+        return out
+
+    @field_validator("chroma", mode="before")
+    @classmethod
+    def _normalize_chroma(cls, v: Any) -> list[float]:
+        vals = list(v or [])
+        if len(vals) != 12:
+            raise ValueError("chroma must contain 12 pitch-class values")
+        cleaned = [_clamp01(x) for x in vals]
+        total = sum(cleaned)
+        if total <= 1e-9:
+            return [0.0] * 12
+        return [round(float(x / total), 6) for x in cleaned]
+
+    @field_validator("tempo_confidence", "key_confidence", "scale_confidence", "cadence_confidence", mode="before")
+    @classmethod
+    def _clamp_confidence(cls, v: Any) -> float:
+        return _clamp01(v)
+
+
 class BridgeStateResponse(BaseModel):
     connected: bool
     plugin_instance_id: str | None = None
@@ -111,4 +175,5 @@ class BridgeStateResponse(BaseModel):
     source_id: str | None = None
     last_seen_at: str | None = None
     frame_count: int = 0
+    harmonic_frame_count: int = 0
     last_transport: dict[str, Any] | None = None

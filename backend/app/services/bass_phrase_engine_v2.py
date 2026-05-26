@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import random
+from typing import Any
 
 import pretty_midi
 
@@ -125,12 +126,91 @@ def _phrase_slots(role: str, kick_slots: list[int]) -> list[int]:
     return out[:max_hits]
 
 
+def _profile_float(profile: dict[str, Any], key: str, fallback: float) -> float:
+    raw = profile.get(key)
+    if isinstance(raw, int | float):
+        return float(raw)
+    return fallback
+
+
+def _profile_int(profile: dict[str, Any], key: str, fallback: int) -> int:
+    raw = profile.get(key)
+    if isinstance(raw, int):
+        return int(raw)
+    return fallback
+
+
+def _pino_phrase_slots(
+    role: str,
+    kick_slots: list[int],
+    *,
+    rng: random.Random | object,
+    profile: dict[str, Any],
+) -> list[int]:
+    if role == "push":
+        base = [0, 7, 12]
+    elif role == "answer":
+        base = [0, 10]
+    elif role == "release":
+        base = [0, 12] if rng.random() > _profile_float(profile, "rest_preference", 0.5) else [0]
+    else:
+        base = [0, 8]
+    for slot in kick_slots:
+        if slot != 0 and slot % 4 != 0 and rng.random() < _profile_float(profile, "offbeat_bias", 0.32):
+            base.append(slot)
+    out = sorted(set(x for x in base if 0 <= x <= 15))
+    if 0 not in out:
+        out.insert(0, 0)
+    return out[: max(1, _profile_int(profile, "density_ceiling", 3))]
+
+
+def _pick_pino_pitch(
+    slot: int,
+    role: str,
+    *,
+    root_pc: int,
+    stable_pcs: list[int],
+    passing_pcs: list[int],
+    avoid_pcs: list[int],
+    previous_pitch: int | None,
+    profile: dict[str, Any],
+    rng: random.Random | object,
+) -> int:
+    lo = _profile_int(profile, "register_min", 34)
+    hi = _profile_int(profile, "register_max", 55)
+    root_pitch = _pc_to_bass_register(root_pc, octave=2, lo=lo, hi=hi)
+    if slot == 0 or role == "anchor":
+        return root_pitch
+
+    clean_stable = [pc for pc in stable_pcs if pc not in set(avoid_pcs)]
+    if passing_pcs and slot % 4 != 0 and rng.random() < 0.28:
+        target_pc = rng.choice(passing_pcs)
+    else:
+        target_pool = clean_stable or [root_pc]
+        thirds_or_sevenths = [pc for pc in target_pool if (pc - root_pc) % 12 in (3, 4, 10, 11)]
+        if thirds_or_sevenths and rng.random() < 0.62:
+            target_pc = rng.choice(thirds_or_sevenths)
+        else:
+            target_pc = rng.choice(target_pool)
+
+    center = previous_pitch if previous_pitch is not None else root_pitch
+    pitch = _pc_to_bass_register(target_pc, octave=2, lo=lo, hi=hi)
+    while abs(pitch - center) > 6 and pitch - 12 >= lo:
+        pitch -= 12
+    while abs(pitch - center) > 6 and pitch + 12 <= hi:
+        pitch += 12
+    if pitch % 12 in set(avoid_pcs):
+        return root_pitch
+    return pitch
+
+
 def _harmonic_bar_plan(
     bar: int,
     *,
     key: str,
     scale: str,
     context: SessionAnchorContext | None,
+    conditioning: UnifiedConditioning | None = None,
 ) -> tuple[int, list[int], list[int], list[int], float]:
     if context is not None and bar < len(context.harmonic_target_pcs_per_bar):
         root = int(context.harmonic_root_pc_per_bar[bar])
@@ -139,6 +219,15 @@ def _harmonic_bar_plan(
         avoid = [int(x) for x in context.harmonic_avoid_pcs_per_bar[bar]]
         conf = float(context.harmonic_confidence_per_bar[bar]) if bar < len(context.harmonic_confidence_per_bar) else 0.2
         return root, stable, passing, avoid, conf
+    harm = conditioning.harmonic_bar(bar) if conditioning is not None else None
+    if harm is not None:
+        return (
+            int(harm.root_pc),
+            [int(x) for x in harm.target_pcs],
+            [int(x) for x in harm.passing_pcs],
+            [int(x) for x in harm.avoid_pcs],
+            float(harm.confidence),
+        )
 
     key_pc = mt.key_root_pc(key)
     intervals = mt.scale_intervals(scale)
@@ -208,10 +297,13 @@ def generate_bass_phrase_v2(
     bar_anchor = float(context.bar_start_anchor_sec) if context is not None else 0.0
     role_span = 4 if bar_count >= 4 else 2
     perf_notes: list[BassPerformanceNote] = []
+    player_persona = BASS_STYLE_ADAPTER.bass_persona(player) if player is not None else None
+    player_profile_raw = player_persona.get("profile") if player_persona is not None else None
+    player_profile: dict[str, Any] = dict(player_profile_raw) if isinstance(player_profile_raw, dict) else {}
 
     if player == "paul_chambers":
         harmonic = [
-            _harmonic_bar_plan(bar, key=key, scale=scale, context=context)
+            _harmonic_bar_plan(bar, key=key, scale=scale, context=context, conditioning=conditioning)
             for bar in range(max(1, bar_count))
         ]
         for bar, (root_pc, stable_pcs, _passing_pcs, _avoid_pcs, _conf) in enumerate(harmonic):
@@ -264,7 +356,117 @@ def generate_bass_phrase_v2(
         preview = (
             f"Bass [phrase_v2, {bi}, {style}, paul_chambers]: "
             f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, {bar_count} bar(s), {tempo} BPM — "
-            "quarter-note walking, strong-beat chord targets, and chromatic beat-4 approaches."
+            "quarter-note walking, strong-beat chord targets, and chromatic beat-4 approaches"
+            + (", constrained by live harmonic context." if conditioning is not None and conditioning.harmonic_bars else ".")
+        )
+        if return_performance_notes:
+            perf_notes = list(
+                infer_bass_articulations(
+                    tuple(perf_notes),
+                    tempo=tempo,
+                    style=style,
+                    source="phrase_v2",
+                )
+            )
+            return buf.getvalue(), preview, tuple(perf_notes)
+        return buf.getvalue(), preview
+
+    if player == "pino":
+        previous_pitch: int | None = None
+        for bar in range(max(1, bar_count)):
+            role = _bar_role(bar, role_span)
+            kick_slots = _kick_guided_slots(context, bar) if context is not None and context.anchor_lane == "drums" else []
+            live_slots = _source_guided_slots(conditioning, bar)
+            if live_slots and not kick_slots:
+                kick_slots = live_slots
+            elif live_slots:
+                kick_slots = sorted(set(kick_slots).union(live_slots[:2]))
+            slots = _pino_phrase_slots(role, kick_slots, rng=rng, profile=player_profile)
+            root_pc, stable_pcs, passing_pcs, avoid_pcs, _conf = _harmonic_bar_plan(
+                bar,
+                key=key,
+                scale=scale,
+                context=context,
+                conditioning=conditioning,
+            )
+            bar_t0 = bar_anchor + bar * 4.0 * spb
+            bar_t1 = bar_anchor + (bar + 1) * 4.0 * spb
+
+            for slot_index, slot in enumerate(slots):
+                live_pressure = source_slot_pressure(conditioning, bar, slot) if has_source_groove(conditioning) else 0.0
+                live_kick = source_kick_weight(conditioning, bar, slot) if has_source_groove(conditioning) else 0.0
+                if live_pressure > 0.72 and live_kick < 0.18 and slot % 4 != 0:
+                    continue
+                pitch = _pick_pino_pitch(
+                    slot,
+                    role,
+                    root_pc=root_pc,
+                    stable_pcs=stable_pcs,
+                    passing_pcs=passing_pcs,
+                    avoid_pcs=avoid_pcs,
+                    previous_pitch=previous_pitch,
+                    profile=player_profile,
+                    rng=rng,
+                )
+                behind = spb * 0.028
+                if live_kick > 0.0:
+                    behind += sixteenth * 0.025 * min(1.0, live_kick)
+                start = bar_t0 + slot * sixteenth + behind + rng.uniform(-0.002, 0.006) * spb
+                if slot == 0 and len(slots) == 1:
+                    dur = spb * 2.75
+                elif slot % 8 == 0:
+                    dur = spb * 1.72
+                elif slot % 4 == 0:
+                    dur = spb * 1.18
+                else:
+                    dur = spb * 0.78
+                dur *= _profile_float(player_profile, "articulation_length_bias", 1.24)
+                next_slot = slots[slot_index + 1] if slot_index + 1 < len(slots) else None
+                next_slot_start = bar_t0 + next_slot * sixteenth if next_slot is not None else bar_t1
+                end = min(bar_t1 - 1e-4, next_slot_start - 1e-4, start + dur)
+                if end <= start:
+                    continue
+                vel_base = 84 if slot == 0 else 72
+                if role == "push":
+                    vel_base += 3
+                elif role == "release":
+                    vel_base -= 4
+                if live_kick > 0.0:
+                    vel_base += int(round(5.0 * min(1.0, live_kick)))
+                final_vel = max(54, min(100, vel_base + rng.randint(-4, 4)))
+                inst.notes.append(
+                    pretty_midi.Note(
+                        velocity=final_vel,
+                        pitch=pitch,
+                        start=start,
+                        end=end,
+                    )
+                )
+                previous_pitch = pitch
+                if return_performance_notes:
+                    perf_notes.append(
+                        BassPerformanceNote(
+                            pitch=int(pitch),
+                            velocity=int(final_vel),
+                            start=float(start),
+                            end=float(end),
+                            articulation="normal",
+                            role=str(role),
+                            bar_index=int(bar),
+                            slot_index=int(slot),
+                            source="phrase_v2",
+                            confidence=None,
+                        )
+                    )
+
+        pm.instruments.append(inst)
+        buf = io.BytesIO()
+        pm.write(buf)
+        preview = (
+            f"Bass [phrase_v2, {bi}, {style}, pino]: "
+            f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, {bar_count} bar(s), {tempo} BPM — "
+            "laid-back neo-soul pocket, warm sustained chord-tone targets, and rare-groove space"
+            + (", conditioned by live source groove." if has_source_groove(conditioning) else ".")
         )
         if return_performance_notes:
             perf_notes = list(
@@ -287,7 +489,13 @@ def generate_bass_phrase_v2(
         elif live_slots:
             kick_slots = sorted(set(kick_slots).union(live_slots[:2]))
         slots = _phrase_slots(role, kick_slots)
-        root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = _harmonic_bar_plan(bar, key=key, scale=scale, context=context)
+        root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = _harmonic_bar_plan(
+            bar,
+            key=key,
+            scale=scale,
+            context=context,
+            conditioning=conditioning,
+        )
         bar_t0 = bar_anchor + bar * 4.0 * spb
         bar_t1 = bar_anchor + (bar + 1) * 4.0 * spb
 

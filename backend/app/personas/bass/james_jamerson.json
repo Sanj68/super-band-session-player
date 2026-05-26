@@ -1,0 +1,56 @@
+{
+  "id": "james_jamerson",
+  "name": "James Jamerson",
+  "lane": "bass",
+  "family": "motown_soul_rnb",
+  "profile": {
+    "base_style": "rhythmic",
+    "density_ceiling": 5,
+    "groove_repetition_strength": 0.66,
+    "octave_jump_bias": 0.22,
+    "root_anchor_strength": 0.86,
+    "syncopation_bias": 0.82,
+    "fill_activity": 0.68,
+    "rest_preference": 0.08,
+    "register_min": 31,
+    "register_max": 60,
+    "articulation_length_bias": 0.84,
+    "offbeat_bias": 0.74,
+    "ghost_note_bias": 0.18,
+    "contour_preference": 0.9
+  },
+  "motown_foundation": {
+    "core_feel": ["soul", "rnb", "motown"],
+    "foundation_targets": ["root", "fifth"],
+    "melodic_detours": ["third", "sixth", "octave", "chromatic_neighbor"],
+    "role": "busy_but_locked_counter_melody",
+    "avoid": ["static_root_pedal", "obvious_downbeat_only_resolutions", "slap_octave_pops"]
+  },
+  "rhythmic_language": {
+    "subdivision_mix": ["eighth_notes", "syncopated_16th_note_runs", "triplet_feel"],
+    "syncopation_strength": 0.86,
+    "ghost_note_density": "medium",
+    "placement": "deep_pocket",
+    "accent_devices": ["anticipated_downbeats", "late_bar_pickups", "inner_16th_pushes"]
+  },
+  "melodic_language": {
+    "approach": "counter_melody",
+    "targeting": "rarely_lands_on_obvious_note",
+    "voice_leading": ["inner_voice_movement", "stepwise_resolution", "chromatic_passing_tones"],
+    "line_shapes": ["root_fifth_answer", "syncopated_scale_fragment", "chromatic_turnaround_run"],
+    "passing_tone_bias": 0.78
+  },
+  "chromatic_passing_tones": {
+    "max_consecutive": 3,
+    "prefer_stepwise_motion": true,
+    "resolve_to": ["root", "fifth", "third"],
+    "placement": ["last_16th_before_beat", "between_root_and_fifth", "barline_pickup"]
+  },
+  "groove_rules": {
+    "lock_to_kick": true,
+    "root_on_bar_start_probability": 0.74,
+    "fifth_answer_probability": 0.72,
+    "unexpected_melodic_detour_probability": 0.64,
+    "triplet_pickup_probability": 0.28
+  }
+}
