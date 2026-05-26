@@ -250,6 +250,22 @@ export async function getMidiAuditionState() {
   return res.json();
 }
 
+export async function getMidiTarget() {
+  const res = await fetch(`${API_BASE}/api/midi/target`);
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function setMidiTarget(outputId) {
+  const res = await fetch(`${API_BASE}/api/midi/target`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ output_id: outputId ?? "" }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
 /** @returns {{ setups: Array<Record<string, unknown>> }} */
 export async function listSetups() {
   const res = await fetch(`${API_BASE}/api/setups`);

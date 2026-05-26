@@ -11,9 +11,11 @@ import {
   generateAroundAnchor,
   generateSession,
   getEvaluationSummary,
+  getMidiTarget,
   getSession,
   getSavedSetupAsSessionPatch,
   getClipEvaluation,
+  listMidiOutputs,
   listSetups,
   midiLaneUrl,
   patchLaneLocks,
@@ -22,6 +24,7 @@ import {
   regenerateSelectedLanes,
   regenerateUnlockedLanes,
   setClipReferenceNotes,
+  setMidiTarget,
 } from "./api/client.js";
 import LaneCard from "./components/LaneCard.jsx";
 import BassCandidatePanel from "./components/BassCandidatePanel.jsx";
@@ -151,6 +154,10 @@ export default function App() {
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
   const [setups, setSetups] = useState([]);
+  const [midiOutputs, setMidiOutputs] = useState([]);
+  const [midiTarget, setMidiTargetState] = useState("");
+  const [midiAutoDefault, setMidiAutoDefault] = useState("");
+  const [midiHint, setMidiHint] = useState(null);
   const [saveSetupName, setSaveSetupName] = useState("");
   const [selectedRegenLanes, setSelectedRegenLanes] = useState({
     drums: false,
@@ -190,6 +197,41 @@ export default function App() {
   useEffect(() => {
     refreshSetups();
   }, [refreshSetups]);
+
+  const refreshMidi = useCallback(async () => {
+    try {
+      const [outputs, target] = await Promise.all([listMidiOutputs(), getMidiTarget()]);
+      setMidiOutputs(Array.isArray(outputs.outputs) ? outputs.outputs : []);
+      setMidiAutoDefault(outputs.default ?? "");
+      setMidiHint(outputs.hint ?? null);
+      setMidiTargetState(target.output_id ?? "");
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMidi();
+  }, [refreshMidi]);
+
+  const onChangeMidiTarget = useCallback(
+    async (outputId) => {
+      try {
+        setMidiTargetState(outputId);
+        const res = await setMidiTarget(outputId);
+        setMidiTargetState(res.output_id ?? "");
+        setStatus(
+          res.output_id
+            ? `MIDI output set to ${res.output_id}.`
+            : "MIDI output reset to auto-detect."
+        );
+      } catch (e) {
+        setError(e.message || String(e));
+        refreshMidi();
+      }
+    },
+    [refreshMidi]
+  );
 
   useEffect(() => {
     setSelectedRegenLanes({ drums: false, bass: false, chords: false, lead: false });
@@ -2325,6 +2367,44 @@ export default function App() {
                 onSubmit: onAddPartToSuitLead,
               }}
             />
+          </div>
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              flexWrap: "wrap",
+              alignItems: "center",
+              marginTop: 8,
+              padding: "8px 10px",
+              border: "1px solid #2a2a2a",
+              borderRadius: 6,
+            }}
+          >
+            <label style={{ fontSize: 12, color: "#bbb" }}>
+              MIDI output:&nbsp;
+              <select
+                value={midiTarget}
+                onChange={(e) => onChangeMidiTarget(e.target.value)}
+                disabled={busy}
+                style={{ minWidth: 220 }}
+              >
+                <option value="">
+                  Auto-detect
+                  {midiAutoDefault ? ` — ${midiAutoDefault}` : ""}
+                </option>
+                {midiOutputs.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={refreshMidi} disabled={busy} title="Re-scan MIDI ports">
+              Refresh
+            </button>
+            {midiHint && (
+              <span style={{ fontSize: 11, color: "#888" }}>{midiHint}</span>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button type="button" onClick={onExportSessionMidi} disabled={busy || !allGenerated}>
