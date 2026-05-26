@@ -35,9 +35,10 @@ def test_fake_backend_returns_fake_ports() -> None:
     }
 
 
-def test_trillian_output_is_preferred_default_when_present(monkeypatch) -> None:
+def test_iac_bus_is_preferred_over_trillian_alias_when_no_env_set(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("SESSION_PLAYER_MIDI_DEFAULT_OUTPUT", raising=False)
     monkeypatch.delenv("SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT", raising=False)
+    monkeypatch.setenv("SESSION_PLAYER_MIDI_TARGET_PATH", str(tmp_path / "target.json"))
     midi_routes.set_midi_output_backend(
         FakeMidiBackend(
             (
@@ -51,7 +52,52 @@ def test_trillian_output_is_preferred_default_when_present(monkeypatch) -> None:
     res = client.get("/api/midi/outputs")
 
     assert res.status_code == 200
+    assert res.json()["default"] == "iac-bus-1"
+
+
+def test_trillian_alias_still_falls_back_when_no_iac_present(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("SESSION_PLAYER_MIDI_DEFAULT_OUTPUT", raising=False)
+    monkeypatch.delenv("SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT", raising=False)
+    monkeypatch.setenv("SESSION_PLAYER_MIDI_TARGET_PATH", str(tmp_path / "target.json"))
+    midi_routes.set_midi_output_backend(
+        FakeMidiBackend(
+            (
+                MidiOutputInfo(id="trillian-bass", name="Trillian Bass"),
+                MidiOutputInfo(id="external", name="External MIDI"),
+            )
+        )
+    )
+    client = TestClient(app)
+
+    res = client.get("/api/midi/outputs")
+
+    assert res.status_code == 200
     assert res.json()["default"] == "trillian-bass"
+
+
+def test_persisted_target_overrides_iac_auto_detect(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("SESSION_PLAYER_MIDI_DEFAULT_OUTPUT", raising=False)
+    monkeypatch.delenv("SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT", raising=False)
+    monkeypatch.setenv("SESSION_PLAYER_MIDI_TARGET_PATH", str(tmp_path / "target.json"))
+    midi_routes.set_midi_output_backend(
+        FakeMidiBackend(
+            (
+                MidiOutputInfo(id="iac-bus-1", name="IAC Driver Bus 1"),
+                MidiOutputInfo(id="external", name="External MIDI"),
+            )
+        )
+    )
+    client = TestClient(app)
+
+    set_res = client.post("/api/midi/target", json={"output_id": "external"})
+    assert set_res.status_code == 200
+    assert set_res.json()["output_id"] == "external"
+
+    get_res = client.get("/api/midi/target")
+    assert get_res.json()["output_id"] == "external"
+
+    outputs_res = client.get("/api/midi/outputs")
+    assert outputs_res.json()["default"] == "external"
 
 
 def test_configured_default_output_wins_over_trillian(monkeypatch) -> None:

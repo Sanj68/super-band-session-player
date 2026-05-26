@@ -9,9 +9,11 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 from io import BytesIO
+import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Protocol
 
 
@@ -26,6 +28,16 @@ _NO_OUTPUTS_HINT = (
 _DEFAULT_OUTPUT_ENV = "SESSION_PLAYER_MIDI_DEFAULT_OUTPUT"
 _TRILLIAN_OUTPUT_ENV = "SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT"
 _TRILLIAN_OUTPUT_ALIASES = ("trillian", "spectrasonics trillian")
+_IAC_BUS_HINTS = ("iac", "iac driver", "session player")
+
+_TARGET_STORE_ENV = "SESSION_PLAYER_MIDI_TARGET_PATH"
+
+
+def _target_store_path() -> Path:
+    override = os.environ.get(_TARGET_STORE_ENV, "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[2] / "data" / "midi_target.json"
 
 
 @dataclass(frozen=True)
@@ -361,11 +373,57 @@ def _find_output_by_text(outputs: tuple[MidiOutput, ...], text: str) -> MidiOutp
     return None
 
 
+def _persisted_target_id() -> str:
+    try:
+        raw = _target_store_path().read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    value = data.get("output_id") if isinstance(data, dict) else None
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def set_persisted_target_id(output_id: str) -> str:
+    cleaned = (output_id or "").strip()
+    path = _target_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"output_id": cleaned}), encoding="utf-8")
+    return cleaned
+
+
+def get_persisted_target_id() -> str:
+    return _persisted_target_id()
+
+
+def _first_iac_bus(outputs: tuple[MidiOutput, ...]) -> MidiOutput | None:
+    for output in outputs:
+        haystack = (output.name + " " + output.id).lower()
+        if any(hint in haystack for hint in _IAC_BUS_HINTS):
+            return output
+    return None
+
+
 def _preferred_output_id(outputs: tuple[MidiOutput, ...]) -> str | None:
-    for configured in (_configured_default_output(), _configured_trillian_output(), "trillian"):
+    persisted = _persisted_target_id()
+    if persisted:
+        found = _find_output_by_text(outputs, persisted)
+        if found is not None:
+            return found.id
+    for configured in (_configured_default_output(), _configured_trillian_output()):
         found = _find_output_by_text(outputs, configured)
         if found is not None:
             return found.id
+    # If no explicit preference set, prefer an IAC bus (Logic-friendly) before
+    # falling back to the historical Trilian alias.
+    iac = _first_iac_bus(outputs)
+    if iac is not None:
+        return iac.id
+    found = _find_output_by_text(outputs, "trillian")
+    if found is not None:
+        return found.id
     return None
 
 

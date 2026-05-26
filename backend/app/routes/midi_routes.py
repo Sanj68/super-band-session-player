@@ -5,7 +5,14 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.services.midi_audition import AuditionPlayer, EmptyMidiBackend, MidiOutputBackend, RtMidiBackend
+from app.services.midi_audition import (
+    AuditionPlayer,
+    EmptyMidiBackend,
+    MidiOutputBackend,
+    RtMidiBackend,
+    get_persisted_target_id,
+    set_persisted_target_id,
+)
 
 router = APIRouter()
 
@@ -70,3 +77,22 @@ def stop_midi_audition() -> MidiStopResponse:
 @router.get("/audition/state", response_model=MidiAuditionStateResponse)
 def get_midi_audition_state() -> MidiAuditionStateResponse:
     return MidiAuditionStateResponse(**_PLAYER.state().to_dict())
+
+
+class MidiTargetResponse(BaseModel):
+    output_id: str
+
+
+class MidiTargetRequest(BaseModel):
+    output_id: str
+
+
+@router.get("/target", response_model=MidiTargetResponse)
+def get_midi_target() -> MidiTargetResponse:
+    return MidiTargetResponse(output_id=get_persisted_target_id())
+
+
+@router.post("/target", response_model=MidiTargetResponse)
+def set_midi_target(payload: MidiTargetRequest) -> MidiTargetResponse:
+    stored = set_persisted_target_id(payload.output_id)
+    return MidiTargetResponse(output_id=stored)
