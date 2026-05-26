@@ -1,0 +1,40 @@
+
+=== 2026-05-05T12:46:07+00:00 OP v2 starting frontend: cd frontend && npm run dev -- --host 127.0.0.1 ===
+
+> super-band-session-player@0.1.0 dev
+> vite --host 127.0.0.1
+
+
+  VITE v5.4.21  ready in 185 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+
+=== 2026-05-15T15:36:09+00:00 OP v2 starting frontend: cd frontend && npm run dev -- --host 127.0.0.1 ===
+
+> super-band-session-player@0.1.0 dev
+> vite --host 127.0.0.1
+
+
+  VITE v5.4.21  ready in 132 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+
+=== 2026-05-19T14:14:13+00:00 OP v2 starting frontend: cd frontend && npm run dev -- --host 127.0.0.1 ===
+
+> super-band-session-player@0.1.0 dev
+> vite --host 127.0.0.1
+
+
+  VITE v5.4.21  ready in 138 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+
+=== 2026-05-19T14:14:30+00:00 OP v2 starting frontend: cd frontend && npm run dev -- --host 127.0.0.1 ===
+
+> super-band-session-player@0.1.0 dev
+> vite --host 127.0.0.1
+
+
+  VITE v5.4.21  ready in 119 ms
+
+  ➜  Local:   http://127.0.0.1:5173/

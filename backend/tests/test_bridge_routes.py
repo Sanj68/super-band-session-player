@@ -47,6 +47,23 @@ def _create_session(client: TestClient) -> str:
     return res.json()["session"]["id"]
 
 
+def _create_phrase_session(client: TestClient) -> str:
+    res = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 120,
+            "key": "C",
+            "scale": "major",
+            "bar_count": 2,
+            "bass_style": "supportive",
+            "bass_engine": "phrase_v2",
+            "bass_instrument": "finger_bass",
+        },
+    )
+    assert res.status_code == 200, res.text
+    return res.json()["session"]["id"]
+
+
 def test_bridge_routes_disabled_by_default_returns_404() -> None:
     assert os.environ.get(bridge_routes._FEATURE_FLAG_ENV) is None
     client = TestClient(app)
@@ -132,6 +149,49 @@ def test_source_frame_ingestion_increments_frame_count(monkeypatch: pytest.Monke
     assert s["connected"] is True
     assert s["frame_count"] == 8
     assert s["source_id"] == "drum-bus"
+
+
+def test_live_source_frames_update_phrase_v2_bass_conditioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    client = TestClient(app)
+    sid = _create_phrase_session(client)
+
+    frames = []
+    for bar in range(2):
+        for i in range(8):
+            frames.append(
+                {
+                    "plugin_instance_id": "plug-1",
+                    "session_id": sid,
+                    "source_id": "logic-live",
+                    "sample_rate": 48000.0,
+                    "tempo": 120.0,
+                    "playing": True,
+                    "bar_position": bar * 4.0 + i * 0.5,
+                    "bar_index": bar,
+                    "duration_seconds": 0.125,
+                    "RMS": 0.55,
+                    "band_energy": {"low": 0.95 if i in (0, 3, 5) else 0.2, "mid": 0.35, "high": 0.25},
+                    "onset_strength": 0.85 if i in (0, 3, 5) else 0.15,
+                }
+            )
+
+    bridge_res = client.post(f"/api/bridge/sessions/{sid}/source-frames", json=frames)
+    assert bridge_res.status_code == 200, bridge_res.text
+    assert bridge_res.json()["accepted"] == 16
+    assert bridge_res.json()["live_source_groove_bar_count"] == 2
+
+    stored = session_routes._SESSIONS[sid]  # type: ignore[attr-defined]
+    assert stored.source_analysis_override is not None
+    assert stored.source_analysis_override.source_lane == "none"
+    assert stored.source_analysis_override.source_metadata["last_groove_source_tag"] == "logic_au_bridge"
+
+    gen_res = client.post(f"/api/sessions/{sid}/regenerate-selected", json={"lanes": ["bass"]})
+    assert gen_res.status_code == 200, gen_res.text
+    bass_preview = gen_res.json()["lanes"]["bass"]["preview"]
+    assert "live source-groove conditioning" in bass_preview
 
 
 def test_commit_source_groove_updates_session_override_and_visible_to_conditioning(

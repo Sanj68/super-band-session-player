@@ -74,6 +74,22 @@ def _require_quality(chord_quality: str) -> ChordQuality:
     return chord_quality  # type: ignore[return-value]
 
 
+def normalize_chord_quality(chord_quality: str) -> ChordQuality:
+    """Map Session Player harmony labels into the Chambers vocabulary labels."""
+    q = str(chord_quality).strip().lower().replace("_", "-")
+    if q in ("major", "major7", "maj", "maj7"):
+        return "maj7"
+    if q in ("minor", "minor7", "min", "min7"):
+        return "min7"
+    if q in ("dominant", "dominant7", "dom", "dom7", "7"):
+        return "dom7"
+    if q in ("diminished", "dim"):
+        return "dim"
+    if q in ("half-diminished", "half-dim", "m7b5"):
+        return "half-dim"
+    return "dom7"
+
+
 def get_chromatic_approaches(root_midi: int, target_midi: int) -> list[int]:
     """Return 1–2 chromatic passing tones between two MIDI pitches.
 
@@ -212,4 +228,5 @@ __all__ = [
     "get_arco_phrase",
     "get_chromatic_approaches",
     "get_walking_cell",
+    "normalize_chord_quality",
 ]

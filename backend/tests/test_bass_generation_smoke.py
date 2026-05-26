@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import random
+from pathlib import Path
 
 import pretty_midi
 
-from app.models.session import GrooveProfile
+from app.models.session import BassPlayer, GrooveProfile
 from app.services.bass_generator import generate_bass
 from app.services.conditioning import UnifiedConditioning
 
@@ -211,3 +213,59 @@ def test_reference_guidance_does_not_change_phrase_v2() -> None:
 
     assert with_ref == no_ref
     assert with_ref_preview == no_ref_preview
+
+
+def test_paul_chambers_persona_json_contains_walking_rules() -> None:
+    path = Path(__file__).resolve().parents[1] / "app" / "personas" / "bass" / "paul_chambers.json"
+    persona = json.loads(path.read_text(encoding="utf-8"))
+
+    assert BassPlayer.paul_chambers.value == persona["id"]
+    assert persona["swing_feel"]["quarter_note_walk"] is True
+    assert persona["bebop_phrasing_rules"]["strong_beats"]["beats"] == [1, 3]
+    assert "chromatic_from_below" in persona["approach_notes"]["types"]
+
+
+def test_paul_chambers_baseline_walk_targets_quarters_and_chromatic_beat_four() -> None:
+    data, preview = generate_bass(
+        tempo=120,
+        bar_count=4,
+        key="C",
+        scale="major",
+        bass_style="melodic",
+        bass_player="paul_chambers",
+        chord_progression=["Am7", "D7", "Gmaj7", "Cmaj7"],
+        seed=1234,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    spb = 60.0 / 120.0
+    assert "paul_chambers" in preview
+    assert len(notes) == 16
+    first_bar_slots = [round(n.start / spb) for n in notes[:4]]
+    assert first_bar_slots == [0, 1, 2, 3]
+    assert notes[0].pitch % 12 == 9
+    assert notes[2].pitch % 12 in {4, 5}
+    assert notes[3].pitch % 12 in {1, 3}
+
+
+def test_paul_chambers_phrase_v2_walks_in_quarters() -> None:
+    data, preview = generate_bass(
+        tempo=120,
+        bar_count=4,
+        key="C",
+        scale="major",
+        bass_style="melodic",
+        bass_player="paul_chambers",
+        bass_engine="phrase_v2",
+        seed=1234,
+        context=None,
+    )
+
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    notes = sorted([n for inst in pm.instruments for n in inst.notes], key=lambda n: (n.start, n.pitch))
+    spb = 60.0 / 120.0
+    assert "quarter-note walking" in preview
+    assert len(notes) == 16
+    assert [round(n.start / spb) for n in notes[:4]] == [0, 1, 2, 3]

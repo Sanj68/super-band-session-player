@@ -86,6 +86,7 @@ const BASS_PLAYERS = [
   { value: "bootsy", label: "Bootsy-style pocket" },
   { value: "marcus", label: "Marcus-style fusion line" },
   { value: "pino", label: "Pino-style soul contour" },
+  { value: "paul_chambers", label: "Paul Chambers-style walking" },
 ];
 
 const CHORD_INSTRUMENTS = [

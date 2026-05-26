@@ -102,6 +102,10 @@ SUB_ONE_BASS_TEMPLATES: Final[tuple[BassVocabularyTemplate, ...]] = (
             "final_bar_turnaround": True,
             "bar8_turnaround_strength": "medium",
             "feel_reference": "dangelo_erykah_dwele_roots",
+            "groove_feel": "dilla_headnod",
+            "headnod_delay_ms": 7,
+            "pickup_push_ms": -2.5,
+            "max_offset_ms": 11,
         },
     ),
     BassVocabularyTemplate(

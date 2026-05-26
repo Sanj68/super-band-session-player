@@ -80,6 +80,25 @@ def test_audition_clean_bass_writes_midi_messages_to_fake_backend() -> None:
     assert backend.opened_outputs == ["IAC Driver Bus 1"]
 
 
+def test_audition_bass_routes_trillian_alias_to_configured_output(monkeypatch) -> None:
+    monkeypatch.setenv("SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT", "Trillian Bass")
+    backend = FakeMidiBackend(
+        (
+            MidiOutputInfo(id="iac-1", name="IAC Driver Bus 1"),
+            MidiOutputInfo(id="trillian-bass", name="Trillian Bass"),
+        )
+    )
+    midi_routes.set_midi_output_backend(backend)
+    session_id = _session(clean=_midi_bytes(pitch=48))
+
+    res = _client().post(f"/api/sessions/{session_id}/audition/bass", json={"output": "trillian", "mode": "clean"})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["output"] == "Trillian Bass"
+    _wait_for(lambda: "note_on" in _message_types(backend.sent_messages))
+    assert backend.opened_outputs == ["Trillian Bass"]
+
+
 def test_audition_performance_bass_uses_performance_bytes_when_available() -> None:
     backend = _backend()
     session_id = _session(clean=_midi_bytes(pitch=48), performance=_midi_bytes(pitch=65))

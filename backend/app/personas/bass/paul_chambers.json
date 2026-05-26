@@ -1,0 +1,65 @@
+{
+  "id": "paul_chambers",
+  "name": "Paul Chambers",
+  "lane": "bass",
+  "family": "hard_bop_walking",
+  "profile": {
+    "base_style": "melodic",
+    "density_ceiling": 4,
+    "groove_repetition_strength": 0.78,
+    "octave_jump_bias": 0.18,
+    "root_anchor_strength": 0.92,
+    "syncopation_bias": 0.18,
+    "fill_activity": 0.28,
+    "rest_preference": 0.04,
+    "register_min": 31,
+    "register_max": 57,
+    "articulation_length_bias": 0.92,
+    "offbeat_bias": 0.08,
+    "ghost_note_bias": 0.02,
+    "contour_preference": 0.76
+  },
+  "walking_line_vocabulary": {
+    "bar_cells": [
+      ["root", "third", "fifth", "seventh"],
+      ["root", "fifth", "seventh", "octave"],
+      ["root", "third", "fifth", "chromatic_upper_neighbor"],
+      ["root", "seventh", "fifth", "third"]
+    ],
+    "phrase_cycle_bars": 4,
+    "turnaround_bias": "beat_4_approaches_next_bar_root",
+    "allowed_leaps": ["ascending_fourth", "minor_seventh", "octave"],
+    "ballad_device": "arco_sustained_roots_and_guide_tones"
+  },
+  "bebop_phrasing_rules": {
+    "strong_beats": {
+      "beats": [1, 3],
+      "targets": ["root", "third", "fifth", "seventh"],
+      "root_on_beat_1_probability": 1.0
+    },
+    "weak_beats": {
+      "beats": [2, 4],
+      "targets": ["diatonic_passing_tone", "chromatic_approach", "guide_tone"],
+      "beat_4_function": "lead_to_next_downbeat"
+    },
+    "avoid": ["busy_16th_funk_syncopation", "slap_octave_pops", "long_root_only_pedal"]
+  },
+  "approach_notes": {
+    "types": ["chromatic_from_below", "chromatic_from_above", "enclosure"],
+    "target_priority": ["next_root", "third", "seventh"],
+    "placement": ["beat_4", "last_eighth_before_resolution"]
+  },
+  "chromatic_passing_tones": {
+    "max_consecutive": 2,
+    "prefer_stepwise_motion": true,
+    "resolve_immediately": true
+  },
+  "swing_feel": {
+    "quarter_note_walk": true,
+    "swing_ratio": 0.62,
+    "placement": "slightly_behind",
+    "behind_beat_ms_at_120bpm": 10,
+    "accent_beats": [1, 3],
+    "duration_beats": 0.86
+  }
+}

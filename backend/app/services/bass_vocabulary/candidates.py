@@ -159,10 +159,33 @@ def _timing_offset_seconds(
     delayed_entry: bool,
 ) -> float:
     is_dark_slinky = template.id == "dark_slinky_grit_01"
+    is_hiphop_soul = template.id == "hiphop_soul_restraint_01"
     if bar == 0 and slot == 0 and not delayed_entry:
         return 0.0
     if not is_dark_slinky:
-        return sixteenth * 0.035 * max(0.0, min(1.0, source_weight))
+        if not is_hiphop_soul:
+            return sixteenth * 0.035 * max(0.0, min(1.0, source_weight))
+        # Deterministic Dilla/Soulquarian head-nod pocket:
+        # grounded roots, slight behind feel on anchors, tighter/pushed pickups.
+        feel = str(template.rules.get("groove_feel", "") or "")
+        if feel != "dilla_headnod":
+            return sixteenth * 0.02 * max(0.0, min(1.0, source_weight))
+        max_off_s = max(0.0, min(0.012, float(template.rules.get("max_offset_ms", 11) or 11) / 1000.0))
+        headnod_s = max(0.0, min(max_off_s, float(template.rules.get("headnod_delay_ms", 7) or 7) / 1000.0))
+        pickup_s = float(template.rules.get("pickup_push_ms", -2.5) or -2.5) / 1000.0
+        pickup_s = max(-max_off_s, min(max_off_s, pickup_s))
+
+        # Keep first slot-0 locked (handled above); later root anchors sit behind.
+        if slot == 0:
+            return max(0.0, min(max_off_s, headnod_s * 0.72))
+        # Pocket anchors lean behind, but remain subtle.
+        if slot in (8, 12):
+            return max(0.0, min(max_off_s, headnod_s))
+        # Answer/turnaround pickups can push slightly ahead for feel.
+        if slot in (10, 11, 14):
+            return max(-max_off_s, min(max_off_s, pickup_s))
+        # Default restrained behind-the-beat placement.
+        return max(0.0, min(max_off_s, headnod_s * 0.5))
     # Dark Slinky uses deterministic tight swing quantize, not source-weight jitter.
     groove_feel = str(template.rules.get("groove_feel", "") or "")
     swing_amount = float(template.rules.get("swing_amount", 0.56) or 0.56)

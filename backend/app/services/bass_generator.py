@@ -17,6 +17,11 @@ from app.services.bass_articulation import ghost_eligibility, shape_note
 from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
+from app.services.bass_vocabulary.paul_chambers import (
+    get_chromatic_approaches,
+    get_walking_cell,
+    normalize_chord_quality,
+)
 from app.services.conditioning import (
     UnifiedConditioning,
     has_source_groove,
@@ -33,13 +38,16 @@ from app.services.session_context import (
     drum_snare_weight,
     slot_pressure,
 )
+from app.services.style_adapter import BASS_STYLE_ADAPTER
 from app.utils import music_theory as mt
 
 _BASS_STYLES: Final[frozenset[str]] = frozenset(
     {"supportive", "melodic", "rhythmic", "slap", "fusion"}
 )
 _BASS_INSTRUMENTS: Final[frozenset[str]] = frozenset({"finger_bass", "slap_bass", "synth_bass"})
-_BASS_PLAYER_IDS: Final[frozenset[str]] = frozenset({"bootsy", "marcus", "pino"})
+_BASS_PLAYER_IDS: Final[frozenset[str]] = (
+    frozenset({"bootsy", "marcus", "pino"}) | BASS_STYLE_ADAPTER.bass_player_ids()
+)
 _BASS_ENGINES: Final[frozenset[str]] = frozenset({"baseline", "phrase_v2"})
 
 
@@ -137,6 +145,8 @@ bass_profiles: dict[str, BassProfile] = {
         "contour_preference": 0.82,
     },
 }
+for _persona_id, _persona_profile in BASS_STYLE_ADAPTER.bass_profiles().items():
+    bass_profiles[_persona_id] = cast(BassProfile, _persona_profile)
 
 # Sixteenth slots (always include 0 = beat 1 root anchor). Max ~5 hits/bar for pocket feel.
 _RHYTHMIC_GROOVES: Final[tuple[tuple[int, ...], ...]] = (
@@ -323,6 +333,7 @@ def _preview(
         "bootsy": "Player «bootsy» (funk-pocket voice on your style): spacious, bouncy, root-heavy, swagger.",
         "marcus": "Player «marcus» (slap-forward voice on your style): sharp, syncopated, fill-ready, upper accents.",
         "pino": "Player «pino» (soul-line voice on your style): smooth, selective, elegant contour, high space.",
+        "paul_chambers": "Player «paul_chambers» (hard-bop walking voice): quarter-note swing, strong-beat targets, chromatic approaches.",
     }
     tail = blurbs.get(style, blurbs["supportive"])
     if rare_groove_soul and style == "supportive":
@@ -1195,6 +1206,7 @@ def generate_bass(
             bass_player=bass_player,
             session_preset=session_preset,
             context=context,
+            conditioning=conditioning,
             seed=seed,
             return_performance_notes=return_performance_notes,
         )
@@ -1380,6 +1392,37 @@ def generate_bass(
             )
             p2 = _clamp_pitch(pitch, 0, 127, use_profile=use_profile, traits=traits or traits_fallback)
             inst.notes.append(pretty_midi.Note(velocity=v2, pitch=p2, start=start, end=e2))
+
+        if player_key == "paul_chambers":
+            root_pitch = _pc_to_bass_register(int(seg["root_pc"]) % 12, octave=2, lo=31, hi=50)
+            quality = normalize_chord_quality(str(seg["quality"]))
+            cell = get_walking_cell(root_pitch, quality, bar)
+            next_seg = segment_per_bar[(bar + 1) % len(segment_per_bar)]
+            next_root = _nearest_pitch_for_pc(int(next_seg["root_pc"]) % 12, cell[2], lo=31, hi=57)
+            approaches = get_chromatic_approaches(cell[2], next_root)
+            if approaches:
+                cell[3] = approaches[-1]
+            for beat_idx, pitch in enumerate(cell):
+                slot = beat_idx * 4
+                behind = spb * 0.02
+                weak_swing_lag = spb * 0.006 if beat_idx in (1, 3) else 0.0
+                t0 = max(bar_t0, bar_t0 + beat_idx * spb + behind + weak_swing_lag + rng.uniform(-0.002, 0.004) * spb)
+                t1 = min(bar_t1 - 1e-4, t0 + spb * rng.uniform(0.82, 0.9))
+                if t1 <= t0:
+                    continue
+                base_vel = (92, 82, 88, 78)[beat_idx]
+                emit_note(
+                    pitch=pitch,
+                    start=t0,
+                    end=t1,
+                    vel=max(64, min(106, base_vel + rng.randint(-4, 4))),
+                    slot=slot,
+                    is_structural=beat_idx in (0, 2),
+                    traits_fallback=bass_profiles["pino"],
+                )
+                if beat_idx in (0, 2):
+                    prev_structural_pitch = pitch
+            continue
 
         if style == "supportive":
             release_main_hits = 0

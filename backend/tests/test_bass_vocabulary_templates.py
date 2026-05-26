@@ -347,6 +347,10 @@ def test_hiphop_soul_restraint_template_is_808_friendly_and_turnaround_enabled()
     assert bool(t.rules.get("bar4_answer")) is True
     assert t.rules.get("bar8_turnaround_strength") == "medium"
     assert t.rules.get("feel_reference") == "dangelo_erykah_dwele_roots"
+    assert t.rules.get("groove_feel") == "dilla_headnod"
+    assert float(t.rules.get("headnod_delay_ms")) == 7
+    assert float(t.rules.get("pickup_push_ms")) == -2.5
+    assert float(t.rules.get("max_offset_ms")) == 11
 
 
 def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> None:
@@ -366,6 +370,18 @@ def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> N
         conditioning=uc,
     )
     assert notes
+    notes_2 = generate_template_candidate_events(
+        template=t,
+        tempo=tempo,
+        bar_count=bar_count,
+        root_midi=root_midi,
+        chord_quality="minor",
+        harmonic_root_pc=root_pc,
+        conditioning=uc,
+    )
+    assert [(n.pitch, round(n.start, 6), round(n.end, 6), n.velocity) for n in notes] == [
+        (n.pitch, round(n.start, 6), round(n.end, 6), n.velocity) for n in notes_2
+    ]
     spb = 60.0 / float(tempo)
     sixteenth = spb / 4.0
     bar_len = 4.0 * spb
@@ -381,6 +397,21 @@ def test_hiphop_soul_restraint_candidate_sparse_with_final_bar_turnaround() -> N
             if origin <= float(n.start) < (origin + bar_len)
         }
         bar_slots.append(slots)
+    # bounded deterministic dilla head-nod offsets
+    max_offset_s = float(t.rules.get("max_offset_ms")) / 1000.0
+    for n in notes:
+        bar = max(0, min(bar_count - 1, int(float(n.start) // bar_len)))
+        rel = float(n.start) - (bar * bar_len)
+        slot = max(0, min(15, int(round(rel / sixteenth))))
+        expected = (bar * bar_len) + (slot * sixteenth)
+        offset = float(n.start) - expected
+        assert abs(offset) <= max_offset_s + 5e-4
+        if bar == 0 and slot == 0:
+            assert abs(offset) <= 1e-6
+        if slot in (8, 12):
+            assert offset >= 0.003
+        if slot in (10, 11, 14):
+            assert offset <= 0.0035
     # sparse support bassline: low movement in bars 1-7
     assert max(len(s) for s in bar_slots[:-1]) <= 4
     # bar 4 gets a small answer

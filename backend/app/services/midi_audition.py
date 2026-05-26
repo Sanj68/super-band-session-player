@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 from io import BytesIO
+import os
 import threading
 import time
 from typing import Protocol
@@ -22,6 +23,9 @@ _NO_OUTPUTS_HINT = (
     "No MIDI output ports were found. On macOS, enable the IAC Driver in "
     "Audio MIDI Setup to create a virtual MIDI output."
 )
+_DEFAULT_OUTPUT_ENV = "SESSION_PLAYER_MIDI_DEFAULT_OUTPUT"
+_TRILLIAN_OUTPUT_ENV = "SESSION_PLAYER_TRILLIAN_MIDI_OUTPUT"
+_TRILLIAN_OUTPUT_ALIASES = ("trillian", "spectrasonics trillian")
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,7 @@ class RtMidiBackend:
         outputs = tuple(MidiOutputInfo(id=_port_id(index, name), name=name) for index, name in enumerate(names))
         if not outputs:
             return MidiOutputList(outputs=(), hint=_NO_OUTPUTS_HINT)
-        return MidiOutputList(outputs=outputs, default=outputs[0].id)
+        return MidiOutputList(outputs=outputs, default=_preferred_output_id(outputs) or outputs[0].id)
 
     def open_output(self, output_id: str) -> MidiOutputPort:
         try:
@@ -129,7 +133,7 @@ class FakeMidiBackend:
     def list_outputs(self) -> MidiOutputList:
         default = self._default
         if default is None and self._outputs:
-            default = self._outputs[0].id
+            default = _preferred_output_id(self._outputs) or self._outputs[0].id
         return MidiOutputList(outputs=self._outputs, default=default, hint=self._hint)
 
     def open_output(self, output_id: str) -> MidiOutputPort:
@@ -322,6 +326,46 @@ def _find_output(outputs: tuple[MidiOutput, ...], output_id: str) -> MidiOutput 
     for output in outputs:
         if output.id == wanted or output.name == wanted:
             return output
+    wanted_l = wanted.lower()
+    if wanted_l in _TRILLIAN_OUTPUT_ALIASES:
+        configured = _configured_trillian_output()
+        if configured:
+            found = _find_output_by_text(outputs, configured)
+            if found is not None:
+                return found
+        for alias in _TRILLIAN_OUTPUT_ALIASES:
+            found = _find_output_by_text(outputs, alias)
+            if found is not None:
+                return found
+    return None
+
+
+def _configured_trillian_output() -> str:
+    return os.environ.get(_TRILLIAN_OUTPUT_ENV, "").strip()
+
+
+def _configured_default_output() -> str:
+    return os.environ.get(_DEFAULT_OUTPUT_ENV, "").strip()
+
+
+def _find_output_by_text(outputs: tuple[MidiOutput, ...], text: str) -> MidiOutput | None:
+    wanted = text.strip().lower()
+    if not wanted:
+        return None
+    for output in outputs:
+        if output.id.lower() == wanted or output.name.lower() == wanted:
+            return output
+    for output in outputs:
+        if wanted in output.name.lower() or wanted in output.id.lower():
+            return output
+    return None
+
+
+def _preferred_output_id(outputs: tuple[MidiOutput, ...]) -> str | None:
+    for configured in (_configured_default_output(), _configured_trillian_output(), "trillian"):
+        found = _find_output_by_text(outputs, configured)
+        if found is not None:
+            return found.id
     return None
 
 

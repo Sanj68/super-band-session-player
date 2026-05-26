@@ -92,6 +92,7 @@ class BassPlayer(str, Enum):
     bootsy = "bootsy"
     marcus = "marcus"
     pino = "pino"
+    paul_chambers = "paul_chambers"
 
 
 class BassEngine(str, Enum):

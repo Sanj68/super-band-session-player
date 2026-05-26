@@ -42,6 +42,22 @@ def _require_session(session_id: str) -> session_routes.StoredSession:
     return s
 
 
+def _apply_live_source_groove(
+    s: session_routes.StoredSession,
+    *,
+    replace_existing: bool = False,
+) -> int:
+    frames = bridge_store.summarize_frames_to_groove_frames(s.id)
+    if not frames:
+        return 0
+    base = s.source_analysis_override
+    if base is None:
+        ctx = build_session_context(s)
+        base = build_source_analysis(s, context=ctx)
+    s.source_analysis_override = merge_groove_frames(base, frames, replace_existing=replace_existing)
+    return len(frames)
+
+
 @router.post("/heartbeat")
 def post_heartbeat(req: BridgeHeartbeatRequest) -> dict[str, Any]:
     _require_enabled()
@@ -63,15 +79,17 @@ def post_transport(session_id: str, frame: BridgeTransportFrame) -> dict[str, An
 @router.post("/sessions/{session_id}/source-frames")
 def post_source_frames(session_id: str, frames: list[BridgeSourceFeatureFrame]) -> dict[str, Any]:
     _require_enabled()
-    _require_session(session_id)
+    s = _require_session(session_id)
     accepted = 0
     for f in frames:
         if f.session_id != session_id:
             raise HTTPException(status_code=400, detail={"error": "session_id_mismatch"})
         bridge_store.record_source_frame(f)
         accepted += 1
+    live_bar_count = _apply_live_source_groove(s) if accepted else 0
     state = bridge_store.get_bridge_state(session_id)
     state["accepted"] = accepted
+    state["live_source_groove_bar_count"] = live_bar_count
     return state
 
 
@@ -79,23 +97,17 @@ def post_source_frames(session_id: str, frames: list[BridgeSourceFeatureFrame]) 
 def post_commit_source_groove(session_id: str, replace_existing: bool = False) -> dict[str, Any]:
     _require_enabled()
     s = _require_session(session_id)
-    frames = bridge_store.summarize_frames_to_groove_frames(session_id)
-    if not frames:
+    committed_bar_count = _apply_live_source_groove(s, replace_existing=replace_existing)
+    if committed_bar_count == 0:
         raise HTTPException(
             status_code=400,
             detail={"error": "no_bridge_frames", "message": "No bridge feature frames captured for this session."},
         )
-    base = s.source_analysis_override
-    if base is None:
-        ctx = build_session_context(s)
-        base = build_source_analysis(s, context=ctx)
-    merged = merge_groove_frames(base, frames, replace_existing=replace_existing)
-    s.source_analysis_override = merged
     return {
         "session_id": session_id,
-        "committed_bar_count": len(frames),
+        "committed_bar_count": committed_bar_count,
         "replace_existing": bool(replace_existing),
-        "groove_resolution": merged.source_groove_resolution,
+        "groove_resolution": s.source_analysis_override.source_groove_resolution,
     }
 
 
