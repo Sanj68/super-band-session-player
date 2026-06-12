@@ -356,6 +356,7 @@ def generate_bass_phrase_v2(
     seed: int | None = None,
     return_performance_notes: bool = False,
     lock_to_groove: float | None = None,
+    density_bias: float = 0.0,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
@@ -569,17 +570,26 @@ def generate_bass_phrase_v2(
             kick_slots = live_slots
         elif live_slots:
             kick_slots = sorted(set(kick_slots).union(live_slots[:2]))
+        dense = float(max(-1.0, min(1.0, density_bias)))
         if lock_state == "locked":
             # kick_lock_mult: higher lock pulls more kick-adjacent slots into
             # the phrase (and allows one extra hit at full glue).
             slots = _phrase_slots(
                 role,
                 kick_slots,
-                kick_take=3 + (1 if lock >= 0.7 else 0),
-                extra_hits=1 if lock >= 0.75 else 0,
+                kick_take=3 + (1 if lock >= 0.7 else 0) + (1 if dense >= 0.25 else 0),
+                extra_hits=(1 if lock >= 0.75 else 0) + (1 if dense >= 0.25 else 0),
             )
         else:
-            slots = _phrase_slots(role, kick_slots)
+            slots = _phrase_slots(
+                role,
+                kick_slots,
+                kick_take=3 + (1 if dense >= 0.25 else 0),
+                extra_hits=1 if dense >= 0.25 else 0,
+            )
+        # "sparser": probabilistically thin everything but the one
+        if dense <= -0.25:
+            slots = [s for s in slots if s == 0 or rng.random() > (-dense * 0.55)]
         root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = harmonic_plan[bar]
         next_root_pc = harmonic_plan[(bar + 1) % len(harmonic_plan)][0]
         bar_t0 = bar_anchor + bar * 4.0 * spb
@@ -597,7 +607,7 @@ def generate_bass_phrase_v2(
                 space = _space_score(context, conditioning, bar, slot)
                 if space is not None:
                     space_threshold = 0.42 + (0.28 * lock)
-                    restraint = 0.50 + (0.50 * lock)
+                    restraint = (0.50 + (0.50 * lock)) * (1.0 - 0.4 * max(0.0, dense))
                     if space < space_threshold and rng.random() < restraint:
                         continue
             else:

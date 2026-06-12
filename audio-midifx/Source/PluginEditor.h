@@ -25,6 +25,8 @@ private:
     juce::Slider lockSlider_;
     juce::Label lockLabel_;
     juce::TextButton regenerateButton_ { "Regenerate" };
+    juce::TextEditor commandBox_;
+    juce::TextButton sendButton_ { "Say it" };
     juce::Label statusLabel_;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> styleAttach_;

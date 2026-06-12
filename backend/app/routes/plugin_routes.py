@@ -117,6 +117,78 @@ def _engine_for_player(player: str | None) -> str:
     return "phrase_v2" if player in _PHRASE_V2_PERSONAS else "baseline"
 
 
+class PluginCommandBody(BaseModel):
+    text: str = Field(min_length=1, max_length=400)
+
+
+class PluginCommandResult(BaseModel):
+    ok: bool
+    applied: list[str]
+    unrecognized: list[str]
+    message: str
+    part: PluginBassPart | None
+
+
+@router.post("/command", response_model=PluginCommandResult)
+def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
+    """The prompting layer (v0.7): natural language -> engine operations.
+
+    "make it busier" / "like jamerson" / "tighter" / "turnaround on the
+    4th bar" / "new take". Deterministic grammar (command_parser); anything
+    not understood is reported back honestly, never guessed at.
+    """
+    from app.services.command_parser import parse_command
+
+    s = _latest_bass_session()
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+
+    plan = parse_command(body.text, bar_count=int(s.bar_count))
+    if not plan.has_ops:
+        return PluginCommandResult(
+            ok=False,
+            applied=[],
+            unrecognized=plan.unrecognized,
+            message=(
+                "didn't catch that — try: busier · more space · tighter · looser · "
+                "like jamerson/pino/jaco/bootsy/marcus/chambers · funkier/smoother/slap · "
+                "redo bar 2 · turnaround on the 4th bar · new take"
+            ),
+            part=None,
+        )
+
+    if plan.density_delta:
+        s.bass_density_bias = float(max(-1.0, min(1.0, s.bass_density_bias + plan.density_delta)))
+    if plan.lock_set is not None:
+        s.bass_lock_to_groove = float(plan.lock_set)
+    elif plan.lock_delta:
+        current = s.bass_lock_to_groove if s.bass_lock_to_groove is not None else 0.5
+        s.bass_lock_to_groove = float(max(0.0, min(1.0, current + plan.lock_delta)))
+    if plan.player is not None:
+        s.bass_player = None if plan.player == "none" else plan.player
+        s.bass_engine = _engine_for_player(s.bass_player)
+    if plan.style is not None:
+        s.bass_style = plan.style
+
+    if plan.bar_ranges:
+        from app.models.session import RegenerateBassBarsBody
+
+        for start, end in plan.bar_ranges:
+            session_routes.regenerate_bass_bars(
+                s.id, RegenerateBassBarsBody(bar_start=start, bar_end=end)
+            )
+    else:
+        session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
+
+    return PluginCommandResult(
+        ok=True,
+        applied=plan.applied,
+        unrecognized=plan.unrecognized,
+        message=" · ".join(plan.applied),
+        part=get_bass_part(),
+    )
+
+
 @router.post("/regenerate", response_model=PluginBassPart)
 def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s = _latest_bass_session()

@@ -27,12 +27,29 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     regenerateButton_.onClick = [this] { processor_.requestRegenerate(); };
     addAndMakeVisible (regenerateButton_);
 
+    // v0.7 prompting layer: "busier" · "like jamerson" · "turnaround on bar 4"
+    commandBox_.setTextToShowWhenEmpty ("tell the bassist... (busier · like jamerson · redo bar 2)",
+                                        juce::Colours::grey);
+    commandBox_.setFont (juce::Font (juce::FontOptions (13.0f)));
+    commandBox_.onReturnKey = [this]
+    {
+        processor_.requestCommand (commandBox_.getText());
+        commandBox_.clear();
+    };
+    addAndMakeVisible (commandBox_);
+    sendButton_.onClick = [this]
+    {
+        processor_.requestCommand (commandBox_.getText());
+        commandBox_.clear();
+    };
+    addAndMakeVisible (sendButton_);
+
     statusLabel_.setJustificationType (juce::Justification::centredLeft);
     statusLabel_.setFont (juce::Font (juce::FontOptions (12.0f)));
     statusLabel_.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel_);
 
-    setSize (380, 200);
+    setSize (420, 240);
     startTimerHz (4);
 }
 
@@ -67,4 +84,7 @@ void SessionPlayerMidiFXEditor::resized()
     lockSlider_.setBounds (row.reduced (8, 0));
 
     statusLabel_.setBounds (area.removeFromBottom (22));
+    auto commandRow = area.removeFromBottom (30);
+    sendButton_.setBounds (commandRow.removeFromRight (64).reduced (2));
+    commandBox_.setBounds (commandRow.reduced (2));
 }

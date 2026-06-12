@@ -117,6 +117,7 @@ class StoredSession:
     bass_player: str | None = None
     bass_engine: str = "baseline"
     bass_lock_to_groove: float | None = None
+    bass_density_bias: float = 0.0
     bass_seed: int | None = None
     drum_player: str | None = None
     chord_instrument: str = _DEFAULT_CHORD_INSTRUMENT
@@ -713,6 +714,7 @@ def _regenerate_lane_on_stored_session(
             bass_player=s.bass_player,
             bass_engine=s.bass_engine,
             lock_to_groove=s.bass_lock_to_groove,
+            density_bias=s.bass_density_bias,
             chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
@@ -962,6 +964,7 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
             lock_to_groove=s.bass_lock_to_groove,
+            density_bias=s.bass_density_bias,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=ctx,
@@ -1007,6 +1010,7 @@ def _render_bass_take_with_seed(
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
             lock_to_groove=s.bass_lock_to_groove,
+            density_bias=s.bass_density_bias,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=context,
@@ -1506,6 +1510,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 bass_player=s.bass_player,
                 bass_engine=s.bass_engine,
             lock_to_groove=s.bass_lock_to_groove,
+            density_bias=s.bass_density_bias,
                 chord_progression=s.chord_progression,
                 session_preset=s.session_preset,
                 context=ctx,

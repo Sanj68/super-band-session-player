@@ -1195,6 +1195,7 @@ def generate_bass(
     seed: int | None = None,
     return_performance_notes: bool = False,
     lock_to_groove: float | None = None,
+    density_bias: float = 0.0,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
@@ -1213,6 +1214,7 @@ def generate_bass(
             seed=seed,
             return_performance_notes=return_performance_notes,
             lock_to_groove=lock_to_groove,
+            density_bias=density_bias,
         )
     # v0.3b lands in phrase_v2 only (BUILD_NOTES §6: do not touch baseline).
 
@@ -1252,6 +1254,14 @@ def generate_bass(
         traits_engine = traits
     else:
         traits_engine = bass_profiles["bootsy"]
+    # v0.7 prompting: "busier"/"sparser" shifts the persona's groove-pattern
+    # density ceiling (the lever every baseline persona already obeys).
+    if abs(float(density_bias)) >= 0.25:
+        adjusted = dict(traits_engine)
+        adjusted["density_ceiling"] = int(
+            max(2, min(7, int(adjusted.get("density_ceiling", 4)) + round(float(density_bias) * 2)))
+        )
+        traits_engine = cast(BassProfile, adjusted)
 
     if use_profile and traits:
         bias_traits: BassProfile | None = traits

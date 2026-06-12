@@ -5,6 +5,7 @@ namespace
 {
 constexpr auto kBassPartUrl   = "http://127.0.0.1:8000/api/plugin/bass-part";
 constexpr auto kRegenerateUrl = "http://127.0.0.1:8000/api/plugin/regenerate";
+constexpr auto kCommandUrl    = "http://127.0.0.1:8000/api/plugin/command";
 constexpr int  kPollMs = 2000;
 }
 
@@ -81,6 +82,34 @@ void SessionPlayerMidiFXProcessor::run()
                 setStatus ("engine offline (regenerate failed)");
         }
 
+        juce::String command;
+        {
+            const juce::ScopedLock l (commandLock_);
+            command.swapWith (pendingCommand_);
+        }
+        if (command.isNotEmpty())
+        {
+            setStatus ("\"" + command + "\" ...");
+            juce::DynamicObject::Ptr body = new juce::DynamicObject();
+            body->setProperty ("text", command);
+            const auto json = juce::JSON::toString (juce::var (body.get()), true);
+            juce::URL url { kCommandUrl };
+            auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+                               .withExtraHeaders ("Content-Type: application/json")
+                               .withConnectionTimeoutMs (6000);
+            if (auto stream = url.withPOSTData (json).createInputStream (options))
+            {
+                const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+                const auto msg = parsed.getProperty ("message", "").toString();
+                setStatus (msg.isNotEmpty() ? msg : "command sent");
+            }
+            else
+                setStatus ("engine offline (command failed)");
+            fetchPart (false); // refresh the part; keep the reply on screen
+            for (int i = 0; i < 30 && ! threadShouldExit(); ++i)
+                wait (100);     // let the reply read for ~3s
+        }
+
         fetchPart();
 
         for (int i = 0; i < kPollMs / 100 && ! threadShouldExit() && ! regenerateRequested_.load(); ++i)
@@ -88,7 +117,7 @@ void SessionPlayerMidiFXProcessor::run()
     }
 }
 
-void SessionPlayerMidiFXProcessor::fetchPart()
+void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
 {
     juce::URL url { kBassPartUrl };
     auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
@@ -96,13 +125,15 @@ void SessionPlayerMidiFXProcessor::fetchPart()
     auto stream = url.createInputStream (options);
     if (stream == nullptr)
     {
-        setStatus ("engine offline — start the Session Player backend");
+        if (updateStatus)
+            setStatus ("engine offline — start the Session Player backend");
         return;
     }
     const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
     if (! parsed.isObject())
     {
-        setStatus ("no bass part yet — generate one in the app");
+        if (updateStatus)
+            setStatus ("no bass part yet — generate one in the app");
         return;
     }
 
@@ -129,6 +160,8 @@ void SessionPlayerMidiFXProcessor::fetchPart()
         const juce::SpinLock::ScopedLockType l (partLock_);
         part_ = std::move (fresh);
     }
+    if (! updateStatus)
+        return;
     {
         const juce::SpinLock::ScopedLockType l (partLock_);
         setStatus (juce::String (part_->notes.size()) + " notes · "
@@ -149,6 +182,15 @@ std::shared_ptr<const BassPart> SessionPlayerMidiFXProcessor::currentPart() cons
 void SessionPlayerMidiFXProcessor::requestRegenerate()
 {
     regenerateRequested_ = true;
+    notify();
+}
+
+void SessionPlayerMidiFXProcessor::requestCommand (const juce::String& text)
+{
+    {
+        const juce::ScopedLock l (commandLock_);
+        pendingCommand_ = text.trim();
+    }
     notify();
 }
 

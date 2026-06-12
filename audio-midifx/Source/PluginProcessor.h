@@ -65,6 +65,7 @@ public:
 
     // engine I/O (editor calls these)
     void requestRegenerate();
+    void requestCommand (const juce::String& text);
     juce::String statusText() const;
 
     juce::AudioProcessorValueTreeState apvts;
@@ -75,13 +76,15 @@ public:
 private:
     // polling thread
     void run() override;
-    void fetchPart();
+    void fetchPart (bool updateStatus = true);
     std::shared_ptr<const BassPart> currentPart() const;
 
     std::shared_ptr<const BassPart> part_;
     mutable juce::SpinLock partLock_;
 
     std::atomic<bool> regenerateRequested_ { false };
+    juce::String pendingCommand_;
+    juce::CriticalSection commandLock_;
     juce::CriticalSection statusLock_;
     juce::String status_ { "connecting to engine..." };
 
