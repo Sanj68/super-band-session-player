@@ -452,6 +452,7 @@ def create_session(body: SessionCreate) -> SessionCreated:
         bass_instrument=bi_ins,
         bass_player=bp_ins,
         bass_engine=be_ins,
+        bass_lock_to_groove=body.bass_lock_to_groove,
         drum_player=dp_ins,
         chord_instrument=ci_ins,
         chord_player=cp_ins,

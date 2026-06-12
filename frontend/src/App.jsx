@@ -139,6 +139,7 @@ export default function App() {
   const [activeLeadDraft, setActiveLeadDraft] = useState("melodic");
   const [activeBassDraft, setActiveBassDraft] = useState("supportive");
   const [activeBassEngineDraft, setActiveBassEngineDraft] = useState("baseline");
+  const [activeBassLockDraft, setActiveBassLockDraft] = useState(null);
   const [activeChordDraft, setActiveChordDraft] = useState("simple");
   const [activeDrumDraft, setActiveDrumDraft] = useState("straight");
   const [activeLeadPlayerDraft, setActiveLeadPlayerDraft] = useState("");
@@ -273,6 +274,7 @@ export default function App() {
     setActiveBassInstrumentDraft(session?.bass_instrument ?? "finger_bass");
     setActiveBassPlayerDraft(session?.bass_player ?? "");
     setActiveBassEngineDraft(session?.bass_engine ?? "baseline");
+    setActiveBassLockDraft(session?.bass_lock_to_groove ?? null);
     setActiveDrumPlayerDraft(session?.drum_player ?? "");
     setActiveChordPlayerDraft(session?.chord_player ?? "");
     setActiveChordInstrumentDraft(session?.chord_instrument ?? "piano");
@@ -662,6 +664,31 @@ export default function App() {
       setBusy(false);
     }
   }, [session, activeBassEngineDraft]);
+
+  // v0.3b: lock-to-groove knob. `value` overrides the slider draft so the
+  // ignore/lock A-B buttons can patch + regenerate in one click.
+  const onApplyBassLock = useCallback(
+    async (value) => {
+      if (!session?.id) return;
+      const lock = value === undefined ? activeBassLockDraft : value;
+      setBusy(true);
+      setError(null);
+      try {
+        const patched = await patchSession(session.id, { bass_lock_to_groove: lock });
+        const regenerated = await regenerateSelectedLanes(patched.id, ["bass"]);
+        setSession(regenerated);
+        if (value !== undefined) setActiveBassLockDraft(value);
+        const label =
+          lock === null ? "engine default" : lock === 0 ? "loose (ignoring reference)" : `lock ${lock.toFixed(2)}`;
+        setStatus(`Bass regenerated with groove ${label}.`);
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [session, activeBassLockDraft],
+  );
 
   const onUpdateChordStyle = useCallback(async () => {
     if (!session?.id) return;
@@ -2058,6 +2085,72 @@ export default function App() {
               Update Bass Engine
             </button>
           </div>
+          {(session.bass_engine ?? "baseline") === "phrase_v2" && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "0.5rem",
+                alignItems: "center",
+                marginBottom: "1rem",
+                padding: "0.65rem 0.85rem",
+                background: "#fff",
+                border: "1px solid #e2e8f0",
+                borderRadius: 10,
+                maxWidth: 720,
+              }}
+            >
+              <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>
+                Lock to groove (reference)
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={activeBassLockDraft ?? 0.5}
+                onChange={(e) => setActiveBassLockDraft(Number(e.target.value))}
+                disabled={busy}
+                style={{ width: 160 }}
+              />
+              <span style={{ fontSize: 13, color: "#64748b", minWidth: 88 }}>
+                {activeBassLockDraft === null
+                  ? "engine default"
+                  : activeBassLockDraft === 0
+                    ? "loose pocket"
+                    : activeBassLockDraft >= 1
+                      ? "glued to kick"
+                      : activeBassLockDraft.toFixed(2)}
+              </span>
+              <button
+                type="button"
+                onClick={() => onApplyBassLock()}
+                disabled={busy || activeBassLockDraft === (session.bass_lock_to_groove ?? null)}
+                style={{ padding: "0.35rem 0.75rem" }}
+              >
+                Apply &amp; Regenerate
+              </button>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>A/B:</span>
+              <button
+                type="button"
+                onClick={() => onApplyBassLock(0)}
+                disabled={busy}
+                style={{ padding: "0.3rem 0.6rem", fontSize: 13 }}
+                title="Same chart — bass ignores the reference groove"
+              >
+                Ignore reference
+              </button>
+              <button
+                type="button"
+                onClick={() => onApplyBassLock(1)}
+                disabled={busy}
+                style={{ padding: "0.3rem 0.6rem", fontSize: 13 }}
+                title="Same chart — bass locks to the reference kick and breathes around the snare"
+              >
+                Lock to reference
+              </button>
+            </div>
+          )}
           <div
             style={{
               display: "flex",

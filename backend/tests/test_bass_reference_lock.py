@@ -148,3 +148,38 @@ def test_same_seed_same_lock_is_deterministic() -> None:
     a, _ = _generate(0.7, cond, seed=42)
     b, _ = _generate(0.7, cond, seed=42)
     assert a == b
+
+
+def test_lock_knob_round_trips_through_the_api() -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/sessions/",
+        json={
+            "tempo": 100,
+            "key": "C",
+            "scale": "major",
+            "bar_count": 2,
+            "bass_style": "supportive",
+            "bass_engine": "phrase_v2",
+            "bass_lock_to_groove": 0.8,
+        },
+    )
+    assert res.status_code == 200, res.text
+    created = res.json()["session"]
+    sid = created["id"]
+    assert created["bass_lock_to_groove"] == pytest.approx(0.8)
+
+    patched = client.patch(f"/api/sessions/{sid}", json={"bass_lock_to_groove": 0.2})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["bass_lock_to_groove"] == pytest.approx(0.2)
+    assert "lock-to-groove" in patched.json()["message"].lower()
+
+    # regeneration consumes the stored knob without error (no reference
+    # uploaded here, so the engine honestly reports no lock)
+    gen = client.post(f"/api/sessions/{sid}/regenerate-selected", json={"lanes": ["bass"]})
+    assert gen.status_code == 200, gen.text
+    assert "phrase_v2" in gen.json()["lanes"]["bass"]["preview"]
