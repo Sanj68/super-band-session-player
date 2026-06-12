@@ -1,0 +1,245 @@
+{
+  "schema_version": "0.3a",
+  "defaults": {
+    "tempo_tolerance_bpm": 3,
+    "low_confidence_threshold": 0.45
+  },
+  "clips": [
+    {
+      "id": "vp01_clear_rhythm_harmony",
+      "file": "clips/vp01_clear_rhythm_harmony.wav",
+      "filename": "clips/vp01_clear_rhythm_harmony.wav",
+      "description": "Clear rhythmic anchor and clear C-minor harmony.",
+      "notes": "Demo-grade clip; tempo, key and mode should all pass.",
+      "expected": {
+        "expected_tempo_bpm": 120,
+        "tempo_bpm_approx": 120,
+        "tempo_tolerance_bpm": 2,
+        "expected_key": "C",
+        "expected_key_pc": 0,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 3
+      }
+    },
+    {
+      "id": "vp02_sparse_anchor",
+      "file": "clips/vp02_sparse_anchor.wav",
+      "filename": "clips/vp02_sparse_anchor.wav",
+      "description": "Sparse / weak rhythmic anchor; tempo confidence is expected to be lower.",
+      "notes": "Stress test for tempo and phase detection on thin onsets.",
+      "expected": {
+        "expected_tempo_bpm": 120,
+        "tempo_bpm_approx": 120,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "A",
+        "expected_key_pc": 9,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 3
+      }
+    },
+    {
+      "id": "vp03_preroll_silence",
+      "file": "clips/vp03_preroll_silence.wav",
+      "filename": "clips/vp03_preroll_silence.wav",
+      "description": "Intentional pre-roll silence; head-trim should be > 0.7s.",
+      "notes": "Verifies head-trim detection without breaking tempo estimate.",
+      "expected": {
+        "expected_tempo_bpm": 124,
+        "tempo_bpm_approx": 124,
+        "tempo_tolerance_bpm": 2,
+        "head_trim_seconds_min": 0.7,
+        "head_trim_seconds_max": 1.3,
+        "section_count_min": 1,
+        "section_count_max": 3
+      }
+    },
+    {
+      "id": "vp04_harmonic_rich",
+      "file": "clips/vp04_harmonic_rich.wav",
+      "filename": "clips/vp04_harmonic_rich.wav",
+      "description": "Harmonically rich content; key/mode should be confidently detected.",
+      "notes": "Demo-grade harmony reference.",
+      "expected": {
+        "expected_tempo_bpm": 110,
+        "tempo_bpm_approx": 110,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "A",
+        "expected_key_pc": 9,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 3
+      }
+    },
+    {
+      "id": "vp05_harmonic_ambiguous",
+      "file": "clips/vp05_harmonic_ambiguous.wav",
+      "filename": "clips/vp05_harmonic_ambiguous.wav",
+      "description": "Harmonically ambiguous content; lower harmonic confidence expected.",
+      "notes": "Stress test for tonal-centre and mode detection.",
+      "expected": {
+        "expected_tempo_bpm": 125,
+        "tempo_bpm_approx": 125,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "E",
+        "expected_key_pc": 4,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 3
+      }
+    },
+    {
+      "id": "vp06_offgrid_live",
+      "file": "clips/vp06_offgrid_live.wav",
+      "filename": "clips/vp06_offgrid_live.wav",
+      "description": "Off-grid live feel: every hit human-jittered (sigma 18ms), A minor.",
+      "notes": "Synthesized by tools/generate_validation_clips.py \u2014 truth by construction.",
+      "expected": {
+        "expected_tempo_bpm": 96,
+        "tempo_bpm_approx": 96,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "A",
+        "expected_key_pc": 9,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor"
+      }
+    },
+    {
+      "id": "vp07_click_quantised",
+      "file": "clips/vp07_click_quantised.wav",
+      "filename": "clips/vp07_click_quantised.wav",
+      "description": "Click-quantised four-on-floor at 128, F major (F-Bb vamp).",
+      "notes": "Machine-tight grid; tempo must pass at \u00b12.",
+      "expected": {
+        "expected_tempo_bpm": 128,
+        "tempo_bpm_approx": 128,
+        "tempo_tolerance_bpm": 2,
+        "expected_key": "F",
+        "expected_key_pc": 5,
+        "expected_scale_mode": "major",
+        "scale_mode_guess": "major"
+      }
+    },
+    {
+      "id": "vp08_halftime",
+      "file": "clips/vp08_halftime.wav",
+      "filename": "clips/vp08_halftime.wav",
+      "description": "Half-time feel on a 140 grid (snare on 3), D minor.",
+      "notes": "Octave trap: 70 BPM is the expected WRONG answer. Truth is 140.",
+      "expected": {
+        "expected_tempo_bpm": 140,
+        "tempo_bpm_approx": 140,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "D",
+        "expected_key_pc": 2,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor"
+      }
+    },
+    {
+      "id": "vp09_swung",
+      "file": "clips/vp09_swung.wav",
+      "filename": "clips/vp09_swung.wav",
+      "description": "Swung 8ths (66%) at 100 BPM, G major (G-C vamp).",
+      "notes": "Swing must not bend the tempo estimate.",
+      "expected": {
+        "expected_tempo_bpm": 100,
+        "tempo_bpm_approx": 100,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "G",
+        "expected_key_pc": 7,
+        "expected_scale_mode": "major",
+        "scale_mode_guess": "major"
+      }
+    },
+    {
+      "id": "vp10_latin",
+      "file": "clips/vp10_latin.wav",
+      "filename": "clips/vp10_latin.wav",
+      "description": "Son-clave latin feel at 110 BPM, C major (C-G7 montuno).",
+      "notes": "Clave accents off the grid pull naive onset tempo estimators.",
+      "expected": {
+        "expected_tempo_bpm": 110,
+        "tempo_bpm_approx": 110,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "C",
+        "expected_key_pc": 0,
+        "expected_scale_mode": "major",
+        "scale_mode_guess": "major"
+      }
+    },
+    {
+      "id": "vp11_modal_vamp",
+      "file": "clips/vp11_modal_vamp.wav",
+      "filename": "clips/vp11_modal_vamp.wav",
+      "description": "D dorian vamp (Dm7-G7) at 92 BPM \u2014 modal, no leading tone.",
+      "notes": "Dorian reads as 'D minor' in a major/minor world; key D is the pass.",
+      "expected": {
+        "expected_tempo_bpm": 92,
+        "tempo_bpm_approx": 92,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "D",
+        "expected_key_pc": 2,
+        "expected_scale_mode": "minor",
+        "scale_mode_guess": "minor"
+      }
+    },
+    {
+      "id": "vp12_dense_keys",
+      "file": "clips/vp12_dense_keys.wav",
+      "filename": "clips/vp12_dense_keys.wav",
+      "description": "Dense polyphonic keys (Ebmaj7-Cm7-Abmaj7-Bb7) at 116, sparse drums.",
+      "notes": "Harmony-dominant texture; tempo must survive weak percussion.",
+      "expected": {
+        "expected_tempo_bpm": 116,
+        "tempo_bpm_approx": 116,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "Eb",
+        "expected_key_pc": 3,
+        "expected_scale_mode": "major",
+        "scale_mode_guess": "major"
+      }
+    },
+    {
+      "id": "vp13_fullmix_beat1",
+      "file": "clips/vp13_fullmix_beat1.wav",
+      "filename": "clips/vp13_fullmix_beat1.wav",
+      "description": "Real full mix: AutoFactory Promo Beat 1, 8 bars from the 57.9s drop.",
+      "notes": "Real material (own bounce); tempo truth from DAW/onset analysis. Key left unscored.",
+      "expected": {
+        "expected_tempo_bpm": 137.0,
+        "tempo_bpm_approx": 137.0,
+        "tempo_tolerance_bpm": 2.5
+      }
+    },
+    {
+      "id": "vp14_fullmix_dnb",
+      "file": "clips/vp14_fullmix_dnb.wav",
+      "filename": "clips/vp14_fullmix_dnb.wav",
+      "description": "Real full mix: Promo Beat 2 DnB, 8 bars from the 32.64s drop. Half-time trap: 88.2 is the wrong octave.",
+      "notes": "Real material (own bounce); tempo truth from DAW/onset analysis. Key left unscored.",
+      "expected": {
+        "expected_tempo_bpm": 176.47,
+        "tempo_bpm_approx": 176.47,
+        "tempo_tolerance_bpm": 3.0
+      }
+    },
+    {
+      "id": "vp15_fullmix_beat3",
+      "file": "clips/vp15_fullmix_beat3.wav",
+      "filename": "clips/vp15_fullmix_beat3.wav",
+      "description": "Real full mix: Promo Beat 3 (dope beat), 8 bars from the 109.86s drop.",
+      "notes": "Real material (own bounce); tempo truth from DAW/onset analysis. Key left unscored.",
+      "expected": {
+        "expected_tempo_bpm": 84.3,
+        "tempo_bpm_approx": 84.3,
+        "tempo_tolerance_bpm": 2.5
+      }
+    }
+  ]
+}

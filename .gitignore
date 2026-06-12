@@ -23,8 +23,9 @@ backend/data/bass_candidate_runs.json
 
 # Local audio/reference data - do not commit
 backend/data/reference_audio/
-backend/data/validation_pack/
-backend/data/validation_pack_commercial/
+# clips stay local; manifests (the ground truth) are committed
+backend/data/validation_pack/clips/
+backend/data/validation_pack_commercial/clips/
 
 # Desktop wrapper
 desktop/node_modules/

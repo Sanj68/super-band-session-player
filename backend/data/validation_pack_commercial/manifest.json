@@ -1,0 +1,68 @@
+{
+  "defaults": {
+    "tempo_tolerance_bpm": 4,
+    "low_confidence_threshold": 0.45
+  },
+  "clips": [
+    {
+      "id": "cr01_get_lucky_first_verse",
+      "filename": "clips/cr01_get_lucky_first_verse.wav",
+      "expected": {
+        "tempo_bpm_approx": 116,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "F#",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 4
+      }
+    },
+    {
+      "id": "cr02_billie_jean_chorus",
+      "filename": "clips/cr02_billie_jean_chorus.wav",
+      "expected": {
+        "tempo_bpm_approx": 117,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "B",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 4
+      }
+    },
+    {
+      "id": "cr03_on_and_on_first_verse",
+      "filename": "clips/cr03_on_and_on_first_verse.wav",
+      "expected": {
+        "tempo_bpm_approx": 80.3,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "B",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 4
+      }
+    },
+    {
+      "id": "cr04_virtual_insanity_chorus",
+      "filename": "clips/cr04_virtual_insanity_chorus.wav",
+      "expected": {
+        "tempo_bpm_approx": 92,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "F#",
+        "scale_mode_guess": "major",
+        "section_count_min": 1,
+        "section_count_max": 4
+      }
+    },
+    {
+      "id": "cr05_smooth_operator_first_verse",
+      "filename": "clips/cr05_smooth_operator_first_verse.wav",
+      "expected": {
+        "tempo_bpm_approx": 119,
+        "tempo_tolerance_bpm": 3,
+        "expected_key": "A",
+        "scale_mode_guess": "minor",
+        "section_count_min": 1,
+        "section_count_max": 4
+      }
+    }
+  ]
+}
