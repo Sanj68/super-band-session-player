@@ -1342,6 +1342,105 @@ export default function App() {
             <p className="sp-panel-sub">
               Labelled Sub One candidates: Warm Jazz-Funk · Dark Slinky Grit · Fusion Answer · Hip-Hop Soul Restraint · Tight Head-Nod Pocket. Audition / promote / export from each card.
             </p>
+            {session && (session.bass_engine ?? "baseline") !== "phrase_v2" && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  alignItems: "center",
+                  marginBottom: "0.75rem",
+                  padding: "0.55rem 0.75rem",
+                  border: "1px dashed #cbd5e1",
+                  borderRadius: 10,
+                  fontSize: 13,
+                }}
+              >
+                <span>Reference-aware groove (lock-to-kick) needs the Phrase Engine v2.</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    setError(null);
+                    try {
+                      const updated = await patchSession(session.id, { bass_engine: "phrase_v2" });
+                      setSession(updated);
+                      setStatus("Bass engine set to Phrase Engine v2.");
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={{ padding: "0.3rem 0.6rem" }}
+                >
+                  Switch to Phrase Engine v2
+                </button>
+              </div>
+            )}
+            {session && (session.bass_engine ?? "baseline") === "phrase_v2" && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  alignItems: "center",
+                  marginBottom: "0.75rem",
+                  padding: "0.55rem 0.75rem",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: 10,
+                }}
+              >
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Lock to groove</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={activeBassLockDraft ?? 0.5}
+                  onChange={(e) => setActiveBassLockDraft(Number(e.target.value))}
+                  disabled={busy}
+                  style={{ width: 150 }}
+                />
+                <span style={{ fontSize: 13, color: "#64748b", minWidth: 84 }}>
+                  {activeBassLockDraft === null
+                    ? "engine default"
+                    : activeBassLockDraft === 0
+                      ? "loose pocket"
+                      : activeBassLockDraft >= 1
+                        ? "glued to kick"
+                        : activeBassLockDraft.toFixed(2)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onApplyBassLock()}
+                  disabled={busy || activeBassLockDraft === (session.bass_lock_to_groove ?? null)}
+                  style={{ padding: "0.3rem 0.65rem" }}
+                >
+                  Apply &amp; Regenerate
+                </button>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>A/B:</span>
+                <button
+                  type="button"
+                  onClick={() => onApplyBassLock(0)}
+                  disabled={busy}
+                  style={{ padding: "0.28rem 0.55rem", fontSize: 13 }}
+                  title="Same chart — bass ignores the reference groove"
+                >
+                  Ignore reference
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onApplyBassLock(1)}
+                  disabled={busy}
+                  style={{ padding: "0.28rem 0.55rem", fontSize: 13 }}
+                  title="Same chart — bass locks to the reference kick and breathes around the snare"
+                >
+                  Lock to reference
+                </button>
+              </div>
+            )}
             {session ? (
               <BassCandidatePanel
                 session={session}
@@ -2085,72 +2184,6 @@ export default function App() {
               Update Bass Engine
             </button>
           </div>
-          {(session.bass_engine ?? "baseline") === "phrase_v2" && (
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "0.5rem",
-                alignItems: "center",
-                marginBottom: "1rem",
-                padding: "0.65rem 0.85rem",
-                background: "#fff",
-                border: "1px solid #e2e8f0",
-                borderRadius: 10,
-                maxWidth: 720,
-              }}
-            >
-              <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>
-                Lock to groove (reference)
-              </span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={activeBassLockDraft ?? 0.5}
-                onChange={(e) => setActiveBassLockDraft(Number(e.target.value))}
-                disabled={busy}
-                style={{ width: 160 }}
-              />
-              <span style={{ fontSize: 13, color: "#64748b", minWidth: 88 }}>
-                {activeBassLockDraft === null
-                  ? "engine default"
-                  : activeBassLockDraft === 0
-                    ? "loose pocket"
-                    : activeBassLockDraft >= 1
-                      ? "glued to kick"
-                      : activeBassLockDraft.toFixed(2)}
-              </span>
-              <button
-                type="button"
-                onClick={() => onApplyBassLock()}
-                disabled={busy || activeBassLockDraft === (session.bass_lock_to_groove ?? null)}
-                style={{ padding: "0.35rem 0.75rem" }}
-              >
-                Apply &amp; Regenerate
-              </button>
-              <span style={{ fontSize: 12, color: "#94a3b8" }}>A/B:</span>
-              <button
-                type="button"
-                onClick={() => onApplyBassLock(0)}
-                disabled={busy}
-                style={{ padding: "0.3rem 0.6rem", fontSize: 13 }}
-                title="Same chart — bass ignores the reference groove"
-              >
-                Ignore reference
-              </button>
-              <button
-                type="button"
-                onClick={() => onApplyBassLock(1)}
-                disabled={busy}
-                style={{ padding: "0.3rem 0.6rem", fontSize: 13 }}
-                title="Same chart — bass locks to the reference kick and breathes around the snare"
-              >
-                Lock to reference
-              </button>
-            </div>
-          )}
           <div
             style={{
               display: "flex",
