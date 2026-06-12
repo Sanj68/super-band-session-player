@@ -91,11 +91,27 @@ def _tempo_candidates(onset_env: np.ndarray, sr: int, fallback_tempo: int) -> li
     freqs = librosa.tempo_frequencies(len(tg), sr=sr, hop_length=_HOP_LENGTH) if tg.size else np.asarray([], dtype=float)
     peaks: list[float] = []
     if tg.size and freqs.size:
+        frame_rate = float(sr) / float(_HOP_LENGTH)
         order = np.argsort(tg)[::-1]
         for idx in order:
             bpm = float(freqs[idx])
             if not np.isfinite(bpm) or bpm < 30.0 or bpm > 300.0:
                 continue
+            # Parabolic interpolation on the tempogram peak: the integer-lag
+            # grid quantizes BPM (~2.5% near 120 at 22050/512 — the
+            # validation pack's 120->117.19 flat bias). The true peak sits
+            # between bins; refine the lag before converting to BPM.
+            k = int(idx)
+            if 1 <= k < len(tg) - 1:
+                denom = tg[k - 1] - (2.0 * tg[k]) + tg[k + 1]
+                if abs(denom) > 1e-12:
+                    delta = 0.5 * (tg[k - 1] - tg[k + 1]) / denom
+                    if -1.0 < delta < 1.0:
+                        lag = k + float(delta)
+                        if lag > 1e-6:
+                            refined = frame_rate * 60.0 / lag
+                            if np.isfinite(refined) and 30.0 <= refined <= 300.0:
+                                bpm = float(refined)
             if any(abs(bpm - p) < 4.0 for p in peaks):
                 continue
             peaks.append(bpm)
@@ -112,6 +128,50 @@ def _tempo_candidates(onset_env: np.ndarray, sr: int, fallback_tempo: int) -> li
         if not any(abs(vv - y) < 0.75 for y in out):
             out.append(vv)
     return out
+
+
+def _comb_pulse_fractional(onset_env: np.ndarray, sr: int, bpm: float) -> float:
+    """Comb autocorrelation at a FRACTIONAL beat lag (linear interpolation).
+
+    Integer-lag autocorrelation quantizes tempo; interpolating the shifted
+    envelope lets nearby BPM values be compared at sub-grid resolution. The
+    comb (lag + 2*lag) sharpens the true tempo against its neighbours —
+    same idea as the spectral-flux reference script that read the dense
+    Beat 1 mix correctly.
+    """
+    if bpm <= 1e-6 or onset_env.size < 64:
+        return 0.0
+    env = onset_env.astype(float) - float(np.mean(onset_env))
+    denom = float(np.dot(env, env))
+    if denom <= 1e-9:
+        return 0.0
+    frame_rate = float(sr) / float(_HOP_LENGTH)
+    total = 0.0
+    weight_sum = 0.0
+    for mult, w in ((1.0, 1.0), (2.0, 0.5)):
+        lag = frame_rate * 60.0 / bpm * mult
+        i0 = int(np.floor(lag))
+        frac = lag - i0
+        if i0 + 1 >= env.size - 8:
+            continue
+        n = env.size - i0 - 1
+        shifted = ((1.0 - frac) * env[i0 : i0 + n]) + (frac * env[i0 + 1 : i0 + 1 + n])
+        total += w * (float(np.dot(env[:n], shifted)) / denom)
+        weight_sum += w
+    return max(0.0, total / weight_sum) if weight_sum > 0 else 0.0
+
+
+def _refine_tempo(onset_env: np.ndarray, sr: int, bpm: float) -> float:
+    """Polish a chosen BPM on a fine local grid (±5%, 0.05 BPM steps)."""
+    if bpm <= 1e-6:
+        return bpm
+    best_bpm = float(bpm)
+    best_p = _comb_pulse_fractional(onset_env, sr, best_bpm)
+    for cand in np.arange(bpm * 0.95, bpm * 1.05 + 1e-9, 0.05):
+        p = _comb_pulse_fractional(onset_env, sr, float(cand))
+        if p > best_p:
+            best_bpm, best_p = float(cand), p
+    return best_bpm
 
 
 def _pulse_strength(onset_env: np.ndarray, sr: int, bpm: float) -> float:
@@ -340,6 +400,10 @@ def _select_tempo(
         elif (anchor >= 100.0 and anchor <= 130.0) and (abs(chosen - anchor) <= 8.0) and (conf < 0.8):
             # Small stabilization toward loop-tempo anchor on sparse/ambiguous material.
             chosen = (0.55 * chosen) + (0.45 * anchor)
+    # Sub-grid polish: beat_track's value sits on the integer-lag grid
+    # (120 -> 117.19 class of error); refine on a fine local grid with
+    # fractional-lag comb autocorrelation.
+    chosen = _refine_tempo(onset_env, sr, chosen)
     return round(chosen, 3), round(conf, 4)
 
 

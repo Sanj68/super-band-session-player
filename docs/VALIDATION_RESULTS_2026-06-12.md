@@ -1,11 +1,14 @@
 # v0.3a validation pack — first full run (2026-06-12)
 
-> **UPDATE same day — key backport landed: 8/15 → 9/15, key fails 5 → 3
-> (all three are suspect-truth / designed-ambiguous / modal-hard).** The
-> backport's journey is instructive and is documented in §"What the
-> backport taught us" below. Remaining fails: tempo ×3 (separate work
-> item), vp01 (truth label suspect), vp05 (by design), vp07/vp11
-> (50/50 vamp + dorian — honest limits of major/minor profiles).
+> **UPDATE same day — key backport + tempo fix landed: 8/15 → 11/15.**
+> **Tempo: 15/15 clean** (parabolic tempogram-peak candidates + final
+> fractional-lag comb-autocorrelation polish killed both the ~2.5%
+> integer-lag flat bias and the vp13 dense-mix miss). **Key fails 5 → 4,
+> all on the suspect/designed/known-hard set** (vp01 truth label suspect,
+> vp05 by design, vp07 50/50 vamp, vp11 dorian) — and every wrong key
+> self-reports confidence ≤ 0.32, below the 0.45 gate, so v0.3b's
+> fallback condition holds. The backport's journey is documented in
+> §"What the backport taught us" below.
 
 Pack expanded 5 → 15 clips per BUILD_NOTES §19: 7 synthesized scenario clips
 (`tools/generate_validation_clips.py` — ground truth by construction, the
