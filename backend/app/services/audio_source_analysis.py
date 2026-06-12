@@ -21,9 +21,13 @@ _MODE_CANDIDATES: tuple[str, ...] = (
     "minor",
 )
 
-# Krumhansl-like key profiles (normalized later in scoring).
-_MAJOR_PROFILE = np.asarray([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], dtype=float)
-_MINOR_PROFILE = np.asarray([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], dtype=float)
+# Albrecht-Shanahan (2013) key profiles — derived from an audio corpus rather
+# than probe-tone ratings, so they fit chroma vectors far better than
+# Krumhansl-Kessler. Backported 2026-06-12 from Pocket Export's hardened
+# KeyBPMAnalyzer (7/20 -> 11/20 exact keys on real loops); the v0.3a
+# validation pack showed the same circle-of-fifths confusion KK caused there.
+_MAJOR_PROFILE = np.asarray([0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081], dtype=float)
+_MINOR_PROFILE = np.asarray([0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052], dtype=float)
 
 
 @dataclass
@@ -188,10 +192,18 @@ def _mode_template(mode: str) -> np.ndarray:
 
 def _profile_score(pc_dist: np.ndarray, tonic: int, mode: str) -> float:
     templ = np.roll(_mode_template(mode), int(tonic) % 12)
-    # Correlation-ish score with root emphasis.
     dot = float(np.dot(pc_dist, templ))
-    root_boost = 0.12 * float(pc_dist[int(tonic) % 12])
-    return dot + root_boost
+    # Tonic emphasis + fifth/fourth penalties (Pocket Export hardening,
+    # adapted): reward energy on the candidate tonic; penalise candidates
+    # whose *fifth* dominates (true key read as IV) and — the mirror case the
+    # CQT-chroma path needs — candidates whose *fourth* carries heavy energy
+    # (true key read as V: G-for-C on a C-G7 vamp puts C, the fourth of G,
+    # under the wrong tonic).
+    t = int(tonic) % 12
+    root_boost = 0.30 * float(pc_dist[t])
+    fifth_penalty = 0.08 * float(pc_dist[(t + 7) % 12])
+    fourth_penalty = 0.06 * float(pc_dist[(t + 5) % 12])
+    return dot + root_boost - fifth_penalty - fourth_penalty
 
 
 def _structural_pc_support(
@@ -214,9 +226,12 @@ def _structural_pc_support(
         fr = max(0, min(n_frames - 1, fr))
         bar_w = 1.0
         if i % 4 == 0:
-            bar_w += 0.35  # phrase-entry
+            bar_w += 0.55  # phrase-entry — where the tonic lives
         if i % 4 == 3:
-            bar_w += 0.55  # phrase-end/cadence tendency
+            # phrase-end/cadence bars carry the DOMINANT in vamp/loop
+            # material; over-weighting them was a systematic vote for V
+            # (validation pack: G-for-C, Bb-for-Eb). Keep a mild cue only.
+            bar_w += 0.20
         scores += (bar_w * chroma[:, fr]) + ((bar_w + 0.2) * low_chroma[:, fr])
         landing_pc = int(np.argmax(low_chroma[:, fr]) % 12)
         landing_counts[landing_pc] += bar_w
@@ -337,12 +352,25 @@ def _estimate_tonal_center_mode(
     bar_start_confidence: float,
     fallback_key: str,
     fallback_scale: str,
+    global_pcp: np.ndarray | None = None,
 ) -> tuple[int, float, str, float]:
     fallback_pc = mt.key_root_pc(fallback_key)
     fallback_mode = _normalize_mode_label(mt.describe_scale(fallback_scale))
     if chroma.size == 0:
         return fallback_pc, 0.2, fallback_mode, 0.2
     pc_dist = _pc_distribution(chroma)
+    # When a harmonic pitch-class profile is provided it is the SOLE voter
+    # for the key decision: the matrix study + decomposition probe
+    # (docs/VALIDATION_RESULTS_2026-06-12.md) showed that blending even 20%
+    # of CQT-derived components erases the AS-profile scorer's tonic margin
+    # on vamp material (G-for-C etc.). Low/tail/structural cues survive as
+    # tie-breakers (relative-key disambiguation), not as voters.
+    hpcp_drive = False
+    if global_pcp is not None:
+        gp = np.asarray(global_pcp, dtype=float).reshape(-1)
+        if gp.size == 12 and float(np.sum(gp)) > 1e-9:
+            pc_dist = gp / float(np.sum(gp))
+            hpcp_drive = True
     total = float(np.sum(pc_dist))
     if total <= 1e-9:
         return fallback_pc, 0.2, fallback_mode, 0.2
@@ -367,10 +395,19 @@ def _estimate_tonal_center_mode(
     # when downbeat/phase confidence is weak.
     tail_gate = max(0.0, min(1.0, (structural_reliability - 0.25) / 0.35))
 
-    w_global = 0.50
-    w_low = 0.34
-    w_tail = 0.16 * tail_gate
-    w_struct = 0.18 * struct_gate
+    # Weights re-balanced 2026-06-12 against the validation pack: the HPCP
+    # global component is the reliable tonal signal (matrix study in
+    # docs/VALIDATION_RESULTS_2026-06-12.md); heavy low-chroma weighting fed
+    # the vamp dominant's bass bars straight into the key vote. Low/tail/
+    # structural keep a voice as tiebreakers, not as voters.
+    if hpcp_drive:
+        # HPCP is the sole voter — no dilution (see comment above).
+        w_global, w_low, w_tail, w_struct = 1.0, 0.0, 0.0, 0.0
+    else:
+        w_global = 0.50
+        w_low = 0.34
+        w_tail = 0.16 * tail_gate
+        w_struct = 0.18 * struct_gate
     w_sum = max(1e-9, w_global + w_low + w_tail + w_struct)
     blend = (
         (w_global * pc_dist)
@@ -384,12 +421,19 @@ def _estimate_tonal_center_mode(
     for tonic in range(12):
         for mode in _MODE_CANDIDATES:
             score = _profile_score(blend, tonic, mode)
-            root_support = (
-                (0.42 * low_dist[tonic])
-                + (0.28 * tail_dist[tonic])
-                + (0.30 * structural_dist[tonic])
-            )
-            combos.append((tonic, mode, score + (0.24 * float(root_support))))
+            # Net root support: bass/tail/structural energy on the candidate
+            # tonic MINUS the same evidence for its fifth — on vamp material
+            # the dominant's bass bars otherwise hand the win to V even after
+            # the profile-level penalties. Disabled entirely under HPCP drive:
+            # the probe showed any support term re-leaks the dominant.
+            if hpcp_drive:
+                combos.append((tonic, mode, score))
+            else:
+                support_at = lambda pc: (  # noqa: E731
+                    (0.42 * low_dist[pc]) + (0.28 * tail_dist[pc]) + (0.30 * structural_dist[pc])
+                )
+                root_support = support_at(tonic) - 0.5 * support_at((tonic + 7) % 12)
+                combos.append((tonic, mode, score + (0.15 * float(root_support))))
     combos.sort(key=lambda x: x[2], reverse=True)
     best_tonic, best_mode, best_score = combos[0]
     second_score = combos[1][2] if len(combos) > 1 else 0.0
@@ -402,11 +446,28 @@ def _estimate_tonal_center_mode(
         rel_tonic, rel_mode = (best_tonic + 3) % 12, "major"
     rel_score = float(combo_lookup.get((rel_tonic, rel_mode), -1e9))
     if (
-        rel_score > -1e8
+        not hpcp_drive  # under HPCP drive the scorer's verdict stands —
+        # CQT low-chroma flipped correct answers to their relative key
+        # (C-minor-for-Eb-major on the validation pack)
+        and rel_score > -1e8
         and abs(best_score - rel_score) <= 0.08
         and float(low_dist[rel_tonic]) > float(low_dist[best_tonic]) + 0.02
     ):
         best_tonic, best_mode, best_score = rel_tonic, rel_mode, rel_score
+
+    # Mode by the third degree. The Albrecht-Shanahan profiles weight the
+    # tonic asymmetrically (major 0.238 vs minor 0.220), so on root-heavy
+    # CQT chroma the profile match alone tips toward major regardless of the
+    # actual third. Mode lives in the third: once the tonic is settled,
+    # prefer the mode whose third clearly dominates.
+    maj3 = float(blend[(best_tonic + 4) % 12])
+    min3 = float(blend[(best_tonic + 3) % 12])
+    if maj3 > min3 * 1.15 and best_mode != "major":
+        best_mode = "major"
+        best_score = float(combo_lookup.get((best_tonic, "major"), best_score))
+    elif min3 > maj3 * 1.15 and best_mode != "minor":
+        best_mode = "minor"
+        best_score = float(combo_lookup.get((best_tonic, "minor"), best_score))
 
     tonic_scores = [max(score for t, _m, score in combos if t == tonic) for tonic in range(12)]
     tonic_scores_sorted = sorted(tonic_scores, reverse=True)
@@ -683,6 +744,9 @@ def analyze_reference_audio(
         head_trim_seconds=head_trim,
         sr=sr,
     )
+    from app.services.harmonic_analysis import extract_fft_chroma
+
+    global_pcp = np.asarray(extract_fft_chroma(y_trimmed, sample_rate=sr), dtype=float)
     tonal_pc, tonal_conf, mode_guess, mode_conf = _estimate_tonal_center_mode(
         chroma,
         low_chroma,
@@ -691,6 +755,7 @@ def analyze_reference_audio(
         bar_start_confidence=float(min(phase_conf, tempo_conf)),
         fallback_key=session_key,
         fallback_scale=session_scale,
+        global_pcp=global_pcp,
     )
 
     sections = _build_sections(bar_energy, bar_accent, bar_count)

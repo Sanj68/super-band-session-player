@@ -1,5 +1,12 @@
 # v0.3a validation pack — first full run (2026-06-12)
 
+> **UPDATE same day — key backport landed: 8/15 → 9/15, key fails 5 → 3
+> (all three are suspect-truth / designed-ambiguous / modal-hard).** The
+> backport's journey is instructive and is documented in §"What the
+> backport taught us" below. Remaining fails: tempo ×3 (separate work
+> item), vp01 (truth label suspect), vp05 (by design), vp07/vp11
+> (50/50 vamp + dorian — honest limits of major/minor profiles).
+
 Pack expanded 5 → 15 clips per BUILD_NOTES §19: 7 synthesized scenario clips
 (`tools/generate_validation_clips.py` — ground truth by construction, the
 Meter Core certification approach) + 3 real full-mix clips sliced from the
@@ -69,6 +76,39 @@ under-confident generally; the backport should raise separation.
    currently-unscored fields.
 5. Keep the 0.45 confidence gate as the fallback condition for
    reference-aware bass (v0.3b's original design assumption — validated).
+
+## What the backport taught us (landed same day)
+
+The naive transplant — AS profiles + penalties into the existing
+CQT-chroma blend — made things WORSE (8/15 → 6/15). A 5-variant ×
+2-chroma offline matrix over the pack settled it:
+
+| | KK base | AS+penalties | AS+pen+mode3rd |
+|---|---|---|---|
+| CQT chroma | 6/5 (key/key+mode) | 5/3 | 5/5 |
+| **HPCP chroma** | 6/6 | 7/7 (with 4th pen) | **7/7** |
+
+**The Pocket Export stack only works as a unit** — harmonic-PCP chroma +
+AS profiles + tonic-emphasis/fifth+fourth penalties. On CQT chroma the
+AS profiles' asymmetric tonic weights (maj .238 vs min .220) tip
+root-heavy material to major, and the fifth-penalty is swamped.
+
+Then three pipeline mechanisms had to stand down under HPCP drive, each
+caught by decomposition probes:
+1. **Blend dilution** — even 20% CQT components erased the scorer's tonic
+   margin (G-for-C returned at w_low=0.12).
+2. **root_support bonus** — bass/tail energy on the vamp dominant re-leaked
+   V into the vote.
+3. **Relative-key disambiguation** — CQT low-chroma flipped the correct
+   Eb major to C minor.
+
+Final design: `global_pcp` (harmonic PCP from
+`harmonic_analysis.extract_fft_chroma`, itself rewritten to the framed
+peak-picking form) is the SOLE key voter; mode is reconciled by the
+third degree; the CQT-era blend/support/relative logic remains as the
+fallback path when no HPCP is supplied. Phrase-end structural weighting
+also corrected (0.55→0.20; it was a systematic vote for the dominant —
+tonics live at phrase ENTRIES, now 0.55).
 
 ## Repro
 
