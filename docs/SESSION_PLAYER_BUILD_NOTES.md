@@ -165,6 +165,46 @@ Demo proof point: side-by-side toggle "ignore drum loop / lock to drum
 loop" on the same chord chart, same seed. The difference must be
 unmistakable.
 
+## 6b. Product Surface — the plugin vision (Sanjeev, 2026-06-12)
+
+Agreed end-state UX, banked verbatim from the strategy talk after v0.3b
+landed. This is the surface the engine has been building toward; it is
+NOT a pivot.
+
+> A plugin that sits in front of a VST instrument (e.g. Logic stock bass)
+> and generates the MIDI that triggers it. It hears the session through a
+> listener on the 2-bus or an audio channel. Workflow: load a Splice
+> sample (drums + keys), Session Player generates a bass part from that
+> live input. The plugin UI shows style options and nothing else. Plus a
+> command layer: "make it busier", "add a turnaround on the 4th bar".
+
+Architecture (most pieces already exist):
+
+```
+Logic session
+├─ loop/drums/keys → [Session Player Listener AU on the bus]
+│                         └→ bridge frames → engine (analysis, certified v0.3a)
+└─ bass channel: [Session Player MIDI FX (aumf)] → any instrument
+      │  UI: style · lock-to-groove · regenerate (macro-knob register,
+      │      per the validated AF chassis pattern — no surgical knobs)
+      └─ command layer: NL → existing API (density/restraint knobs,
+         v0.4 bar-range regeneration covers "turnaround on bar 4");
+         natural Max voice integration ("hey Mycroft, busier last 2 bars")
+```
+
+Piece status: listener AU ✅ installed · live frames → conditioning ✅ ·
+reference-aware generation ✅ (v0.3b) · IAC MIDI routing ✅ · bar-range
+regen ✅ (v0.4) · **MIDI FX plugin chassis = the missing piece** ·
+NL command layer = thin LLM mapping over existing endpoints (later).
+
+Suite positioning: PocketCarver listens and makes SPACE; Session Player
+listens and makes PARTS — "contextual instruments" as a brand pillar.
+
+Milestone: **v0.6 — MIDI FX chassis**: aumf plugin, host-transport-synced
+playback of the engine's bass part, style/lock/regenerate params, tiny
+dedicated backend surface (`/api/plugin/*`), auval PASS. NL command layer
+is v0.7, after the chassis proves the loop.
+
 ## 7. v0.4 — Variation Manager + Bar-Range Regeneration
 
 Status: **complete**.

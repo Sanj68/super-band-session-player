@@ -1,0 +1,106 @@
+"""Tiny dedicated surface for the Session Player MIDI FX plugin (v0.6).
+
+The plugin is intentionally dumb: it asks "what's the current bass part?"
+and plays it in sync with the host transport, and it can ask for a
+regenerate with a style / lock tweak. Contract kept minimal so the plugin
+never grows session-management UI (the product surface is style options
+and one knob — BUILD_NOTES §6b).
+
+Session selection: the most recently CREATED session that has a bass
+part. The producer's working session is, in practice, the newest one.
+"""
+
+from __future__ import annotations
+
+import io
+
+import pretty_midi
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from app.models.session import LaneName, RegenerateSelectedBody
+from app.routes import session_routes
+
+router = APIRouter()
+
+
+def _latest_bass_session() -> session_routes.StoredSession | None:
+    candidates = [
+        s for s in session_routes._SESSIONS.values()  # noqa: SLF001
+        if s.bass_bytes or s.bass_performance_bytes
+    ]
+    if not candidates:
+        return None
+    # dict preserves insertion order; the last created wins
+    return candidates[-1]
+
+
+class PluginNote(BaseModel):
+    pitch: int
+    velocity: int
+    start_beats: float
+    dur_beats: float
+
+
+class PluginBassPart(BaseModel):
+    session_id: str
+    tempo: int
+    bar_count: int
+    beats_per_bar: int = 4
+    source: str = Field(description="clean or performance render")
+    preview: str
+    lock_to_groove: float | None
+    bass_style: str
+    notes: list[PluginNote]
+
+
+@router.get("/bass-part", response_model=PluginBassPart)
+def get_bass_part() -> PluginBassPart:
+    s = _latest_bass_session()
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    raw = s.bass_performance_bytes or s.bass_bytes
+    source = "performance" if s.bass_performance_bytes else "clean"
+    assert raw is not None
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(raw))
+    spb = 60.0 / float(max(1, s.tempo))
+    notes: list[PluginNote] = []
+    for inst in pm.instruments:
+        for n in inst.notes:
+            notes.append(
+                PluginNote(
+                    pitch=int(n.pitch),
+                    velocity=int(n.velocity),
+                    start_beats=round(float(n.start) / spb, 6),
+                    dur_beats=round(max(0.01, float(n.end) - float(n.start)) / spb, 6),
+                )
+            )
+    notes.sort(key=lambda n: n.start_beats)
+    return PluginBassPart(
+        session_id=s.id,
+        tempo=int(s.tempo),
+        bar_count=int(s.bar_count),
+        source=source,
+        preview=s.bass_preview or "",
+        lock_to_groove=s.bass_lock_to_groove,
+        bass_style=s.bass_style,
+        notes=notes,
+    )
+
+
+class PluginRegenerateBody(BaseModel):
+    bass_style: str | None = Field(default=None)
+    lock_to_groove: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+@router.post("/regenerate", response_model=PluginBassPart)
+def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
+    s = _latest_bass_session()
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    if body.bass_style is not None:
+        s.bass_style = body.bass_style
+    if body.lock_to_groove is not None:
+        s.bass_lock_to_groove = float(body.lock_to_groove)
+    session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
+    return get_bass_part()

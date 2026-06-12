@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes.bridge_routes import router as bridge_router
+from app.routes.plugin_routes import router as plugin_router
 from app.routes.evaluation_routes import router as evaluation_router
 from app.routes.midi_routes import router as midi_router
 from app.routes.session_routes import router as session_router
@@ -38,6 +39,7 @@ app.include_router(setup_router, prefix="/api/setups")
 app.include_router(evaluation_router, prefix="/api/evaluations")
 app.include_router(midi_router, prefix="/api/midi")
 app.include_router(bridge_router, prefix="/api/bridge")
+app.include_router(plugin_router, prefix="/api/plugin")
 
 
 @app.get("/health")
