@@ -116,6 +116,7 @@ class StoredSession:
     bass_instrument: str = _DEFAULT_BASS_INSTRUMENT
     bass_player: str | None = None
     bass_engine: str = "baseline"
+    bass_lock_to_groove: float | None = None
     bass_seed: int | None = None
     drum_player: str | None = None
     chord_instrument: str = _DEFAULT_CHORD_INSTRUMENT
@@ -244,6 +245,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
+        bass_lock_to_groove=s.bass_lock_to_groove,
         bass_seed=s.bass_seed,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
@@ -355,6 +357,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_instrument=src.bass_instrument,
         bass_player=src.bass_player,
         bass_engine=src.bass_engine,
+        bass_lock_to_groove=src.bass_lock_to_groove,
         bass_seed=src.bass_seed,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
@@ -620,6 +623,9 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if body.bass_engine is not None:
         s.bass_engine = body.bass_engine.value
         parts.append("Bass engine updated")
+    if "bass_lock_to_groove" in body.model_dump(exclude_unset=True):
+        s.bass_lock_to_groove = body.bass_lock_to_groove
+        parts.append("Bass lock-to-groove updated")
     if "drum_player" in body.model_dump(exclude_unset=True):
         s.drum_player = body.drum_player.value if body.drum_player is not None else None
         parts.append("Drum player updated")
@@ -705,6 +711,7 @@ def _regenerate_lane_on_stored_session(
             bass_instrument=s.bass_instrument,
             bass_player=s.bass_player,
             bass_engine=s.bass_engine,
+            lock_to_groove=s.bass_lock_to_groove,
             chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
@@ -953,6 +960,7 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
+            lock_to_groove=s.bass_lock_to_groove,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=ctx,
@@ -997,6 +1005,7 @@ def _render_bass_take_with_seed(
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
+            lock_to_groove=s.bass_lock_to_groove,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=context,
@@ -1495,6 +1504,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 bass_instrument=s.bass_instrument,
                 bass_player=s.bass_player,
                 bass_engine=s.bass_engine,
+            lock_to_groove=s.bass_lock_to_groove,
                 chord_progression=s.chord_progression,
                 session_preset=s.session_preset,
                 context=ctx,

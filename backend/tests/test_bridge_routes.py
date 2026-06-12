@@ -191,7 +191,9 @@ def test_live_source_frames_update_phrase_v2_bass_conditioning(
     gen_res = client.post(f"/api/sessions/{sid}/regenerate-selected", json={"lanes": ["bass"]})
     assert gen_res.status_code == 200, gen_res.text
     bass_preview = gen_res.json()["lanes"]["bass"]["preview"]
-    assert "live source-groove conditioning" in bass_preview
+    # v0.3b: the preview now states the reference lock explicitly (and
+    # would honestly say "evidence too thin" if bridge confidence were low).
+    assert "locked to the reference groove" in bass_preview
 
 
 def test_harmonic_frames_update_source_analysis_and_phrase_v2_chambers(

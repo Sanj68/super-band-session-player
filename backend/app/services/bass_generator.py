@@ -1194,6 +1194,7 @@ def generate_bass(
     conditioning: UnifiedConditioning | None = None,
     seed: int | None = None,
     return_performance_notes: bool = False,
+    lock_to_groove: float | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
@@ -1211,7 +1212,9 @@ def generate_bass(
             conditioning=conditioning,
             seed=seed,
             return_performance_notes=return_performance_notes,
+            lock_to_groove=lock_to_groove,
         )
+    # v0.3b lands in phrase_v2 only (BUILD_NOTES §6: do not touch baseline).
 
     soul_preset = (session_preset or "").strip().lower() == "rare_groove_soul"
     player_key = normalize_bass_player(bass_player)

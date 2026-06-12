@@ -260,6 +260,15 @@ class SessionPatch(BaseModel):
         default=None,
         description="Bass generation engine mode (baseline or phrase_v2).",
     )
+    bass_lock_to_groove: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Reference lock-to-groove (phrase_v2): 0 loose pocket, 1 glued to the "
+            "reference kick. Send null to return to the engine default."
+        ),
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="When set, updates stored drum player profile (regenerate drums to apply). Send null to clear.",
@@ -354,6 +363,12 @@ class SessionCreate(BaseModel):
     bass_engine: BassEngine | None = Field(
         default=None,
         description="Bass engine mode; omit for baseline.",
+    )
+    bass_lock_to_groove: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Reference lock-to-groove (phrase_v2); omit for engine default.",
     )
     drum_player: DrumPlayer | None = Field(
         default=None,
@@ -601,6 +616,16 @@ class SessionState(BaseModel):
     bass_engine: str = Field(
         default="baseline",
         description="Active bass engine mode (baseline or phrase_v2).",
+    )
+    bass_lock_to_groove: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Reference lock-to-groove knob (phrase_v2 only): 0 = loose pocket, "
+            "1 = glued to the reference kick. None = engine default (0.5 when "
+            "reference evidence is strong)."
+        ),
     )
     bass_seed: int | None = Field(
         default=None,

@@ -14,6 +14,7 @@ from app.services.conditioning import (
     has_source_groove,
     source_kick_weight,
     source_slot_pressure,
+    source_snare_weight,
 )
 from app.services.bass_vocabulary.paul_chambers import (
     get_chromatic_approaches,
@@ -23,6 +24,7 @@ from app.services.bass_vocabulary.paul_chambers import (
 from app.services.session_context import (
     SessionAnchorContext,
     drum_kick_weight,
+    drum_snare_weight,
     slot_pressure,
 )
 from app.services.style_adapter import BASS_STYLE_ADAPTER
@@ -108,7 +110,7 @@ def _source_guided_slots(conditioning: UnifiedConditioning | None, bar: int) -> 
     return sorted(set(out))
 
 
-def _phrase_slots(role: str, kick_slots: list[int]) -> list[int]:
+def _phrase_slots(role: str, kick_slots: list[int], *, kick_take: int = 3, extra_hits: int = 0) -> list[int]:
     if role == "anchor":
         base = [0, 8]
     elif role == "push":
@@ -118,12 +120,80 @@ def _phrase_slots(role: str, kick_slots: list[int]) -> list[int]:
     else:  # answer
         base = [0, 7, 12]
     if kick_slots:
-        base.extend(kick_slots[:3])
+        base.extend(kick_slots[: max(0, int(kick_take))])
     out = sorted(set(x for x in base if 0 <= x <= 15))
     if 0 not in out:
         out.insert(0, 0)
-    max_hits = 4 if role in ("anchor", "release") else 5
+    max_hits = (4 if role in ("anchor", "release") else 5) + max(0, int(extra_hits))
     return out[:max_hits]
+
+
+# ---- v0.3b reference-aware groove (BUILD_NOTES §6) -------------------------
+
+# Evidence threshold below which we refuse to claim a reference lock —
+# the v0.3a validation pack's low-confidence gate (0.45), validated there:
+# wrong analyser answers self-report below it.
+_REFERENCE_EVIDENCE_THRESHOLD = 0.45
+
+
+def _resolve_reference_lock(
+    lock_to_groove: float | None,
+    conditioning: UnifiedConditioning | None,
+) -> tuple[float, str]:
+    """Resolve the lock-to-groove knob against available evidence.
+
+    Returns (lock, state) where state is one of:
+      "locked" — source groove present, evidence strong, lock > 0
+      "off"    — evidence fine but the user dialled lock to 0
+      "thin"   — source present but analysis confidence under the v0.3a
+                 gate: fall back to the standard pocket, claim nothing
+      "none"   — no reference source at all
+    """
+    if not has_source_groove(conditioning):
+        return 0.0, "none"
+    assert conditioning is not None
+    evidence = 0.5 * (
+        float(conditioning.tempo_confidence) + float(conditioning.beat_phase_confidence)
+    )
+    # Live bridge frames carry exact MIDI-derived groove with per-bar
+    # confidence but no audio-analysis tempo/phase confidence — accept
+    # whichever evidence channel is stronger.
+    rows = [float(x) for x in (conditioning.source_groove_confidence or ()) if float(x) > 0.0]
+    if rows:
+        evidence = max(evidence, sum(rows) / len(rows))
+    if evidence < _REFERENCE_EVIDENCE_THRESHOLD:
+        return 0.0, "thin"
+    lock = 0.5 if lock_to_groove is None else max(0.0, min(1.0, float(lock_to_groove)))
+    return lock, ("locked" if lock > 0.0 else "off")
+
+
+def _space_score(
+    context: SessionAnchorContext | None,
+    conditioning: UnifiedConditioning | None,
+    bar: int,
+    slot: int,
+) -> float | None:
+    """Per-slot space score: ``1 - snare - 0.5*pressure + kick`` (spec §6).
+
+    Pocket GATING, not mimicking: high score = room for the bass (kick
+    adjacency, no snare, low pressure). None when there is no rhythm
+    evidence at all.
+    """
+    if has_source_groove(conditioning):
+        return (
+            1.0
+            - source_snare_weight(conditioning, bar, slot)
+            - (0.5 * source_slot_pressure(conditioning, bar, slot))
+            + source_kick_weight(conditioning, bar, slot)
+        )
+    if context is not None and context.anchor_lane == "drums":
+        return (
+            1.0
+            - drum_snare_weight(context, bar, slot)
+            - (0.5 * slot_pressure(context, bar, slot))
+            + drum_kick_weight(context, bar, slot)
+        )
+    return None
 
 
 def _profile_float(profile: dict[str, Any], key: str, fallback: float) -> float:
@@ -285,6 +355,7 @@ def generate_bass_phrase_v2(
     conditioning: UnifiedConditioning | None = None,
     seed: int | None = None,
     return_performance_notes: bool = False,
+    lock_to_groove: float | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
@@ -480,6 +551,16 @@ def generate_bass_phrase_v2(
             return buf.getvalue(), preview, tuple(perf_notes)
         return buf.getvalue(), preview
 
+    # v0.3b: resolve the reference lock once for the whole part. lock drives
+    # kick gravitation, restraint, and pressure-aversion from ONE knob.
+    lock, lock_state = _resolve_reference_lock(lock_to_groove, conditioning)
+    # Precompute the harmonic plan so every bar can resolve INTO the next
+    # chord (spec: "resolve into the next chord, every bar").
+    harmonic_plan = [
+        _harmonic_bar_plan(b, key=key, scale=scale, context=context, conditioning=conditioning)
+        for b in range(max(1, bar_count))
+    ]
+
     for bar in range(max(1, bar_count)):
         role = _bar_role(bar, role_span)
         kick_slots = _kick_guided_slots(context, bar) if context is not None and context.anchor_lane == "drums" else []
@@ -488,28 +569,46 @@ def generate_bass_phrase_v2(
             kick_slots = live_slots
         elif live_slots:
             kick_slots = sorted(set(kick_slots).union(live_slots[:2]))
-        slots = _phrase_slots(role, kick_slots)
-        root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = _harmonic_bar_plan(
-            bar,
-            key=key,
-            scale=scale,
-            context=context,
-            conditioning=conditioning,
-        )
+        if lock_state == "locked":
+            # kick_lock_mult: higher lock pulls more kick-adjacent slots into
+            # the phrase (and allows one extra hit at full glue).
+            slots = _phrase_slots(
+                role,
+                kick_slots,
+                kick_take=3 + (1 if lock >= 0.7 else 0),
+                extra_hits=1 if lock >= 0.75 else 0,
+            )
+        else:
+            slots = _phrase_slots(role, kick_slots)
+        root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = harmonic_plan[bar]
+        next_root_pc = harmonic_plan[(bar + 1) % len(harmonic_plan)][0]
         bar_t0 = bar_anchor + bar * 4.0 * spb
         bar_t1 = bar_anchor + (bar + 1) * 4.0 * spb
 
         for slot in slots:
             live_pressure = source_slot_pressure(conditioning, bar, slot) if has_source_groove(conditioning) else 0.0
             live_kick = source_kick_weight(conditioning, bar, slot) if has_source_groove(conditioning) else 0.0
-            if context is not None:
-                pressure = slot_pressure(context, bar, slot)
-                kick = drum_kick_weight(context, bar, slot) if context.anchor_lane == "drums" else 0.0
-                # Rest-space rule: avoid busy non-kick slots.
-                if pressure > 0.72 and kick < 0.18 and slot % 4 != 0 and rng.random() < 0.45:
+            if lock_state == "locked" and slot != 0:
+                # Pocket gating via the one space score (spec §6): higher lock
+                # = stricter threshold (pressure-aversion) and firmer
+                # restraint. Only the ONE is never gated — a bassist keeps
+                # the one even in a crowded pocket; beats 2 and 4 are exactly
+                # where the snare needs breathing room.
+                space = _space_score(context, conditioning, bar, slot)
+                if space is not None:
+                    space_threshold = 0.42 + (0.28 * lock)
+                    restraint = 0.50 + (0.50 * lock)
+                    if space < space_threshold and rng.random() < restraint:
+                        continue
+            else:
+                if context is not None:
+                    pressure = slot_pressure(context, bar, slot)
+                    kick = drum_kick_weight(context, bar, slot) if context.anchor_lane == "drums" else 0.0
+                    # Rest-space rule: avoid busy non-kick slots.
+                    if pressure > 0.72 and kick < 0.18 and slot % 4 != 0 and rng.random() < 0.45:
+                        continue
+                if live_pressure > 0.78 and live_kick < 0.18 and slot % 4 != 0 and rng.random() < 0.35:
                     continue
-            if live_pressure > 0.78 and live_kick < 0.18 and slot % 4 != 0 and rng.random() < 0.35:
-                continue
             pitch = _pick_pitch(
                 slot,
                 role,
@@ -520,11 +619,32 @@ def generate_bass_phrase_v2(
                 conf=conf,
                 rng=rng,
             )
+            # Resolve into the next chord: in release/answer bars the final
+            # late-bar hit becomes a chromatic approach to the next bar's
+            # root (the paul_chambers vocabulary, reused — spec §6).
+            if (
+                role in ("release", "answer")
+                and slot == slots[-1]
+                and slot >= 10
+                and conf >= 0.3
+                and next_root_pc != root_pc
+            ):
+                next_root = _pc_to_bass_register(next_root_pc, octave=2, lo=30, hi=62)
+                while abs(next_root - pitch) > 7 and next_root + 12 <= 62:
+                    next_root += 12
+                while abs(next_root - pitch) > 7 and next_root - 12 >= 30:
+                    next_root -= 12
+                approaches = get_chromatic_approaches(pitch, next_root)
+                if approaches:
+                    pitch = int(approaches[-1])
             start = bar_t0 + slot * sixteenth
             if context is not None and context.anchor_lane == "drums":
                 start += sixteenth * 0.05 * drum_kick_weight(context, bar, slot)
             if live_kick > 0.0:
-                start += sixteenth * 0.035 * min(1.0, live_kick)
+                # timing glue scales with the lock (0.5 reproduces the
+                # previous fixed 0.035 nudge)
+                glue = (0.02 + (0.03 * lock)) if lock_state == "locked" else 0.035
+                start += sixteenth * glue * min(1.0, live_kick)
             start += rng.uniform(0.0, 0.008) * spb
             dur = sixteenth * (1.2 if slot % 4 == 0 else 0.85)
             if role == "release":
@@ -534,7 +654,10 @@ def generate_bass_phrase_v2(
                 continue
             vel = 92 if slot % 4 == 0 else 78
             if live_kick > 0.0:
-                vel += int(round(10.0 * min(1.0, live_kick)))
+                # kick accenting scales with the lock (0.5 reproduces the
+                # previous fixed +10)
+                accent = (6.0 + (8.0 * lock)) if lock_state == "locked" else 10.0
+                vel += int(round(accent * min(1.0, live_kick)))
             if role == "push":
                 vel += 4
             elif role == "release":
@@ -567,11 +690,21 @@ def generate_bass_phrase_v2(
     pm.instruments.append(inst)
     buf = io.BytesIO()
     pm.write(buf)
+    if lock_state == "locked":
+        groove_clause = f", locked to the reference groove (lock {lock:.2f})."
+    elif lock_state == "off":
+        groove_clause = ", reference groove available but lock dialled to 0."
+    elif lock_state == "thin":
+        # Confidence-gated honesty (spec §6): never claim a lock the
+        # analysis can't support.
+        groove_clause = ", standard pocket — reference evidence too thin to claim a groove lock."
+    else:
+        groove_clause = "."
     preview = (
         f"Bass [phrase_v2, {bi}, {style}{', ' + player if player else ''}]: "
         f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, {bar_count} bar(s), {tempo} BPM — "
         "kick-aware phrase roles, rest-space gating, bar-level harmonic targets"
-        + (", and live source-groove conditioning." if has_source_groove(conditioning) else ".")
+        + groove_clause
     )
     if return_performance_notes:
         perf_notes = list(
