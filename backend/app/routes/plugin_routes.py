@@ -51,6 +51,7 @@ class PluginBassPart(BaseModel):
     preview: str
     lock_to_groove: float | None
     bass_style: str
+    bass_player: str | None
     notes: list[PluginNote]
 
 
@@ -84,13 +85,36 @@ def get_bass_part() -> PluginBassPart:
         preview=s.bass_preview or "",
         lock_to_groove=s.bass_lock_to_groove,
         bass_style=s.bass_style,
+        bass_player=s.bass_player,
         notes=notes,
     )
 
 
 class PluginRegenerateBody(BaseModel):
     bass_style: str | None = Field(default=None)
+    bass_player: str | None = Field(
+        default=None,
+        description=(
+            "Player persona id (bootsy, marcus, pino, paul_chambers, "
+            "jaco_pastorius, james_jamerson) — the musical depth lives here. "
+            "Send 'none' to clear back to style-only generation."
+        ),
+    )
     lock_to_groove: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+# Persona -> engine routing. The two bass engines deliberately stay separate
+# (BUILD_NOTES §6: no consolidation before it's provably painful), but their
+# strengths differ: phrase_v2 carries the reference lock and the dedicated
+# pino/chambers paths; the baseline engine carries the rich
+# jamerson/jaco/bootsy/marcus vocabularies (measured 06-12: baseline
+# jamerson = 14 notes / 5 pitch classes / syncopated 16ths vs 11/3/straight
+# through phrase_v2's generic path — the "result is quite basic" report).
+_PHRASE_V2_PERSONAS = {None, "pino", "paul_chambers"}
+
+
+def _engine_for_player(player: str | None) -> str:
+    return "phrase_v2" if player in _PHRASE_V2_PERSONAS else "baseline"
 
 
 @router.post("/regenerate", response_model=PluginBassPart)
@@ -100,7 +124,10 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
     if body.bass_style is not None:
         s.bass_style = body.bass_style
+    if body.bass_player is not None:
+        s.bass_player = None if body.bass_player.strip().lower() in ("", "none") else body.bass_player
     if body.lock_to_groove is not None:
         s.bass_lock_to_groove = float(body.lock_to_groove)
+    s.bass_engine = _engine_for_player(s.bass_player)
     session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
     return get_bass_part()

@@ -74,3 +74,23 @@ def test_plugin_regenerate_applies_style_and_lock(client: TestClient) -> None:
     assert part["bass_style"] == "melodic"
     assert part["lock_to_groove"] == pytest.approx(0.9)
     assert len(part["notes"]) > 0
+
+
+def test_plugin_regenerate_routes_persona_to_strongest_engine(client: TestClient) -> None:
+    from app.routes import session_routes
+
+    sid = _create_session_with_bass(client)
+
+    res = client.post("/api/plugin/regenerate", json={"bass_player": "james_jamerson"})
+    assert res.status_code == 200, res.text
+    assert res.json()["bass_player"] == "james_jamerson"
+    assert session_routes._SESSIONS[sid].bass_engine == "baseline"
+
+    res = client.post("/api/plugin/regenerate", json={"bass_player": "pino"})
+    assert res.status_code == 200, res.text
+    assert session_routes._SESSIONS[sid].bass_engine == "phrase_v2"
+
+    res = client.post("/api/plugin/regenerate", json={"bass_player": "none"})
+    assert res.status_code == 200, res.text
+    assert res.json()["bass_player"] is None
+    assert session_routes._SESSIONS[sid].bass_engine == "phrase_v2"

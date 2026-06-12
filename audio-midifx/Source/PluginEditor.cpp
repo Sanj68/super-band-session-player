@@ -8,6 +8,11 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     styleAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor_.apvts, "style", styleBox_);
 
+    playerBox_.addItemList (SessionPlayerMidiFXProcessor::playerChoices, 1);
+    addAndMakeVisible (playerBox_);
+    playerAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+        processor_.apvts, "player", playerBox_);
+
     lockSlider_.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     lockSlider_.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
     addAndMakeVisible (lockSlider_);
@@ -55,6 +60,7 @@ void SessionPlayerMidiFXEditor::resized()
     auto row = area.removeFromTop (96);
     auto left = row.removeFromLeft (row.getWidth() / 2);
     styleBox_.setBounds (left.removeFromTop (28).reduced (4, 0));
+    playerBox_.setBounds (left.removeFromTop (28).reduced (4, 1));
     regenerateButton_.setBounds (left.removeFromTop (34).reduced (4, 3));
 
     lockLabel_.setBounds (row.removeFromTop (16));

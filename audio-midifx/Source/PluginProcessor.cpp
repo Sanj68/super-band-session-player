@@ -12,12 +12,21 @@ const juce::StringArray SessionPlayerMidiFXProcessor::styleChoices {
     "supportive", "melodic", "rhythmic", "slap", "fusion"
 };
 
+// The musical depth lives in the personas — expose them as first-class
+// (the v0.6 chassis shipped style-only and the result was "quite basic").
+const juce::StringArray SessionPlayerMidiFXProcessor::playerChoices {
+    "none", "james_jamerson", "pino", "bootsy", "marcus", "jaco_pastorius", "paul_chambers"
+};
+
 static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "style", 1 }, "Style",
         SessionPlayerMidiFXProcessor::styleChoices, 0));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "player", 1 }, "Player",
+        SessionPlayerMidiFXProcessor::playerChoices, 1)); // default: jamerson
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "lock", 1 }, "Lock to Groove",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
@@ -54,9 +63,11 @@ void SessionPlayerMidiFXProcessor::run()
         {
             setStatus ("regenerating...");
             auto* styleParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("style"));
+            auto* playerParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("player"));
             auto lockValue = apvts.getRawParameterValue ("lock")->load();
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
             body->setProperty ("bass_style", styleChoices[styleParam ? styleParam->getIndex() : 0]);
+            body->setProperty ("bass_player", playerChoices[playerParam ? playerParam->getIndex() : 0]);
             body->setProperty ("lock_to_groove", (double) lockValue);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
 

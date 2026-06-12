@@ -70,6 +70,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     static const juce::StringArray styleChoices;
+    static const juce::StringArray playerChoices;
 
 private:
     // polling thread

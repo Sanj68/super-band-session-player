@@ -21,12 +21,14 @@ private:
     SessionPlayerMidiFXProcessor& processor_;
 
     juce::ComboBox styleBox_;
+    juce::ComboBox playerBox_;
     juce::Slider lockSlider_;
     juce::Label lockLabel_;
     juce::TextButton regenerateButton_ { "Regenerate" };
     juce::Label statusLabel_;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> styleAttach_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playerAttach_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lockAttach_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SessionPlayerMidiFXEditor)
