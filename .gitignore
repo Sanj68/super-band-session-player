@@ -15,6 +15,7 @@ frontend/dist/
 
 # Local data / generated runs
 backend/data/bass_candidate_runs.json
+backend/data/sessions.json
 
 # OS / editor
 .DS_Store
