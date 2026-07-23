@@ -74,6 +74,59 @@ export default function UploadFirstEntryPanel({
     }
   };
 
+  const onCreateFromSource = async () => {
+    if (!selectedFile) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let activeSession = session;
+      if (!activeSession?.id) {
+        const created = await createSession({
+          tempo: 108,
+          key: "C",
+          scale: "major",
+          bar_count: 8,
+        });
+        activeSession = created.session;
+        setSession(activeSession);
+      }
+
+      activeSession = await uploadReferenceAudio(activeSession.id, selectedFile);
+      setSession(activeSession);
+      activeSession = await analyzeReferenceAudio(activeSession.id);
+      setSession(activeSession);
+      const detected = activeSession?.engine_data?.source_analysis;
+      if (!detected) throw new Error("Source analysis completed without a musical-context result.");
+
+      const tempoEstimate = Math.max(
+        40,
+        Math.min(240, Math.round(Number(detected.tempo_estimate_bpm) || 108)),
+      );
+      const keyGuess =
+        PC_TO_KEY[Math.max(0, Math.min(11, Number(detected.tonal_center_pc_guess) || 0))];
+      const scaleGuess = detected.scale_mode_guess || "major";
+      const barsGuess = Math.max(1, Math.min(128, detectedBarsFromSession(activeSession)));
+
+      await patchSession(activeSession.id, {
+        tempo: tempoEstimate,
+        key: keyGuess,
+        scale: scaleGuess,
+        bar_count: barsGuess,
+      });
+      const generated = await generateSession(activeSession.id);
+      setSession(generated.session);
+      setTempo(tempoEstimate);
+      setKeyNote(keyGuess);
+      setScale(scaleGuess);
+      setBars(barsGuess);
+      setStatus("Source understood. Musical context applied and takes generated.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onAnalyze = async () => {
     if (!session?.id || !session.reference_audio) return;
     setBusy(true);
@@ -128,9 +181,9 @@ export default function UploadFirstEntryPanel({
         background: "#f8fafc",
       }}
     >
-      <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Upload First Workflow</h2>
+      <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Give Session Player a Source</h2>
       <p style={{ margin: "0.35rem 0 0", fontSize: 13, color: "#475569" }}>
-        Start here: upload source audio, analyze context, then apply detected values and generate.
+        Choose audio and the player will analyse its musical context, build the session and create takes.
       </p>
       <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <input
@@ -139,16 +192,25 @@ export default function UploadFirstEntryPanel({
           disabled={busy}
           onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
         />
-        <button type="button" onClick={onUploadFirst} disabled={busy || !selectedFile}>
-          {session?.id ? "Upload Reference" : "Create Session + Upload"}
-        </button>
-        <button type="button" onClick={onAnalyze} disabled={busy || !session?.id || !session?.reference_audio}>
-          Analyze
-        </button>
-        <button type="button" onClick={onApplyAndGenerateFromReference} disabled={busy || !session?.id || !source}>
-          Apply + Generate From Reference
+        <button type="button" onClick={onCreateFromSource} disabled={busy || !selectedFile}>
+          {busy ? "Listening…" : "Create Takes From Source"}
         </button>
       </div>
+
+      <details style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
+        <summary style={{ cursor: "pointer" }}>Step-by-step controls</summary>
+        <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" onClick={onUploadFirst} disabled={busy || !selectedFile}>
+            {session?.id ? "Upload Only" : "Create Session + Upload"}
+          </button>
+          <button type="button" onClick={onAnalyze} disabled={busy || !session?.id || !session?.reference_audio}>
+            Analyse Only
+          </button>
+          <button type="button" onClick={onApplyAndGenerateFromReference} disabled={busy || !session?.id || !source}>
+            Apply Analysis + Generate
+          </button>
+        </div>
+      </details>
 
       <div style={{ marginTop: 10, display: "grid", gap: 4, fontSize: 13, color: "#334155" }}>
         <div>

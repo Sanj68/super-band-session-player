@@ -264,6 +264,85 @@ summary::-webkit-details-marker {
   margin-top: 0.75rem;
 }
 
+.sp-ai-read {
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.sp-ai-read.ready {
+  border-style: solid;
+  border-color: rgba(110, 231, 183, 0.25);
+  background: rgba(110, 231, 183, 0.035);
+}
+
+.sp-ai-read-item {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 0.7rem 0.8rem;
+  border-right: 1px solid var(--border);
+}
+
+.sp-ai-read-item:last-child {
+  border-right: 0;
+}
+
+.sp-ai-read-item span {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sp-ai-read-item strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.sp-ai-read-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  padding: 0.9rem;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.sp-correction {
+  margin-top: 0.65rem;
+}
+
+.sp-correction > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  width: fit-content;
+}
+
+.sp-correction > summary span {
+  color: var(--text-faint);
+  margin-left: 0.3rem;
+}
+
+.sp-correction-body {
+  margin-top: 0.65rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.sp-correction-note {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 0.4rem 0 0;
+}
+
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);

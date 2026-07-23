@@ -1219,119 +1219,157 @@ export default function App() {
           <section className="sp-panel">
             <div className="sp-panel-head">
               <span className="sp-step">Step 2</span>
-              <span className="sp-panel-title">Musical Setup</span>
+              <span className="sp-panel-title">AI Musical Read</span>
             </div>
             <p className="sp-panel-sub">
-              Tempo, key, scale, bars and chord progression for the active session.
+              Session Player works these values out from the source. Open the correction panel only if something sounds wrong.
             </p>
-            <div className="sp-grid">
-              <label className="sp-field">
-                Tempo
-                <input
-                  type="number"
-                  min={40}
-                  max={240}
-                  value={tempo}
-                  onChange={(e) =>
-                    setTempo(Math.max(40, Math.min(240, Number(e.target.value) || 0)))
-                  }
-                  disabled={busy}
-                />
-              </label>
-              <label className="sp-field">
-                Key
-                <select value={keyNote} onChange={(e) => setKeyNote(e.target.value)} disabled={busy}>
-                  {["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"].map((k) => (
-                    <option key={k} value={k}>
-                      {k}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="sp-field">
-                Scale
-                <select value={scale} onChange={(e) => setScale(e.target.value)} disabled={busy}>
-                  {[
-                    "major",
-                    "natural_minor",
-                    "harmonic_minor",
-                    "melodic_minor",
-                    "dorian",
-                    "mixolydian",
-                    "pentatonic_major",
-                    "pentatonic_minor",
-                    "blues",
-                  ].map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="sp-field">
-                Bars
-                <input
-                  type="number"
-                  min={1}
-                  max={128}
-                  value={bars}
-                  onChange={(e) =>
-                    setBars(Math.max(1, Math.min(128, Number(e.target.value) || 1)))
-                  }
-                  disabled={busy}
-                />
-              </label>
-            </div>
-            <label className="sp-field" style={{ marginTop: 10 }}>
-              Chord progression
-              <input
-                value={chordProgression}
-                onChange={(e) => setChordProgression(e.target.value)}
-                placeholder="F#m7 | F#m7 | F#m7 | F#m7"
-                disabled={busy}
-              />
-            </label>
-            <div className="sp-actions">
-              {session?.id ? (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    setError(null);
-                    try {
-                      const progression = parseChordProgressionInput(chordProgression);
-                      const payload = {
-                        tempo,
-                        key: keyNote,
-                        scale,
-                        bar_count: bars,
-                      };
-                      if (progression.length > 0) payload.chord_progression = progression;
-                      const updated = await patchSession(session.id, payload);
-                      setSession(updated);
-                      setStatus(updated.message ?? "Musical setup applied to session.");
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  Apply to Session
-                </button>
+            <div className={`sp-ai-read${session?.reference_audio?.analyzed ? " ready" : ""}`}>
+              {session?.reference_audio?.analyzed ? (
+                <>
+                  <div className="sp-ai-read-item">
+                    <span>Tempo</span>
+                    <strong>{tempo} BPM</strong>
+                  </div>
+                  <div className="sp-ai-read-item">
+                    <span>Key / scale</span>
+                    <strong>{keyNote} {scale.replaceAll("_", " ")}</strong>
+                  </div>
+                  <div className="sp-ai-read-item">
+                    <span>Length</span>
+                    <strong>{bars} bars</strong>
+                  </div>
+                  <div className="sp-ai-read-item">
+                    <span>Harmony</span>
+                    <strong>
+                      {session?.chord_progression?.length
+                        ? session.chord_progression.join(" · ")
+                        : "Follow source tonality"}
+                    </strong>
+                  </div>
+                </>
               ) : (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={onGenerate}
-                  disabled={busy}
-                >
-                  Create Session + Generate
-                </button>
+                <div className="sp-ai-read-empty">
+                  Upload a source above and Session Player will fill this in automatically.
+                </div>
               )}
             </div>
+            <details className="sp-correction">
+              <summary>Correct the AI <span>optional</span></summary>
+              <div className="sp-correction-body">
+                <div className="sp-grid">
+                  <label className="sp-field">
+                    Tempo
+                    <input
+                      type="number"
+                      min={40}
+                      max={240}
+                      value={tempo}
+                      onChange={(e) =>
+                        setTempo(Math.max(40, Math.min(240, Number(e.target.value) || 0)))
+                      }
+                      disabled={busy}
+                    />
+                  </label>
+                  <label className="sp-field">
+                    Key
+                    <select value={keyNote} onChange={(e) => setKeyNote(e.target.value)} disabled={busy}>
+                      {["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"].map((k) => (
+                        <option key={k} value={k}>
+                          {k}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="sp-field">
+                    Scale
+                    <select value={scale} onChange={(e) => setScale(e.target.value)} disabled={busy}>
+                      {[
+                        "major",
+                        "natural_minor",
+                        "harmonic_minor",
+                        "melodic_minor",
+                        "dorian",
+                        "mixolydian",
+                        "pentatonic_major",
+                        "pentatonic_minor",
+                        "blues",
+                      ].map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="sp-field">
+                    Bars
+                    <input
+                      type="number"
+                      min={1}
+                      max={128}
+                      value={bars}
+                      onChange={(e) =>
+                        setBars(Math.max(1, Math.min(128, Number(e.target.value) || 1)))
+                      }
+                      disabled={busy}
+                    />
+                  </label>
+                </div>
+                <label className="sp-field" style={{ marginTop: 10 }}>
+                  Chord progression
+                  <input
+                    value={chordProgression}
+                    onChange={(e) => setChordProgression(e.target.value)}
+                    placeholder="Optional — e.g. F#m7 | Dmaj7 | A | E"
+                    disabled={busy}
+                  />
+                </label>
+                <p className="sp-correction-note">
+                  Leave chords blank to let the player follow the detected key and scale.
+                </p>
+                <div className="sp-actions">
+                  {session?.id ? (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          const progression = parseChordProgressionInput(chordProgression);
+                          const payload = {
+                            tempo,
+                            key: keyNote,
+                            scale,
+                            bar_count: bars,
+                            chord_progression: progression.length > 0 ? progression : null,
+                          };
+                          const updated = await patchSession(session.id, payload);
+                          setSession(updated);
+                          setStatus(updated.message ?? "Musical correction applied.");
+                        } catch (e) {
+                          setError(e.message || String(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Apply Correction
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={onGenerate}
+                      disabled={busy}
+                    >
+                      Generate Without Source
+                    </button>
+                  )}
+                </div>
+              </div>
+            </details>
           </section>
 
           <section className="sp-panel">
@@ -1452,7 +1490,7 @@ export default function App() {
               />
             ) : (
               <p style={{ fontSize: 13, color: "var(--text-faint)", margin: 0 }}>
-                Upload a reference and apply detected context (or use Create Session + Generate above) to enable candidate generation.
+                Choose a source above and Session Player will analyse it and create candidates automatically.
               </p>
             )}
           </section>
