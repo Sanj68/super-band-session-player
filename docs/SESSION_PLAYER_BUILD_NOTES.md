@@ -192,7 +192,9 @@ count from the tracked beat train. The same bounce resolves to 87.598
 BPM / 16 bars. Trusted bar-count callers (validation and explicit
 session contexts) retain their duration anchor. Low-confidence key reads
 without filename metadata now pause for one confirmation/correction
-instead of silently generating in a possibly wrong key.
+instead of silently generating in a possibly wrong key. This gate is
+enforced by both the UI and generation API; a tentative session cannot
+bypass it by calling the candidate workflow directly.
 
 ## 6b. Product Surface — the plugin vision (Sanjeev, 2026-06-12)
 

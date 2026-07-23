@@ -665,6 +665,10 @@ class SessionState(BaseModel):
         default=None,
         description="Optional separate rhythm reference used for groove timing only.",
     )
+    harmony_confirmation_required: bool = Field(
+        default=False,
+        description="True when source key analysis is too uncertain to permit harmonic generation.",
+    )
     lanes: dict[str, LaneState]
     message: str | None = None
 

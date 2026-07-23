@@ -17,6 +17,37 @@ from app.services.midi_audition import FakeMidiBackend, MidiOutputInfo, RtMidiBa
 from app.services import bass_candidate_store
 
 
+def test_tentative_harmony_blocks_candidates_until_key_is_confirmed() -> None:
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 88, "key": "C", "scale": "major", "bar_count": 16},
+    )
+    session_id = created.json()["session"]["id"]
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    stored.harmony_confirmation_required = True
+
+    blocked = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 88},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["error"] == "harmony_confirmation_required"
+
+    tempo_only = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"tempo": 88, "bar_count": 16},
+    )
+    assert tempo_only.json()["harmony_confirmation_required"] is True
+
+    confirmed = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"key": "D", "scale": "natural_minor"},
+    )
+    assert confirmed.json()["harmony_confirmation_required"] is False
+
+
 def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> None:
     # Isolate candidate-run persistence for this test.
     bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]

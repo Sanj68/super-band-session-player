@@ -150,6 +150,7 @@ class StoredSession:
     groove_reference_audio_duration_seconds: float = 0.0
     groove_reference_audio_head_trim_seconds: float = 0.0
     groove_reference_analysis_override: object | None = None
+    harmony_confirmation_required: bool = False
     current_bass_candidate_run_id: str | None = None
     current_bass_candidate_take_id: str | None = None
 
@@ -279,6 +280,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         ),
         reference_audio=ref_audio,
         groove_reference_audio=groove_ref_audio,
+        harmony_confirmation_required=s.harmony_confirmation_required,
         lanes=_lane_states(s),
         message=message,
     )
@@ -289,6 +291,17 @@ def _get_session_or_404(session_id: str) -> StoredSession:
     if not s:
         raise HTTPException(status_code=404, detail={"error": "session_not_found", "id": session_id})
     return s
+
+
+def _require_confirmed_harmony(s: StoredSession) -> None:
+    if s.harmony_confirmation_required:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "harmony_confirmation_required",
+                "message": "Confirm or correct the tentative key and scale before generating harmonic parts.",
+            },
+        )
 
 
 def _copy_midi_bytes(data: bytes | None) -> bytes | None:
@@ -408,6 +421,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         groove_reference_audio_duration_seconds=src.groove_reference_audio_duration_seconds,
         groove_reference_audio_head_trim_seconds=src.groove_reference_audio_head_trim_seconds,
         groove_reference_analysis_override=src.groove_reference_analysis_override,
+        harmony_confirmation_required=src.harmony_confirmation_required,
         current_bass_candidate_run_id=src.current_bass_candidate_run_id,
         current_bass_candidate_take_id=src.current_bass_candidate_take_id,
     )
@@ -523,6 +537,7 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
     s.reference_audio_duration_seconds = 0.0
     s.reference_audio_head_trim_seconds = 0.0
     s.source_analysis_override = None
+    s.harmony_confirmation_required = True
     return _to_state(s, message="Reference audio uploaded. Call /analyze-audio to run DSP analysis.")
 
 
@@ -556,6 +571,11 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
             detail={"error": "audio_analysis_failed", "message": str(exc)},
         ) from exc
     s.source_analysis_override = result.source_analysis
+    filename_key = result.source_analysis.source_metadata.get("filename_hints", {}).get("key")
+    s.harmony_confirmation_required = (
+        not bool(filename_key)
+        and float(result.source_analysis.tonal_center_confidence) < 0.5
+    )
     s.reference_audio_duration_seconds = result.duration_seconds
     s.reference_audio_head_trim_seconds = result.head_trim_seconds
     return _to_state(s, message="Reference audio analyzed and source analysis updated.")
@@ -677,6 +697,8 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if body.scale is not None:
         s.scale = mt.describe_scale(body.scale)
         parts.append("Scale updated")
+    if body.key is not None or body.scale is not None:
+        s.harmony_confirmation_required = False
     if body.bar_count is not None:
         s.bar_count = int(body.bar_count)
         parts.append("Bar count updated")
@@ -757,6 +779,7 @@ def patch_lane_locks(session_id: str, body: LaneLocksPatch) -> SessionState:
 @router.post("/{session_id}/generate", response_model=GenerateResult)
 def generate_session(session_id: str) -> GenerateResult:
     s = _get_session_or_404(session_id)
+    _require_confirmed_harmony(s)
     _generate_all_lanes(s)
     return GenerateResult(session=_to_state(s, message="All lanes generated."))
 
@@ -1292,6 +1315,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     This does not replace the current stored bass lane; it returns candidate metadata only.
     """
     s = _get_session_or_404(session_id)
+    _require_confirmed_harmony(s)
     ctx = build_session_context(s)
     cond = _conditioning_for_generation(s, context=ctx)
     base_seed = int(body.seed) if body.seed is not None else _new_bass_seed()

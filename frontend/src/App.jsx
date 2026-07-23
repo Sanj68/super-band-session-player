@@ -1488,7 +1488,20 @@ export default function App() {
                 </button>
               </div>
             )}
-            {session ? (
+            {session?.harmony_confirmation_required ? (
+              <div
+                style={{
+                  padding: "0.75rem 0.9rem",
+                  border: "1px solid #f59e0b",
+                  borderRadius: 10,
+                  background: "#fffbeb",
+                  color: "#92400e",
+                  fontSize: 13,
+                }}
+              >
+                Key and scale are still tentative. Confirm or correct the AI Musical Read above before generating bass takes.
+              </div>
+            ) : session ? (
               <BassCandidatePanel
                 session={session}
                 setSession={setSession}
