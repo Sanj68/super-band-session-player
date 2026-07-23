@@ -269,6 +269,56 @@ def test_harmonic_frames_update_source_analysis_and_phrase_v2_chambers(
     assert "live harmonic context" in bass_preview
 
 
+def test_listener_au_batch_contract_reaches_harmonic_conditioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Listener AU posts an array using the backend's exact field names."""
+
+    _enable(monkeypatch)
+    client = TestClient(app)
+    sid = _create_phrase_session(client)
+    chroma = [0.02] * 12
+    chroma[2] = 0.72
+    chroma[5] = 0.11
+    chroma[9] = 0.13
+    listener_batch = [
+        {
+            "plugin_instance_id": "logic-harmonic-au-contract",
+            "session_id": sid,
+            "source_id": "session-player-listener",
+            "sample_rate": 48000.0,
+            "host_tempo": 126.0,
+            "tempo_bpm": 126.0,
+            "tempo_confidence": 1.0,
+            "playing": True,
+            "ppq_position": 0.0,
+            "bar_index": 0,
+            "frame_start_seconds": 0.0,
+            "duration_seconds": 0.170667,
+            "chroma": chroma,
+            "key_pc": 2,
+            "key": "D",
+            "scale": "minor",
+            "key_confidence": 0.81,
+            "scale_confidence": 0.77,
+            "cadence": "tonic",
+            "cadence_confidence": 0.6,
+        }
+    ]
+
+    bridge_res = client.post("/api/bridge/harmonic", json=listener_batch)
+
+    assert bridge_res.status_code == 200, bridge_res.text
+    assert bridge_res.json()["accepted"] == 1
+    assert bridge_res.json()["live_harmonic_bar_count"] == 1
+    stored = session_routes._SESSIONS[sid]  # type: ignore[attr-defined]
+    assert stored.key == "D"
+    assert stored.scale == "minor"
+    assert stored.source_analysis_override.source_metadata["live_harmonic_source_tag"] == (
+        "logic_au_harmonic_listener"
+    )
+
+
 def test_commit_source_groove_updates_session_override_and_visible_to_conditioning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

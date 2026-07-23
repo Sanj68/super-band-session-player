@@ -12,12 +12,22 @@ namespace session_player
 
 struct HarmonicFrame
 {
-    juce::String key = "C";
-    juce::String scale = "major";
-    juce::String cadence = "unknown";
-    std::array<float, 12> chroma {};
+    double sampleRate = 44100.0;
     double tempo = 120.0;
+    double tempoConfidence = 0.0;
+    double ppqPosition = -1.0;
+    double frameStartSeconds = 0.0;
+    double durationSeconds = 0.125;
+    juce::String key = "C";
+    int keyPc = 0;
+    float keyConfidence = 0.0f;
+    juce::String scale = "major";
+    float scaleConfidence = 0.0f;
+    juce::String cadence = "unknown";
+    float cadenceConfidence = 0.0f;
+    std::array<float, 12> chroma {};
     int barIndex = 0;
+    bool playing = false;
     juce::String sessionId;
 };
 
@@ -38,11 +48,14 @@ private:
     static juce::String getEnvironment(const char* name);
     static juce::String getSessionId();
     static juce::String jsonEscape(const juce::String& text);
-    static juce::String frameToJson(const HarmonicFrame& frame);
+    static juce::String frameToJson(
+        const HarmonicFrame& frame,
+        const juce::String& pluginInstanceId);
     static bool postJson(const juce::String& url, const juce::String& body);
 
     juce::AbstractFifo fifo { 64 };
     std::array<HarmonicFrame, 64> frames {};
+    juce::String pluginInstanceId;
     std::atomic<bool> running { false };
     std::atomic<bool> connected { false };
 };

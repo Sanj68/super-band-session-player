@@ -75,7 +75,8 @@ int strongestPitchClass(const std::array<float, 12>& chroma)
 } // namespace
 
 HarmonicBridgeClient::HarmonicBridgeClient()
-    : Thread("Session Player Harmonic Client")
+    : Thread("Session Player Harmonic Client"),
+      pluginInstanceId("logic-harmonic-au-" + juce::Uuid().toString())
 {
 }
 
@@ -132,16 +133,24 @@ void HarmonicBridgeClient::run()
 
         if (! batch.empty())
         {
-            bool lastPostConnected = false;
+            juce::String body("[");
+            size_t readyCount = 0;
             for (auto& frame : batch)
             {
                 if (frame.sessionId.isEmpty())
                     frame.sessionId = getSessionId();
 
-                lastPostConnected = postJson(harmonicEndpoint, frameToJson(frame));
-            }
+                if (frame.sessionId.isEmpty())
+                    continue;
 
-            connected.store(lastPostConnected);
+                if (readyCount != 0)
+                    body += ",";
+                body += frameToJson(frame, pluginInstanceId);
+                ++readyCount;
+            }
+            body += "]";
+
+            connected.store(readyCount > 0 && postJson(harmonicEndpoint, body));
         }
 
         wait(50);
@@ -181,7 +190,9 @@ juce::String HarmonicBridgeClient::jsonEscape(const juce::String& text)
     return escaped;
 }
 
-juce::String HarmonicBridgeClient::frameToJson(const HarmonicFrame& frame)
+juce::String HarmonicBridgeClient::frameToJson(
+    const HarmonicFrame& frame,
+    const juce::String& pluginId)
 {
     juce::String chroma("[");
     for (size_t i = 0; i < frame.chroma.size(); ++i)
@@ -192,15 +203,31 @@ juce::String HarmonicBridgeClient::frameToJson(const HarmonicFrame& frame)
     }
     chroma += "]";
 
-    return juce::String("{")
+    auto json = juce::String("{")
+        + "\"plugin_instance_id\":\"" + jsonEscape(pluginId) + "\","
+        + "\"session_id\":\"" + jsonEscape(frame.sessionId) + "\","
+        + "\"source_id\":\"session-player-listener\","
+        + "\"sample_rate\":" + juce::String(frame.sampleRate, 1) + ","
+        + "\"host_tempo\":" + juce::String(frame.tempo, 3) + ","
+        + "\"tempo_bpm\":" + juce::String(frame.tempo, 3) + ","
+        + "\"tempo_confidence\":" + juce::String(frame.tempoConfidence, 4) + ","
+        + "\"playing\":" + (frame.playing ? "true" : "false") + ","
+        + "\"bar_index\":" + juce::String(frame.barIndex) + ","
+        + "\"frame_start_seconds\":" + juce::String(frame.frameStartSeconds, 6) + ","
+        + "\"duration_seconds\":" + juce::String(frame.durationSeconds, 6) + ","
+        + "\"chroma\":" + chroma + ","
+        + "\"key_pc\":" + juce::String(frame.keyPc) + ","
         + "\"key\":\"" + jsonEscape(frame.key) + "\","
         + "\"scale\":\"" + jsonEscape(frame.scale) + "\","
+        + "\"key_confidence\":" + juce::String(frame.keyConfidence, 4) + ","
+        + "\"scale_confidence\":" + juce::String(frame.scaleConfidence, 4) + ","
         + "\"cadence\":\"" + jsonEscape(frame.cadence) + "\","
-        + "\"chroma_vector\":" + chroma + ","
-        + "\"tempo\":" + juce::String(frame.tempo, 3) + ","
-        + "\"bar_index\":" + juce::String(frame.barIndex) + ","
-        + "\"session_id\":\"" + jsonEscape(frame.sessionId) + "\""
-        + "}";
+        + "\"cadence_confidence\":" + juce::String(frame.cadenceConfidence, 4);
+
+    if (frame.ppqPosition >= 0.0)
+        json += ",\"ppq_position\":" + juce::String(frame.ppqPosition, 6);
+
+    return json + "}";
 }
 
 bool HarmonicBridgeClient::postJson(const juce::String& url, const juce::String& body)
@@ -404,6 +431,17 @@ void SessionPlayerListenerAudioProcessor::maybeEmitBarFrame(const juce::AudioPla
         return;
 
     auto frame = analyseCurrentWindow(tempo, barIndex);
+    frame.sampleRate = currentSampleRate;
+    frame.tempoConfidence = position.getBpm().hasValue() ? 1.0 : 0.25;
+    frame.playing = position.getIsPlaying();
+    frame.frameStartSeconds = juce::jmax(
+        0.0,
+        (processedSamples - static_cast<double>(validSamples)) / currentSampleRate);
+    frame.durationSeconds = juce::jmax(
+        0.001,
+        static_cast<double>(validSamples) / currentSampleRate);
+    if (auto ppq = position.getPpqPosition(); ppq.hasValue())
+        frame.ppqPosition = *ppq;
     bridgeClient.pushFrame(frame);
 
     {
@@ -449,8 +487,13 @@ HarmonicFrame SessionPlayerListenerAudioProcessor::analyseCurrentWindow(double t
 
     HarmonicFrame frame;
     frame.key = noteNames[static_cast<size_t>(bestTonic)];
+    frame.keyPc = bestTonic;
+    frame.keyConfidence = static_cast<float>(juce::jlimit(0.0, 1.0, bestScore));
     frame.scale = bestScale;
+    frame.scaleConfidence = frame.keyConfidence;
     frame.cadence = onsetStrength < 0.015 ? "sustained" : cadenceFromChroma(chroma, bestTonic);
+    frame.cadenceConfidence = static_cast<float>(
+        juce::jlimit(0.0, 1.0, onsetStrength < 0.015 ? 0.25 : onsetStrength * 4.0));
     frame.chroma = chroma;
     frame.tempo = tempo;
     frame.barIndex = barIndex;
