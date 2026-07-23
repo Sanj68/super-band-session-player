@@ -73,10 +73,10 @@ def _assert_loop_boundary(
     final_bar_notes = [n for n in notes if last_bar_origin - 1e-6 <= float(n.start) < loop_end]
     assert final_bar_notes, f"{label}: final bar empty"
 
-    # Loop length: the latest note end is within 1 sixteenth of loop_end.
+    # Loop length: the final release defines the exact declared boundary.
     latest_end = max(float(n.end) for n in notes)
-    assert abs(latest_end - loop_end) <= sixteenth + 1e-3, (
-        f"{label}: latest note end {latest_end:.6f} not within sixteenth ({sixteenth:.6f}) of loop_end {loop_end:.6f}"
+    assert latest_end == pytest.approx(loop_end, abs=1e-3), (
+        f"{label}: latest note end {latest_end:.6f} does not match loop end {loop_end:.6f}"
     )
 
 
@@ -144,8 +144,32 @@ def test_normalize_lane_notes_preserves_loop_length_and_resolves_tail() -> None:
     final_bar_notes = [n for n in out if n.start >= last_bar_origin - 1e-6]
     assert final_bar_notes
     latest_end = max(float(n.end) for n in out)
-    assert latest_end <= loop_end - 1e-5
-    assert latest_end >= loop_end - sixteenth - 1e-3
+    assert latest_end == pytest.approx(loop_end, abs=1e-6)
+
+
+def test_normalize_lane_notes_is_monophonic_and_removes_micro_retriggers() -> None:
+    tempo = 88
+    bar_count = 1
+    notes = [
+        LaneNote(pitch=38, start=0.0, end=0.012, velocity=94),
+        LaneNote(pitch=38, start=0.010, end=0.32, velocity=82),
+        LaneNote(pitch=41, start=0.30, end=0.72, velocity=86),
+        LaneNote(pitch=43, start=0.70, end=1.10, velocity=80),
+    ]
+
+    out = normalize_bass_lane_notes(
+        notes,
+        tempo=tempo,
+        bar_count=bar_count,
+        harmonic_root_pc=2,
+    )
+
+    assert len(out) == 3
+    assert out[0].pitch == 38
+    assert out[0].velocity == 94
+    assert all(float(note.end) - float(note.start) >= 0.025 for note in out)
+    assert all(float(left.end) <= float(right.start) for left, right in zip(out, out[1:]))
+    assert out[-1].end == pytest.approx(4.0 * 60.0 / tempo, abs=1e-6)
 
 
 def test_normalize_bytes_clamps_overshoot_and_negative() -> None:

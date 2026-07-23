@@ -322,7 +322,7 @@ def _bass_normalization_root_pc(s: "StoredSession") -> int | None:
                 return int(chords[0].root_pc) % 12
         except (ValueError, AttributeError):
             return None
-    return None
+    return int(mt.key_root_pc(s.key)) % 12
 
 
 def _normalize_bass_bytes_for_session(
@@ -1262,7 +1262,8 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
         context=ctx,
         seed=base_seed,
     ):
-        notes = list(vocab.notes)
+        vocab_bytes = _normalize_bass_bytes_for_session(vocab.midi_bytes, s)
+        notes = extract_lane_notes(vocab_bytes)
         quality = analyze_bass_take(
             notes,
             tempo=cond.tempo if cond is not None else s.tempo,
@@ -1279,7 +1280,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             take_id=take_id,
             seed=vocab.seed,
             note_count=len(notes),
-            byte_length=len(vocab.midi_bytes),
+            byte_length=len(vocab_bytes),
             preview=vocab.preview,
             label=vocab.label,
             template_id=vocab.template_id,
@@ -1291,7 +1292,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             "take_id": take_id,
             "seed": vocab.seed,
             "note_count": len(notes),
-            "byte_length": len(vocab.midi_bytes),
+            "byte_length": len(vocab_bytes),
             "preview": vocab.preview,
             "label": vocab.label,
             "template_id": vocab.template_id,
@@ -1299,7 +1300,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             "quality_scores": quality.scores,
             "quality_reason": quality.reason,
             "motif_family": family,
-            "midi_b64": base64.b64encode(vocab.midi_bytes).decode("ascii"),
+            "midi_b64": base64.b64encode(vocab_bytes).decode("ascii"),
         }
         vocabulary_pool.append((quality.total, quality.signature, family, take, row))
 

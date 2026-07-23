@@ -22,6 +22,10 @@ _DEFAULT_BASS_PROGRAM = 33  # GM Electric Bass (finger)
 _BASS_LO = 30
 _BASS_HI = 54
 _FIRST_NOTE_TOLERANCE_SLOTS = 0.25  # below this, treat first note as already at slot 0
+_MONOPHONIC_GAP_SECONDS = 1e-4
+_MIN_NOTE_SECONDS = 0.025
+_MIN_NOTE_SIXTEENTH_FRACTION = 0.25
+_MAX_MIN_NOTE_SECONDS = 0.045
 
 
 def _root_midi_in_bass_register(root_pc: int, *, lo: int = _BASS_LO, hi: int = _BASS_HI) -> int:
@@ -58,13 +62,18 @@ def normalize_bass_lane_notes(
     bar_len = 4.0 * spb
     bars = max(1, int(bar_count))
     loop_end = float(bars) * bar_len
-    cap = max(1e-4, loop_end - 1e-4)
+    end_cap = loop_end
+    start_cap = max(1e-4, loop_end - 1e-4)
+    min_note_duration = max(
+        _MIN_NOTE_SECONDS,
+        min(_MAX_MIN_NOTE_SECONDS, sixteenth * _MIN_NOTE_SIXTEENTH_FRACTION),
+    )
 
     if not incoming:
         if allow_delayed_entry:
             return []
         pitch = _root_midi_in_bass_register(int(harmonic_root_pc) if harmonic_root_pc is not None else 0)
-        return [LaneNote(pitch=pitch, start=0.0, end=min(cap, sixteenth * 4.0), velocity=92)]
+        return [LaneNote(pitch=pitch, start=0.0, end=min(end_cap, sixteenth * 4.0), velocity=92)]
 
     sorted_notes = sorted(incoming, key=lambda n: (float(n.start), int(n.pitch)))
     min_start = float(sorted_notes[0].start)
@@ -79,10 +88,14 @@ def normalize_bass_lane_notes(
             s = 0.0
         if s >= loop_end - 1e-6:
             continue
-        if e > cap:
-            e = cap
+        if e > end_cap:
+            e = end_cap
         if e <= s:
-            e = min(cap, s + sixteenth * 0.5)
+            e = min(end_cap, s + max(min_note_duration, sixteenth * 0.5))
+        if e - s < min_note_duration:
+            e = min(end_cap, s + min_note_duration)
+        if e - s < min_note_duration - 1e-9:
+            continue
         out.append(
             LaneNote(
                 pitch=int(n.pitch),
@@ -96,7 +109,7 @@ def normalize_bass_lane_notes(
         if allow_delayed_entry:
             return []
         pitch = _root_midi_in_bass_register(int(harmonic_root_pc) if harmonic_root_pc is not None else 0)
-        return [LaneNote(pitch=pitch, start=0.0, end=min(cap, sixteenth * 4.0), velocity=92)]
+        return [LaneNote(pitch=pitch, start=0.0, end=min(end_cap, sixteenth * 4.0), velocity=92)]
 
     out.sort(key=lambda n: (float(n.start), int(n.pitch)))
 
@@ -109,7 +122,7 @@ def normalize_bass_lane_notes(
                 if harmonic_root_pc is not None
                 else int(first.pitch)
             )
-            anchor_end = min(cap, max(sixteenth * 0.5, float(first.start) - 1e-4))
+            anchor_end = min(end_cap, max(sixteenth * 0.5, float(first.start) - 1e-4))
             out.insert(
                 0,
                 LaneNote(
@@ -135,21 +148,10 @@ def normalize_bass_lane_notes(
             LaneNote(
                 pitch=int(pitch),
                 start=float(target_start),
-                end=float(min(cap, target_start + sixteenth * 2.0)),
+                end=float(min(end_cap, target_start + sixteenth * 2.0)),
                 velocity=86,
             )
         )
-    else:
-        latest_idx = max(range(len(out)), key=lambda i: (float(out[i].end), float(out[i].start))) if out else -1
-        if latest_idx >= 0:
-            latest = out[latest_idx]
-            if last_bar_origin - 1e-6 <= float(latest.start) < loop_end and float(latest.end) < loop_end - sixteenth * 1.0:
-                out[latest_idx] = LaneNote(
-                    pitch=int(latest.pitch),
-                    start=float(latest.start),
-                    end=float(cap),
-                    velocity=int(latest.velocity),
-                )
 
     out.sort(key=lambda n: (float(n.start), int(n.pitch)))
     deduped: list[LaneNote] = []
@@ -170,7 +172,67 @@ def normalize_bass_lane_notes(
             continue
         deduped.append(n)
 
-    return deduped
+    monophonic: list[LaneNote] = []
+    for n in deduped:
+        current = LaneNote(
+            pitch=int(n.pitch),
+            start=float(n.start),
+            end=float(min(end_cap, max(float(n.end), float(n.start) + min_note_duration))),
+            velocity=int(n.velocity),
+        )
+        if float(current.end) - float(current.start) < min_note_duration - 1e-9:
+            continue
+
+        merged_with_previous = False
+        while monophonic:
+            previous = monophonic[-1]
+            onset_gap = float(current.start) - float(previous.start)
+            if int(current.pitch) == int(previous.pitch) and onset_gap < min_note_duration:
+                monophonic[-1] = LaneNote(
+                    pitch=int(previous.pitch),
+                    start=float(previous.start),
+                    end=float(min(end_cap, max(float(previous.end), float(current.end)))),
+                    velocity=max(int(previous.velocity), int(current.velocity)),
+                )
+                merged_with_previous = True
+                break
+
+            if float(previous.end) <= float(current.start) - _MONOPHONIC_GAP_SECONDS:
+                break
+            trimmed_end = float(current.start) - _MONOPHONIC_GAP_SECONDS
+            if trimmed_end - float(previous.start) >= min_note_duration:
+                monophonic[-1] = LaneNote(
+                    pitch=int(previous.pitch),
+                    start=float(previous.start),
+                    end=float(trimmed_end),
+                    velocity=int(previous.velocity),
+                )
+                break
+            monophonic.pop()
+
+        if merged_with_previous:
+            continue
+        monophonic.append(current)
+
+    if not monophonic:
+        if allow_delayed_entry:
+            return []
+        pitch = _root_midi_in_bass_register(int(harmonic_root_pc) if harmonic_root_pc is not None else 0)
+        return [LaneNote(pitch=pitch, start=0.0, end=min(end_cap, sixteenth * 4.0), velocity=92)]
+
+    # Make the file itself exactly loop-length without adding a dummy event:
+    # the final playable note releases on the boundary.
+    final_idx = max(range(len(monophonic)), key=lambda i: float(monophonic[i].start))
+    final_note = monophonic[final_idx]
+    if last_bar_origin - 1e-6 <= float(final_note.start) < start_cap:
+        monophonic[final_idx] = LaneNote(
+            pitch=int(final_note.pitch),
+            start=float(final_note.start),
+            end=float(end_cap),
+            velocity=int(final_note.velocity),
+        )
+
+    return sorted(monophonic, key=lambda n: (float(n.start), int(n.pitch)))
 
 
 def normalize_bass_loop_bytes(
