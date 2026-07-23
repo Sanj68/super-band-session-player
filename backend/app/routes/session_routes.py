@@ -54,6 +54,7 @@ from app.services.lead_generator import normalize_lead_style
 from app.services.midi_export import lane_midi_response, merge_lane_midis, zip_all_lanes
 from app.services.midi_audition import MidiOutputUnavailable
 from app.services.source_analysis import build_groove_profile, build_harmony_plan, build_source_analysis
+from app.services.source_analysis_fusion import fuse_source_and_groove
 from app.services.session_context import SessionAnchorContext, build_session_context, normalize_anchor_lane
 from app.utils import music_theory as mt
 
@@ -143,6 +144,12 @@ class StoredSession:
     reference_audio_duration_seconds: float = 0.0
     reference_audio_head_trim_seconds: float = 0.0
     source_analysis_override: object | None = None
+    groove_reference_audio_path: str | None = None
+    groove_reference_audio_filename: str | None = None
+    groove_reference_audio_uploaded_at: str | None = None
+    groove_reference_audio_duration_seconds: float = 0.0
+    groove_reference_audio_head_trim_seconds: float = 0.0
+    groove_reference_analysis_override: object | None = None
     current_bass_candidate_run_id: str | None = None
     current_bass_candidate_take_id: str | None = None
 
@@ -209,7 +216,8 @@ def _lane_states(s: StoredSession) -> dict[str, LaneState]:
 
 def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
     ctx = build_session_context(s)
-    src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
+    musical_src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
+    src = fuse_source_and_groove(musical_src, s.groove_reference_analysis_override)
     groove = build_groove_profile(src, context=ctx)
     harmony = build_harmony_plan(s, src)
     _conditioning = build_unified_conditioning(
@@ -228,6 +236,15 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
             duration_seconds=float(max(0.0, s.reference_audio_duration_seconds)),
             head_trim_seconds=float(max(0.0, s.reference_audio_head_trim_seconds)),
             analyzed=s.source_analysis_override is not None,
+        )
+    groove_ref_audio: ReferenceAudioState | None = None
+    if s.groove_reference_audio_path and s.groove_reference_audio_filename:
+        groove_ref_audio = ReferenceAudioState(
+            filename=s.groove_reference_audio_filename,
+            stored_path=s.groove_reference_audio_path,
+            duration_seconds=float(max(0.0, s.groove_reference_audio_duration_seconds)),
+            head_trim_seconds=float(max(0.0, s.groove_reference_audio_head_trim_seconds)),
+            analyzed=s.groove_reference_analysis_override is not None,
         )
     return SessionState(
         id=s.id,
@@ -261,6 +278,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
             harmony_plan=harmony,
         ),
         reference_audio=ref_audio,
+        groove_reference_audio=groove_ref_audio,
         lanes=_lane_states(s),
         message=message,
     )
@@ -384,6 +402,12 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         reference_audio_duration_seconds=src.reference_audio_duration_seconds,
         reference_audio_head_trim_seconds=src.reference_audio_head_trim_seconds,
         source_analysis_override=src.source_analysis_override,
+        groove_reference_audio_path=src.groove_reference_audio_path,
+        groove_reference_audio_filename=src.groove_reference_audio_filename,
+        groove_reference_audio_uploaded_at=src.groove_reference_audio_uploaded_at,
+        groove_reference_audio_duration_seconds=src.groove_reference_audio_duration_seconds,
+        groove_reference_audio_head_trim_seconds=src.groove_reference_audio_head_trim_seconds,
+        groove_reference_analysis_override=src.groove_reference_analysis_override,
         current_bass_candidate_run_id=src.current_bass_candidate_run_id,
         current_bass_candidate_take_id=src.current_bass_candidate_take_id,
     )
@@ -534,6 +558,75 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
     s.reference_audio_duration_seconds = result.duration_seconds
     s.reference_audio_head_trim_seconds = result.head_trim_seconds
     return _to_state(s, message="Reference audio analyzed and source analysis updated.")
+
+
+@router.post("/{session_id}/groove-reference-audio", response_model=SessionState)
+async def upload_groove_reference_audio(session_id: str, file: UploadFile = File(...)) -> SessionState:
+    s = _get_session_or_404(session_id)
+    filename = _safe_filename(file.filename or "")
+    ext = _reference_audio_ext(filename)
+    if not ext:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_audio_format",
+                "message": f"Supported formats: {', '.join(sorted(_ALLOWED_REFERENCE_EXTS))}",
+            },
+        )
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail={"error": "empty_upload", "message": "Uploaded file is empty."})
+    if len(payload) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail={"error": "file_too_large", "message": "Max upload size is 25MB."})
+
+    target_dir = _REFERENCE_AUDIO_ROOT / s.id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    blob_name = f"groove_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+    target = target_dir / blob_name
+    target.write_bytes(payload)
+    s.groove_reference_audio_path = str(target)
+    s.groove_reference_audio_filename = filename
+    s.groove_reference_audio_uploaded_at = datetime.now(timezone.utc).isoformat()
+    s.groove_reference_audio_duration_seconds = 0.0
+    s.groove_reference_audio_head_trim_seconds = 0.0
+    s.groove_reference_analysis_override = None
+    return _to_state(s, message="Groove reference uploaded. Analyse it to extract kick, snare and pocket.")
+
+
+@router.post("/{session_id}/analyze-groove-reference", response_model=SessionState)
+def analyze_groove_reference_for_session(session_id: str) -> SessionState:
+    s = _get_session_or_404(session_id)
+    if not s.groove_reference_audio_path:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "groove_reference_missing", "message": "Upload a groove reference first."},
+        )
+    audio_path = Path(s.groove_reference_audio_path)
+    if not audio_path.is_file():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "groove_reference_not_found", "message": "Stored groove reference is missing."},
+        )
+    try:
+        result = analyze_reference_audio(
+            audio_path=audio_path,
+            session_tempo=s.tempo,
+            bar_count=s.bar_count,
+            session_key=s.key,
+            session_scale=s.scale,
+            source_filename=s.groove_reference_audio_filename,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "groove_analysis_failed", "message": str(exc)},
+        ) from exc
+    s.groove_reference_analysis_override = result.source_analysis.model_copy(
+        update={"source_lane": "groove_reference_audio"}
+    )
+    s.groove_reference_audio_duration_seconds = result.duration_seconds
+    s.groove_reference_audio_head_trim_seconds = result.head_trim_seconds
+    return _to_state(s, message="Groove reference analysed. Bass can now follow its pocket.")
 
 
 @router.get("/{session_id}/reference-audio")
@@ -772,7 +865,8 @@ def _conditioning_for_generation(
     context: object | None,
 ) -> UnifiedConditioning | None:
     ctx = context if isinstance(context, SessionAnchorContext) else build_session_context(s)
-    src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
+    musical_src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
+    src = fuse_source_and_groove(musical_src, s.groove_reference_analysis_override)
     groove = build_groove_profile(src, context=ctx)
     harmony = build_harmony_plan(s, src)
     return build_unified_conditioning(

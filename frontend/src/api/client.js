@@ -54,6 +54,25 @@ export async function analyzeReferenceAudio(sessionId) {
   return res.json();
 }
 
+export async function uploadGrooveReferenceAudio(sessionId, file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/groove-reference-audio`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function analyzeGrooveReferenceAudio(sessionId) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/analyze-groove-reference`, {
+    method: "POST",
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
 export function referenceAudioUrl(sessionId) {
   return `${API_BASE}/api/sessions/${sessionId}/reference-audio`;
 }

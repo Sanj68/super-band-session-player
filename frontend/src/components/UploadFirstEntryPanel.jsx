@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
 import {
   analyzeReferenceAudio,
+  analyzeGrooveReferenceAudio,
   createSession,
   generateSession,
   patchSession,
+  regenerateLane,
   uploadReferenceAudio,
+  uploadGrooveReferenceAudio,
 } from "../api/client.js";
 import { getSourceGrooveSummary } from "../utils/sourceGroove.js";
 
@@ -38,8 +41,10 @@ export default function UploadFirstEntryPanel({
   setBars,
 }) {
   const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedGrooveFile, setSelectedGrooveFile] = useState(null);
   const source = session?.engine_data?.source_analysis ?? null;
   const refAudio = session?.reference_audio ?? null;
+  const grooveRefAudio = session?.groove_reference_audio ?? null;
   const grooveSummary = session && source ? getSourceGrooveSummary(session) : null;
 
   const warnings = useMemo(() => {
@@ -111,11 +116,19 @@ export default function UploadFirstEntryPanel({
       const scaleGuess = normalizedDetectedScale(detected.scale_mode_guess);
       const barsGuess = Math.max(1, Math.min(128, detectedBarsFromSession(activeSession)));
 
+      if (selectedGrooveFile) {
+        activeSession = await uploadGrooveReferenceAudio(activeSession.id, selectedGrooveFile);
+        setSession(activeSession);
+        activeSession = await analyzeGrooveReferenceAudio(activeSession.id);
+        setSession(activeSession);
+      }
+
       await patchSession(activeSession.id, {
         tempo: tempoEstimate,
         key: keyGuess,
         scale: scaleGuess,
         bar_count: barsGuess,
+        bass_engine: selectedGrooveFile ? "phrase_v2" : undefined,
       });
       const generated = await generateSession(activeSession.id);
       setSession(generated.session);
@@ -123,7 +136,31 @@ export default function UploadFirstEntryPanel({
       setKeyNote(keyGuess);
       setScale(scaleGuess);
       setBars(barsGuess);
-      setStatus("Source understood. Musical context applied and takes generated.");
+      setStatus(
+        selectedGrooveFile
+          ? "Source harmony and groove reference understood. Pocket-aware takes generated."
+          : "Source understood. Musical context applied and takes generated.",
+      );
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onAddGrooveAndRegenerate = async () => {
+    if (!session?.id || !selectedGrooveFile) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let updated = await uploadGrooveReferenceAudio(session.id, selectedGrooveFile);
+      setSession(updated);
+      updated = await analyzeGrooveReferenceAudio(session.id);
+      setSession(updated);
+      await patchSession(session.id, { bass_engine: "phrase_v2" });
+      const regenerated = await regenerateLane(session.id, "bass");
+      setSession(regenerated.session);
+      setStatus("Groove reference understood. Pocket-aware bass regenerated.");
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -185,20 +222,41 @@ export default function UploadFirstEntryPanel({
         background: "#f8fafc",
       }}
     >
-      <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Give Session Player a Source</h2>
+      <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Give Session Player the Music</h2>
       <p style={{ margin: "0.35rem 0 0", fontSize: 13, color: "#475569" }}>
-        Choose audio and the player will analyse its musical context, build the session and create takes.
+        The musical source supplies harmony and phrasing. Add drums when you want the bass to follow a real pocket.
       </p>
+      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+        <label style={{ display: "grid", gap: 5, fontSize: 13 }}>
+          <strong>Musical source</strong>
+          <span style={{ color: "#64748b" }}>Keys, chords, loop or full mix — used for key, harmony and phrase shape.</span>
+          <input
+            type="file"
+            accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,audio/*"
+            disabled={busy}
+            onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
+          />
+        </label>
+        <label style={{ display: "grid", gap: 5, fontSize: 13 }}>
+          <strong>Groove reference <span style={{ fontWeight: 400, color: "#64748b" }}>(optional)</span></strong>
+          <span style={{ color: "#64748b" }}>Drums or percussion — used for kick, snare, timing and space, never harmony.</span>
+          <input
+            type="file"
+            accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,audio/*"
+            disabled={busy}
+            onChange={(e) => setSelectedGrooveFile(e.target.files?.[0] ?? null)}
+          />
+        </label>
+      </div>
       <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <input
-          type="file"
-          accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,audio/*"
-          disabled={busy}
-          onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
-        />
         <button type="button" onClick={onCreateFromSource} disabled={busy || !selectedFile}>
           {busy ? "Listening…" : "Create Takes From Source"}
         </button>
+        {session?.id ? (
+          <button type="button" onClick={onAddGrooveAndRegenerate} disabled={busy || !selectedGrooveFile}>
+            Add Groove &amp; Regenerate
+          </button>
+        ) : null}
       </div>
 
       <details style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
@@ -218,9 +276,14 @@ export default function UploadFirstEntryPanel({
 
       <div style={{ marginTop: 10, display: "grid", gap: 4, fontSize: 13, color: "#334155" }}>
         <div>
-          <strong>Reference:</strong> {refAudio?.filename ?? "none"} · analyzed {refAudio?.analyzed ? "yes" : "no"} · duration{" "}
+          <strong>Musical source:</strong> {refAudio?.filename ?? "none"} · analyzed {refAudio?.analyzed ? "yes" : "no"} · duration{" "}
           {Number(refAudio?.duration_seconds ?? 0).toFixed(2)}s · head trim{" "}
           {Number(refAudio?.head_trim_seconds ?? 0).toFixed(2)}s
+        </div>
+        <div>
+          <strong>Groove reference:</strong> {grooveRefAudio?.filename ?? "none"} · analyzed{" "}
+          {grooveRefAudio?.analyzed ? "yes" : "no"} · duration{" "}
+          {Number(grooveRefAudio?.duration_seconds ?? 0).toFixed(2)}s
         </div>
         <div>
           <strong>Detected tempo:</strong> {source ? Number(source.tempo_estimate_bpm ?? source.tempo ?? 0).toFixed(1) : "—"}{" "}

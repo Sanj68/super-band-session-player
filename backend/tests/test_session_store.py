@@ -40,6 +40,9 @@ def test_full_session_round_trip_preserves_order_midi_and_analysis(
         current_bass_candidate_take_id="take-2",
     )
     first.source_analysis_override = build_source_analysis(first)
+    first.groove_reference_analysis_override = build_source_analysis(first).model_copy(
+        update={"source_lane": "groove_reference_audio"}
+    )
     second = session_routes.StoredSession(
         id="session-b",
         tempo=120,
@@ -60,6 +63,10 @@ def test_full_session_round_trip_preserves_order_midi_and_analysis(
     assert restored["session-a"].bass_density_bias == 0.35
     assert restored["session-a"].bass_locked is True
     assert restored["session-a"].source_analysis_override == first.source_analysis_override
+    assert (
+        restored["session-a"].groove_reference_analysis_override
+        == first.groove_reference_analysis_override
+    )
     assert restored["session-a"].current_bass_candidate_take_id == "take-2"
 
 

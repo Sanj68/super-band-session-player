@@ -661,6 +661,10 @@ class SessionState(BaseModel):
         default=None,
         description="Optional uploaded reference audio metadata for audio-driven analysis.",
     )
+    groove_reference_audio: ReferenceAudioState | None = Field(
+        default=None,
+        description="Optional separate rhythm reference used for groove timing only.",
+    )
     lanes: dict[str, LaneState]
     message: str | None = None
 

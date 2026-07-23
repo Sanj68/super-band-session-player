@@ -75,6 +75,9 @@ def _payload_to_session(payload: object, session_type: type[SessionT]) -> Sessio
     source = values.get("source_analysis_override")
     if source is not None:
         values["source_analysis_override"] = SourceAnalysis.model_validate(source)
+    groove_source = values.get("groove_reference_analysis_override")
+    if groove_source is not None:
+        values["groove_reference_analysis_override"] = SourceAnalysis.model_validate(groove_source)
 
     return session_type(**values)
 

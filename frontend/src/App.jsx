@@ -1148,7 +1148,7 @@ export default function App() {
         <div>
           <div className="sp-title">Session Player</div>
           <p style={{ margin: "0.15rem 0 0", color: "var(--text-faint)", fontSize: 12 }}>
-            Pick an instrument. Upload a reference. Generate takes.
+            Pick an instrument. Add the music, then an optional groove. Generate takes.
           </p>
         </div>
         <div className="sp-version">v0.10 · bass</div>
@@ -1200,7 +1200,7 @@ export default function App() {
           <section className="sp-panel">
             <div className="sp-panel-head">
               <span className="sp-step">Step 1</span>
-              <span className="sp-panel-title">Source / Reference</span>
+              <span className="sp-panel-title">Musical &amp; Groove Sources</span>
             </div>
             <UploadFirstEntryPanel
               session={session}

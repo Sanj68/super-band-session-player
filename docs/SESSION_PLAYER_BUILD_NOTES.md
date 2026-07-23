@@ -165,6 +165,25 @@ Demo proof point: side-by-side toggle "ignore drum loop / lock to drum
 loop" on the same chord chart, same seed. The difference must be
 unmistakable.
 
+### Two-source product path (implemented 2026-07-23)
+
+The bass workspace now accepts two explicitly assigned inputs:
+
+- **Musical source** — owns key, scale, harmony and phrase structure.
+- **Groove reference** (optional) — owns tempo grid, kick/snare evidence,
+  rhythmic pressure and pocket confidence.
+
+The analyses are fused only at the conditioning boundary. Drum-loop
+chroma is never allowed to overwrite musical-source harmony. The
+confidence-gated single-source fallback remains available when no groove
+reference is supplied.
+
+First controlled acceptance pair: `jmh_keys_88_voni_Dm.wav` plus
+`OLIVER_88_drum_loop_mixready_vintage_indie_funk_slam.wav`, both exactly
+four bars at 88 BPM. With seed 424245, lock 0 produced 17 notes and lock
+1 produced 13 with changed onsets, confirming that the second source
+changes the bass performance rather than only the UI state.
+
 ## 6b. Product Surface — the plugin vision (Sanjeev, 2026-06-12)
 
 Agreed end-state UX, banked verbatim from the strategy talk after v0.3b
