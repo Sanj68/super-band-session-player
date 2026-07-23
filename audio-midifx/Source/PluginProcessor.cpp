@@ -52,6 +52,7 @@ void SessionPlayerMidiFXProcessor::prepareToPlay (double sampleRate, int)
     sampleRate_ = sampleRate;
     active_.clear();
     lastPpq_ = -1.0;
+    lastBlockBeats_ = 0.0;
 }
 
 // ---- engine polling --------------------------------------------------------
@@ -67,6 +68,9 @@ void SessionPlayerMidiFXProcessor::run()
             auto* playerParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("player"));
             auto lockValue = apvts.getRawParameterValue ("lock")->load();
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
+            const auto sessionId = boundSessionId();
+            if (sessionId.isNotEmpty())
+                body->setProperty ("session_id", sessionId);
             body->setProperty ("bass_style", styleChoices[styleParam ? styleParam->getIndex() : 0]);
             body->setProperty ("bass_player", playerChoices[playerParam ? playerParam->getIndex() : 0]);
             body->setProperty ("lock_to_groove", (double) lockValue);
@@ -91,6 +95,9 @@ void SessionPlayerMidiFXProcessor::run()
         {
             setStatus ("\"" + command + "\" ...");
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
+            const auto sessionId = boundSessionId();
+            if (sessionId.isNotEmpty())
+                body->setProperty ("session_id", sessionId);
             body->setProperty ("text", command);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
             juce::URL url { kCommandUrl };
@@ -120,6 +127,9 @@ void SessionPlayerMidiFXProcessor::run()
 void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
 {
     juce::URL url { kBassPartUrl };
+    const auto sessionId = boundSessionId();
+    if (sessionId.isNotEmpty())
+        url = url.withParameter ("session_id", sessionId);
     auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
                        .withConnectionTimeoutMs (3000);
     auto stream = url.createInputStream (options);
@@ -155,6 +165,7 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
             fresh->notes.push_back (n);
         }
     }
+    bindSession (fresh->sessionId);
 
     {
         const juce::SpinLock::ScopedLockType l (partLock_);
@@ -177,6 +188,22 @@ std::shared_ptr<const BassPart> SessionPlayerMidiFXProcessor::currentPart() cons
 {
     const juce::SpinLock::ScopedLockType l (partLock_);
     return part_;
+}
+
+juce::String SessionPlayerMidiFXProcessor::boundSessionId() const
+{
+    const juce::ScopedLock l (sessionLock_);
+    return boundSessionId_;
+}
+
+void SessionPlayerMidiFXProcessor::bindSession (const juce::String& sessionId,
+                                                bool replaceExisting)
+{
+    if (sessionId.isEmpty())
+        return;
+    const juce::ScopedLock l (sessionLock_);
+    if (replaceExisting || boundSessionId_.isEmpty())
+        boundSessionId_ = sessionId;
 }
 
 void SessionPlayerMidiFXProcessor::requestRegenerate()
@@ -236,6 +263,7 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
             allNotesOff (midi, 0);
         wasPlaying_ = false;
         lastPpq_ = -1.0;
+        lastBlockBeats_ = 0.0;
         return;
     }
     wasPlaying_ = true;
@@ -246,13 +274,23 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const double blockBeats = beatsPerSample * numSamples;
     const double loopLen = part->loopBeats();
 
+    // A seek, cycle jump, or host discontinuity invalidates every outstanding
+    // note-off from the previous transport position.
+    if (lastPpq_ >= 0.0)
+    {
+        const double expectedPpq = lastPpq_ + lastBlockBeats_;
+        const double tolerance = juce::jmax (1.0e-4, blockBeats * 0.25);
+        if (std::abs (ppq - expectedPpq) > tolerance)
+            allNotesOff (midi, 0);
+    }
+
     // note-offs scheduled in samples
     for (auto it = active_.begin(); it != active_.end();)
     {
         if (it->samplesLeft <= numSamples)
         {
             midi.addEvent (juce::MidiMessage::noteOff (1, it->pitch),
-                           juce::jmax (0, it->samplesLeft - 1));
+                           juce::jlimit (0, numSamples - 1, it->samplesLeft));
             it = active_.erase (it);
         }
         else
@@ -286,19 +324,27 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
             }
             midi.addEvent (juce::MidiMessage::noteOn (1, n.pitch, (juce::uint8) n.velocity),
                            samplePos);
-            active_.push_back ({ n.pitch,
-                                 (int) (n.durBeats / beatsPerSample) - samplePos });
+            const int durationSamples = juce::jmax (
+                1, (int) std::round (n.durBeats / beatsPerSample));
+            const int noteEndSample = samplePos + durationSamples;
+            if (noteEndSample < numSamples)
+                midi.addEvent (juce::MidiMessage::noteOff (1, n.pitch), noteEndSample);
+            else
+                active_.push_back ({ n.pitch, noteEndSample - numSamples });
         }
     }
 
     lastPpq_ = ppq;
+    lastBlockBeats_ = blockBeats;
 }
 
 // ---- state (the Meter Core v0.7.3 lesson: never ship empty stubs) ----------
 
 void SessionPlayerMidiFXProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    auto state = apvts.copyState();
+    state.setProperty ("session_id", boundSessionId(), nullptr);
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -306,7 +352,18 @@ void SessionPlayerMidiFXProcessor::setStateInformation (const void* data, int si
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        {
+            auto state = juce::ValueTree::fromXml (*xml);
+            const auto restoredSessionId = state.getProperty ("session_id").toString();
+            state.removeProperty ("session_id", nullptr);
+            apvts.replaceState (state);
+            bindSession (restoredSessionId, true);
+            // The polling thread starts with the processor and may have fetched
+            // "latest" before Logic restored project state. Never audition that
+            // transient part under the restored binding.
+            const juce::SpinLock::ScopedLockType l (partLock_);
+            part_.reset();
+        }
 }
 
 juce::AudioProcessorEditor* SessionPlayerMidiFXProcessor::createEditor()

@@ -35,6 +35,17 @@ def _latest_bass_session() -> session_routes.StoredSession | None:
     return candidates[-1]
 
 
+def _bass_session(session_id: str | None = None) -> session_routes.StoredSession | None:
+    """Resolve an explicitly bound plugin session, or bind an unbound plugin once."""
+
+    if session_id:
+        candidate = session_routes._SESSIONS.get(session_id)  # noqa: SLF001
+        if candidate is None or not (candidate.bass_bytes or candidate.bass_performance_bytes):
+            return None
+        return candidate
+    return _latest_bass_session()
+
+
 class PluginNote(BaseModel):
     pitch: int
     velocity: int
@@ -55,11 +66,9 @@ class PluginBassPart(BaseModel):
     notes: list[PluginNote]
 
 
-@router.get("/bass-part", response_model=PluginBassPart)
-def get_bass_part() -> PluginBassPart:
-    s = _latest_bass_session()
-    if s is None:
-        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
+    """Serialize one already-resolved session for the MIDI FX client."""
+
     raw = s.bass_performance_bytes or s.bass_bytes
     source = "performance" if s.bass_performance_bytes else "clean"
     assert raw is not None
@@ -90,7 +99,19 @@ def get_bass_part() -> PluginBassPart:
     )
 
 
+@router.get("/bass-part", response_model=PluginBassPart)
+def get_bass_part(session_id: str | None = None) -> PluginBassPart:
+    s = _bass_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    return _bass_part_for_session(s)
+
+
 class PluginRegenerateBody(BaseModel):
+    session_id: str | None = Field(
+        default=None,
+        description="Persistent session binding owned by this plugin instance.",
+    )
     bass_style: str | None = Field(default=None)
     bass_player: str | None = Field(
         default=None,
@@ -118,6 +139,10 @@ def _engine_for_player(player: str | None) -> str:
 
 
 class PluginCommandBody(BaseModel):
+    session_id: str | None = Field(
+        default=None,
+        description="Persistent session binding owned by this plugin instance.",
+    )
     text: str = Field(min_length=1, max_length=400)
 
 
@@ -139,7 +164,7 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
     """
     from app.services.command_parser import parse_command
 
-    s = _latest_bass_session()
+    s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
 
@@ -185,13 +210,13 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
         applied=plan.applied,
         unrecognized=plan.unrecognized,
         message=" · ".join(plan.applied),
-        part=get_bass_part(),
+        part=_bass_part_for_session(s),
     )
 
 
 @router.post("/regenerate", response_model=PluginBassPart)
 def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
-    s = _latest_bass_session()
+    s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
     if body.bass_style is not None:
@@ -202,4 +227,4 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
         s.bass_lock_to_groove = float(body.lock_to_groove)
     s.bass_engine = _engine_for_player(s.bass_player)
     session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
-    return get_bass_part()
+    return _bass_part_for_session(s)

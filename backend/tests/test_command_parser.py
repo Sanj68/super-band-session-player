@@ -125,3 +125,20 @@ def test_command_endpoint_honest_on_nonsense(client: TestClient) -> None:
     assert out["ok"] is False
     assert "didn't catch that" in out["message"]
     assert out["part"] is None
+
+
+def test_command_endpoint_only_mutates_bound_session(client: TestClient) -> None:
+    from app.routes import session_routes
+
+    first = _session_with_bass(client)
+    second = _session_with_bass(client)
+
+    res = client.post(
+        "/api/plugin/command",
+        json={"session_id": first, "text": "busier"},
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["part"]["session_id"] == first
+    assert session_routes._SESSIONS[first].bass_density_bias == pytest.approx(0.35)
+    assert session_routes._SESSIONS[second].bass_density_bias == pytest.approx(0.0)

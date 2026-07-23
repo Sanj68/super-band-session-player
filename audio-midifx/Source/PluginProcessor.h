@@ -78,6 +78,8 @@ private:
     void run() override;
     void fetchPart (bool updateStatus = true);
     std::shared_ptr<const BassPart> currentPart() const;
+    juce::String boundSessionId() const;
+    void bindSession (const juce::String& sessionId, bool replaceExisting = false);
 
     std::shared_ptr<const BassPart> part_;
     mutable juce::SpinLock partLock_;
@@ -86,11 +88,14 @@ private:
     juce::String pendingCommand_;
     juce::CriticalSection commandLock_;
     juce::CriticalSection statusLock_;
+    mutable juce::CriticalSection sessionLock_;
     juce::String status_ { "connecting to engine..." };
+    juce::String boundSessionId_;
 
     // playback state
     double sampleRate_ = 44100.0;
     double lastPpq_ = -1.0;
+    double lastBlockBeats_ = 0.0;
     bool wasPlaying_ = false;
     struct ActiveNote { int pitch; int samplesLeft; };
     std::vector<ActiveNote> active_;
