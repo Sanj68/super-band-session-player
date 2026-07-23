@@ -1254,7 +1254,15 @@ export default function App() {
                 </div>
               )}
             </div>
-            <details className="sp-correction">
+            <details
+              key={`${session?.reference_audio?.filename ?? "no-source"}-${session?.reference_audio?.analyzed ? "analysed" : "pending"}`}
+              className="sp-correction"
+              defaultOpen={
+                Boolean(session?.reference_audio?.analyzed) &&
+                Number(session?.engine_data?.source_analysis?.tonal_center_confidence ?? 1) < 0.5 &&
+                !session?.engine_data?.source_analysis?.source_metadata?.filename_hints?.key
+              }
+            >
               <summary>Correct the AI <span>optional</span></summary>
               <div className="sp-correction-body">
                 <div className="sp-grid">
@@ -1345,9 +1353,10 @@ export default function App() {
                             bar_count: bars,
                             chord_progression: progression.length > 0 ? progression : null,
                           };
-                          const updated = await patchSession(session.id, payload);
-                          setSession(updated);
-                          setStatus(updated.message ?? "Musical correction applied.");
+                          await patchSession(session.id, payload);
+                          const generated = await generateSession(session.id);
+                          setSession(generated.session);
+                          setStatus("Musical correction applied and session regenerated.");
                         } catch (e) {
                           setError(e.message || String(e));
                         } finally {
@@ -1355,7 +1364,7 @@ export default function App() {
                         }
                       }}
                     >
-                      Apply Correction
+                      Apply Correction &amp; Generate
                     </button>
                   ) : (
                     <button

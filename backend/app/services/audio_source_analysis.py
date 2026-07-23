@@ -83,6 +83,20 @@ def infer_bar_count_from_duration(duration_seconds: float, tempo_bpm: float) -> 
     return nearest
 
 
+def infer_bar_count_from_beats(beat_count: int) -> int | None:
+    """Infer 4/4 length from a tracked beat train, tolerating clipped edge beats."""
+    if beat_count < 3:
+        return None
+    nearest = int(round(float(beat_count) / 4.0))
+    if not 1 <= nearest <= 128:
+        return None
+    # Beat trackers commonly omit the first or last transient. More than two
+    # missing/extra beats is no longer a trustworthy whole-bar observation.
+    if abs(int(beat_count) - (nearest * 4)) > 2:
+        return None
+    return nearest
+
+
 def _moving_average(values: list[float], radius: int = 1) -> list[float]:
     out: list[float] = []
     n = len(values)
@@ -730,6 +744,7 @@ def analyze_reference_audio(
     session_key: str,
     session_scale: str,
     source_filename: str | None = None,
+    trust_session_bar_count: bool = True,
 ) -> AudioAnalysisResult:
     y, sr = librosa.load(str(audio_path), sr=_TARGET_SR, mono=True)
     if y.size == 0:
@@ -765,10 +780,14 @@ def analyze_reference_audio(
     else:
         onset_env = onset_env_full
         rms_source = y_trimmed
-    trimmed_duration = float(len(y_trimmed)) / float(sr)
     anchor_bpm = None
-    if bar_count > 0 and trimmed_duration > 1e-6:
-        anchor_bpm = (240.0 * float(bar_count)) / trimmed_duration
+    if trust_session_bar_count and bar_count > 0:
+        trimmed_duration = float(len(y_trimmed)) / float(sr)
+        if trimmed_duration > 1e-6:
+            anchor_bpm = (240.0 * float(bar_count)) / trimmed_duration
+    # Upload-first callers mark the screen's bar-count placeholder untrusted.
+    # Otherwise it creates a circular half/double-time trap (for example:
+    # unknown 16-bar 88 BPM bounce + placeholder 8 bars => 44).
     tempo_est, tempo_conf = _select_tempo(onset_env, sr, session_tempo, anchor_bpm=anchor_bpm)
     if filename_hints.tempo_bpm is not None:
         tempo_est = float(filename_hints.tempo_bpm)
@@ -784,6 +803,12 @@ def analyze_reference_audio(
     beat_frames_arr = np.asarray(beat_frames, dtype=int).ravel()
     beat_times_local = librosa.frames_to_time(beat_frames_arr, sr=sr, hop_length=_HOP_LENGTH)
     beat_times = [round(float(t + head_trim), 6) for t in beat_times_local]
+
+    auto_bar_count: int | None = None
+    if not trust_session_bar_count and filename_hints.tempo_bpm is None and tempo_conf >= 0.5:
+        auto_bar_count = infer_bar_count_from_beats(len(beat_times))
+        if auto_bar_count is not None:
+            bar_count = auto_bar_count
 
     if len(beat_times) < 4:
         beat_len = 60.0 / max(40.0, min(240.0, tempo_est))
@@ -857,6 +882,7 @@ def analyze_reference_audio(
             "scale": filename_hints.scale,
             "bar_count": bar_count if filename_hints.tempo_bpm is not None else None,
         },
+        "auto_bar_count": auto_bar_count,
     }
 
     chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=_HOP_LENGTH)

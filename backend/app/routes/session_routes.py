@@ -548,6 +548,7 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
             session_key=s.key,
             session_scale=s.scale,
             source_filename=s.reference_audio_filename,
+            trust_session_bar_count=False,
         )
     except Exception as exc:
         raise HTTPException(

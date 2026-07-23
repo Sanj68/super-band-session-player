@@ -184,6 +184,16 @@ four bars at 88 BPM. With seed 424245, lock 0 produced 17 notes and lock
 1 produced 13 with changed onsets, confirming that the second source
 changes the bass performance rather than only the UI state.
 
+Combined-source regression found 2026-07-23: a 16-bar Logic bounce at
+88 BPM was interpreted as 8 bars at 44 BPM because the upload screen's
+placeholder bar count was incorrectly treated as trusted evidence. The
+upload-first analyser now derives tempo independently, then derives bar
+count from the tracked beat train. The same bounce resolves to 87.598
+BPM / 16 bars. Trusted bar-count callers (validation and explicit
+session contexts) retain their duration anchor. Low-confidence key reads
+without filename metadata now pause for one confirmation/correction
+instead of silently generating in a possibly wrong key.
+
 ## 6b. Product Surface — the plugin vision (Sanjeev, 2026-06-12)
 
 Agreed end-state UX, banked verbatim from the strategy talk after v0.3b

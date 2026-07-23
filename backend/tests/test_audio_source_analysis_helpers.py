@@ -40,6 +40,25 @@ def test_infer_bar_count_from_duration_requires_close_integer_fit(
     assert asa.infer_bar_count_from_duration(duration_seconds, tempo_bpm) == expected
 
 
+@pytest.mark.parametrize(
+    ("beat_count", "expected"),
+    [
+        (15, 4),
+        (16, 4),
+        (17, 4),
+        (63, 16),
+        (64, 16),
+        (65, 16),
+        (2, None),
+    ],
+)
+def test_infer_bar_count_from_beats_tolerates_missing_edge_beats(
+    beat_count: int,
+    expected: int | None,
+) -> None:
+    assert asa.infer_bar_count_from_beats(beat_count) == expected
+
+
 def test_audio_analysis_applies_filename_context_before_building_structure(tmp_path) -> None:
     import soundfile as sf
 

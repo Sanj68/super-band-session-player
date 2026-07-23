@@ -115,6 +115,19 @@ export default function UploadFirstEntryPanel({
         PC_TO_KEY[Math.max(0, Math.min(11, Number(detected.tonal_center_pc_guess) || 0))];
       const scaleGuess = normalizedDetectedScale(detected.scale_mode_guess);
       const barsGuess = Math.max(1, Math.min(128, detectedBarsFromSession(activeSession)));
+      const keyConfidence = Number(detected.tonal_center_confidence ?? 0);
+      const hasFilenameKey = Boolean(detected.source_metadata?.filename_hints?.key);
+
+      setTempo(tempoEstimate);
+      setKeyNote(keyGuess);
+      setScale(scaleGuess);
+      setBars(barsGuess);
+
+      activeSession = await patchSession(activeSession.id, {
+        tempo: tempoEstimate,
+        bar_count: barsGuess,
+      });
+      setSession(activeSession);
 
       if (selectedGrooveFile) {
         activeSession = await uploadGrooveReferenceAudio(activeSession.id, selectedGrooveFile);
@@ -123,19 +136,20 @@ export default function UploadFirstEntryPanel({
         setSession(activeSession);
       }
 
+      if (!hasFilenameKey && keyConfidence < 0.5) {
+        setStatus(
+          `Tempo ${tempoEstimate} BPM and ${barsGuess} bars detected. Key reading ${keyGuess} ${scaleGuess.replaceAll("_", " ")} is tentative—confirm or correct it below before generating.`,
+        );
+        return;
+      }
+
       await patchSession(activeSession.id, {
-        tempo: tempoEstimate,
         key: keyGuess,
         scale: scaleGuess,
-        bar_count: barsGuess,
         bass_engine: selectedGrooveFile ? "phrase_v2" : undefined,
       });
       const generated = await generateSession(activeSession.id);
       setSession(generated.session);
-      setTempo(tempoEstimate);
-      setKeyNote(keyGuess);
-      setScale(scaleGuess);
-      setBars(barsGuess);
       setStatus(
         selectedGrooveFile
           ? "Source harmony and groove reference understood. Pocket-aware takes generated."
