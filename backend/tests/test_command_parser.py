@@ -39,6 +39,7 @@ def test_bar_references_one_based_speech() -> None:
     # the spec's own example
     plan = parse_command("add a turnaround on the 4th bar", bar_count=4)
     assert plan.bar_ranges == [(3, 4)]
+    assert plan.bar_operation == "turnaround"
     assert any("turnaround" in a for a in plan.applied)
 
     assert parse_command("redo bar 2", bar_count=8).bar_ranges == [(1, 2)]
@@ -115,6 +116,7 @@ def test_command_endpoint_bar_op(client: TestClient) -> None:
     assert res.status_code == 200, res.text
     assert res.json()["ok"] is True
     assert "bar 4" in res.json()["message"]
+    assert "Explicit turnaround applied" in res.json()["part"]["preview"]
 
 
 def test_command_endpoint_honest_on_nonsense(client: TestClient) -> None:

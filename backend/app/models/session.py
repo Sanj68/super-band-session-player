@@ -685,6 +685,10 @@ class RegenerateBassBarsBody(BaseModel):
     bar_start: int = Field(description="Inclusive zero-based start bar.")
     bar_end: int = Field(description="Exclusive zero-based end bar.")
     seed: int | None = Field(default=None, description="Optional seed for repeatable bar regeneration.")
+    operation: Literal["variation", "turnaround"] = Field(
+        default="variation",
+        description="Musical operation applied to the replacement range.",
+    )
 
 
 class LaneLocksPatch(BaseModel):

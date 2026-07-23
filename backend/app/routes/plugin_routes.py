@@ -200,7 +200,12 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
 
         for start, end in plan.bar_ranges:
             session_routes.regenerate_bass_bars(
-                s.id, RegenerateBassBarsBody(bar_start=start, bar_end=end)
+                s.id,
+                RegenerateBassBarsBody(
+                    bar_start=start,
+                    bar_end=end,
+                    operation=plan.bar_operation,
+                ),
             )
     else:
         session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))

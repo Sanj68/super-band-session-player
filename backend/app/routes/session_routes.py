@@ -945,6 +945,11 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
             status_code=400,
             detail={"error": "invalid_bar_range", "message": "bar_end must be less than or equal to session.bar_count."},
         )
+    if body.operation == "turnaround" and body.bar_end != body.bar_start + 1:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_bar_range", "message": "A turnaround must target exactly one bar."},
+        )
     if not s.bass_bytes:
         raise HTTPException(
             status_code=400,
@@ -971,6 +976,27 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         conditioning=cond,
         seed=seed,
     )
+    if body.operation == "turnaround":
+        from app.services.bass_turnaround import apply_bass_turnaround
+
+        next_bar = body.bar_end % max(1, s.bar_count)
+        harmonic_bar = cond.harmonic_bar(next_bar)
+        if harmonic_bar is not None:
+            next_root_pc = int(harmonic_bar.root_pc) % 12
+        else:
+            progression = mt.progression_chords_for_bars(s.chord_progression, s.bar_count)
+            if progression:
+                next_root_pc = int(progression[next_bar].root_pc) % 12
+            else:
+                degrees = mt.progression_degrees_for_bars(s.bar_count, s.scale)
+                next_root_pc = int(mt.bass_root_midi(s.key, s.scale, degrees[next_bar], octave=2)) % 12
+        replacement_bytes = apply_bass_turnaround(
+            replacement_bytes,
+            tempo=s.tempo,
+            bar_index=body.bar_start,
+            next_root_pc=next_root_pc,
+        )
+        replacement_preview += f" Explicit turnaround applied to bar {body.bar_start + 1}."
     spliced = splice_bass_bars(
         existing_midi=s.bass_bytes,
         replacement_midi=replacement_bytes,

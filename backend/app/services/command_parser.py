@@ -25,6 +25,7 @@ class CommandPlan:
     player: str | None = None           # persona id, or "none" to clear
     style: str | None = None
     bar_ranges: list[tuple[int, int]] = field(default_factory=list)  # 0-based [start, end)
+    bar_operation: str = "variation"
     full_regenerate: bool = False
     applied: list[str] = field(default_factory=list)
     unrecognized: list[str] = field(default_factory=list)
@@ -149,6 +150,8 @@ def parse_command(text: str, *, bar_count: int) -> CommandPlan:
         return max(0, min(bar_count - 1, b))
 
     turnaround = any(w in t for w in _TURNAROUND_WORDS)
+    if turnaround:
+        plan.bar_operation = "turnaround"
     if m := _BAR_RANGE.search(t):
         a, b = clamp_bar(int(m.group(1)) - 1), clamp_bar(int(m.group(2)) - 1)
         plan.bar_ranges.append((min(a, b), max(a, b) + 1))

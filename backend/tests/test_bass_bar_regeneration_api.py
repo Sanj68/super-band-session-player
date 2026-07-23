@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app
 from app.routes import session_routes
@@ -160,3 +161,64 @@ def test_regenerate_bass_bars_seed_controls_replacement_range() -> None:
     assert third["bass_seed"] == 44444
     assert second_range == first_range
     assert third_range != first_range
+
+
+@pytest.mark.parametrize("engine", ["baseline", "phrase_v2"])
+def test_turnaround_adds_explicit_approach_and_preserves_other_bars(engine: str) -> None:
+    client = _client()
+    session_id = _create_session(client)
+    session_routes._SESSIONS[session_id].bass_engine = engine
+    original = _generate_session_bass(client, session_id)
+    original_notes = original["lanes"]["bass"]["notes"]
+
+    res = client.post(
+        f"/api/sessions/{session_id}/lanes/bass/regenerate-bars",
+        json={
+            "bar_start": 3,
+            "bar_end": 4,
+            "seed": 20260723,
+            "operation": "turnaround",
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    out = res.json()
+    notes = out["lanes"]["bass"]["notes"]
+    assert "Explicit turnaround applied to bar 4" in out["lanes"]["bass"]["preview"]
+
+    seconds_per_beat = 60.0 / 96.0
+    selected_start = 3 * 4 * seconds_per_beat
+    final_beat_start = (3 * 4 + 3) * seconds_per_beat
+    bar_end = 4 * 4 * seconds_per_beat
+    # Humanised notes can begin a few milliseconds before the edit boundary
+    # and legitimately be shortened by loop-overlap normalisation. Everything
+    # clearly outside that boundary must remain byte-for-note equivalent.
+    stable_original = [
+        _note_tuple(note)
+        for note in original_notes
+        if float(note["start"]) < selected_start - 0.125 or float(note["start"]) >= bar_end
+    ]
+    stable_after = [
+        _note_tuple(note)
+        for note in notes
+        if float(note["start"]) < selected_start - 0.125 or float(note["start"]) >= bar_end
+    ]
+    assert stable_original == stable_after
+
+    late_notes = [note for note in notes if final_beat_start <= float(note["start"]) < bar_end]
+    assert len(late_notes) == 3
+    assert int(late_notes[-1]["pitch"]) % 12 in {11, 1}  # chromatic neighbor of next C root
+
+
+def test_turnaround_rejects_multi_bar_range() -> None:
+    client = _client()
+    session_id = _create_session(client)
+    _generate_session_bass(client, session_id)
+
+    res = client.post(
+        f"/api/sessions/{session_id}/lanes/bass/regenerate-bars",
+        json={"bar_start": 2, "bar_end": 4, "operation": "turnaround"},
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"]["error"] == "invalid_bar_range"
