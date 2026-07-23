@@ -10,6 +10,10 @@ import { getSourceGrooveSummary } from "../utils/sourceGroove.js";
 
 const PC_TO_KEY = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
+function normalizedDetectedScale(value) {
+  return value === "minor" ? "natural_minor" : value || "major";
+}
+
 function detectedBarsFromSession(session) {
   const sections = session?.engine_data?.source_analysis?.sections ?? [];
   if (Array.isArray(sections) && sections.length > 0) {
@@ -104,7 +108,7 @@ export default function UploadFirstEntryPanel({
       );
       const keyGuess =
         PC_TO_KEY[Math.max(0, Math.min(11, Number(detected.tonal_center_pc_guess) || 0))];
-      const scaleGuess = detected.scale_mode_guess || "major";
+      const scaleGuess = normalizedDetectedScale(detected.scale_mode_guess);
       const barsGuess = Math.max(1, Math.min(128, detectedBarsFromSession(activeSession)));
 
       await patchSession(activeSession.id, {
@@ -146,7 +150,7 @@ export default function UploadFirstEntryPanel({
     if (!session?.id || !source) return;
     const tempoEstimate = Math.max(40, Math.min(240, Math.round(Number(source.tempo_estimate_bpm) || 108)));
     const keyGuess = PC_TO_KEY[Math.max(0, Math.min(11, Number(source.tonal_center_pc_guess) || 0))];
-    const scaleGuess = source.scale_mode_guess || "major";
+    const scaleGuess = normalizedDetectedScale(source.scale_mode_guess);
     const barsGuess = Math.max(1, Math.min(128, detectedBarsFromSession(session)));
     setBusy(true);
     setError(null);

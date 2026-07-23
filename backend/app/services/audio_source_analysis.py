@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,51 @@ class AudioAnalysisResult:
     source_analysis: SourceAnalysis
     duration_seconds: float
     head_trim_seconds: float
+
+
+@dataclass(frozen=True)
+class FilenameMusicalHints:
+    tempo_bpm: int | None = None
+    key: str | None = None
+    scale: str | None = None
+
+
+def parse_filename_musical_hints(filename: str | None) -> FilenameMusicalHints:
+    """Extract strict sample-pack BPM/key tokens without guessing from prose."""
+    stem = Path(str(filename or "")).stem
+    tokens = [token for token in re.split(r"[\s_-]+", stem) if token]
+
+    tempo_bpm: int | None = None
+    for token in tokens:
+        if token.isdigit():
+            value = int(token)
+            if 40 <= value <= 240:
+                tempo_bpm = value
+
+    key: str | None = None
+    scale: str | None = None
+    for token in tokens:
+        match = re.fullmatch(r"([A-Ga-g])([#b]?)(maj|major|min|minor|m)", token)
+        if not match:
+            continue
+        root, accidental, mode = match.groups()
+        key = f"{root.upper()}{accidental}"
+        scale = "major" if mode.lower() in {"maj", "major"} else "natural_minor"
+
+    return FilenameMusicalHints(tempo_bpm=tempo_bpm, key=key, scale=scale)
+
+
+def infer_bar_count_from_duration(duration_seconds: float, tempo_bpm: float) -> int | None:
+    """Return an integer 4/4 loop length only when duration is a close fit."""
+    if duration_seconds <= 0.0 or tempo_bpm <= 0.0:
+        return None
+    raw_bars = (float(duration_seconds) * float(tempo_bpm)) / 240.0
+    nearest = int(round(raw_bars))
+    if not 1 <= nearest <= 128:
+        return None
+    if abs(raw_bars - nearest) > 0.12:
+        return None
+    return nearest
 
 
 def _moving_average(values: list[float], radius: int = 1) -> list[float]:
@@ -683,11 +729,22 @@ def analyze_reference_audio(
     bar_count: int,
     session_key: str,
     session_scale: str,
+    source_filename: str | None = None,
 ) -> AudioAnalysisResult:
     y, sr = librosa.load(str(audio_path), sr=_TARGET_SR, mono=True)
     if y.size == 0:
         raise ValueError("Reference audio is empty.")
     duration_sec = float(y.size) / float(sr)
+    filename_hints = parse_filename_musical_hints(source_filename)
+    if filename_hints.tempo_bpm is not None:
+        session_tempo = filename_hints.tempo_bpm
+        inferred_bars = infer_bar_count_from_duration(duration_sec, filename_hints.tempo_bpm)
+        if inferred_bars is not None:
+            bar_count = inferred_bars
+    if filename_hints.key is not None:
+        session_key = filename_hints.key
+    if filename_hints.scale is not None:
+        session_scale = filename_hints.scale
 
     _ignored_trimmed, idx = librosa.effects.trim(y, top_db=35)
     head_samples = int(idx[0]) if len(idx) > 0 else 0
@@ -713,6 +770,9 @@ def analyze_reference_audio(
     if bar_count > 0 and trimmed_duration > 1e-6:
         anchor_bpm = (240.0 * float(bar_count)) / trimmed_duration
     tempo_est, tempo_conf = _select_tempo(onset_env, sr, session_tempo, anchor_bpm=anchor_bpm)
+    if filename_hints.tempo_bpm is not None:
+        tempo_est = float(filename_hints.tempo_bpm)
+        tempo_conf = max(float(tempo_conf), 0.9)
 
     _, beat_frames = librosa.beat.beat_track(
         onset_envelope=onset_env,
@@ -791,6 +851,12 @@ def analyze_reference_audio(
         "groove_map_version": "v0.7.0",
         "groove_slots_per_bar": _GROOVE_SLOTS,
         "hop_length": _HOP_LENGTH,
+        "filename_hints": {
+            "tempo_bpm": filename_hints.tempo_bpm,
+            "key": filename_hints.key,
+            "scale": filename_hints.scale,
+            "bar_count": bar_count if filename_hints.tempo_bpm is not None else None,
+        },
     }
 
     chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=_HOP_LENGTH)
@@ -821,6 +887,12 @@ def analyze_reference_audio(
         fallback_scale=session_scale,
         global_pcp=global_pcp,
     )
+    if filename_hints.key is not None:
+        tonal_pc = mt.key_root_pc(filename_hints.key)
+        tonal_conf = max(float(tonal_conf), 0.9)
+    if filename_hints.scale is not None:
+        mode_guess = _normalize_mode_label(filename_hints.scale)
+        mode_conf = max(float(mode_conf), 0.9)
 
     sections = _build_sections(bar_energy, bar_accent, bar_count)
     source = SourceAnalysis(

@@ -8,6 +8,65 @@ import pytest
 from app.services import audio_source_analysis as asa
 
 
+def test_filename_musical_hints_reads_strict_sample_pack_tokens() -> None:
+    hints = asa.parse_filename_musical_hints("jmh_keys_88_voni_Dm.wav")
+
+    assert hints.tempo_bpm == 88
+    assert hints.key == "D"
+    assert hints.scale == "natural_minor"
+
+
+def test_filename_musical_hints_ignores_embedded_catalog_numbers_and_words() -> None:
+    hints = asa.parse_filename_musical_hints("SM101_session_take_final.wav")
+
+    assert hints.tempo_bpm is None
+    assert hints.key is None
+    assert hints.scale is None
+
+
+@pytest.mark.parametrize(
+    ("duration_seconds", "tempo_bpm", "expected"),
+    [
+        (10.909093, 88.0, 4),
+        (16.0, 120.0, 8),
+        (10.3, 88.0, None),
+    ],
+)
+def test_infer_bar_count_from_duration_requires_close_integer_fit(
+    duration_seconds: float,
+    tempo_bpm: float,
+    expected: int | None,
+) -> None:
+    assert asa.infer_bar_count_from_duration(duration_seconds, tempo_bpm) == expected
+
+
+def test_audio_analysis_applies_filename_context_before_building_structure(tmp_path) -> None:
+    import soundfile as sf
+
+    sr = 22050
+    duration = 2.0
+    time = np.linspace(0.0, duration, int(sr * duration), endpoint=False)
+    audio = 0.35 * np.sin(2 * np.pi * 146.83 * time)
+    path = tmp_path / "stored-upload.wav"
+    sf.write(str(path), audio.astype(np.float32), sr)
+
+    result = asa.analyze_reference_audio(
+        audio_path=path,
+        session_tempo=108,
+        bar_count=8,
+        session_key="A",
+        session_scale="major",
+        source_filename="pack_keys_120_Cm.wav",
+    )
+
+    source = result.source_analysis
+    assert source.tempo_estimate_bpm == 120.0
+    assert source.tonal_center_pc_guess == 0
+    assert source.scale_mode_guess == "minor"
+    assert len(source.bar_starts_seconds) == 1
+    assert source.source_metadata["filename_hints"]["bar_count"] == 1
+
+
 def test_moving_average_uses_available_edge_window() -> None:
     assert asa._moving_average([1.0, 3.0, 9.0], radius=1) == [2.0, pytest.approx(13.0 / 3.0), 6.0]
 
