@@ -30,6 +30,52 @@ function apiErrorMessage(error) {
   return error?.message || String(error);
 }
 
+function scheduleBrowserBassNotes(ctx, notes, now, level) {
+  const active = [];
+  notes.forEach((note) => {
+    const start = now + Math.max(0, Number(note.start) || 0);
+    const requestedEnd = now + Math.max(0, Number(note.end) || 0);
+    const end = Math.max(requestedEnd, start + 0.045);
+    const velocity = Math.max(1, Math.min(127, Number(note.velocity) || 80));
+    const amplitude = Math.max(0.0001, (velocity / 127) * level);
+    const attackEnd = Math.min(end - 0.015, start + 0.006);
+    const bodyEnd = Math.min(end - 0.01, start + 0.07);
+    const releaseStart = Math.max(bodyEnd, end - Math.min(0.075, (end - start) * 0.32));
+
+    const oscillator = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+
+    const real = new Float32Array(7);
+    const imag = new Float32Array([0, 1, 0.38, 0.18, 0.09, 0.045, 0.02]);
+    oscillator.setPeriodicWave(ctx.createPeriodicWave(real, imag, { disableNormalization: false }));
+    oscillator.frequency.value = 440 * 2 ** ((Number(note.pitch) - 69) / 12);
+
+    filter.type = "lowpass";
+    filter.Q.value = 0.8;
+    const openCutoff = Math.min(1050, 500 + velocity * 3.4);
+    filter.frequency.setValueAtTime(openCutoff, start);
+    filter.frequency.exponentialRampToValueAtTime(330, Math.min(end, start + 0.16));
+
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(amplitude, Math.max(start + 0.001, attackEnd));
+    gain.gain.exponentialRampToValueAtTime(
+      Math.max(0.0001, amplitude * 0.68),
+      Math.max(attackEnd + 0.001, bodyEnd),
+    );
+    gain.gain.setValueAtTime(Math.max(0.0001, amplitude * 0.68), releaseStart);
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.start(start);
+    oscillator.stop(end + 0.01);
+    active.push({ osc: oscillator, gain, filter });
+  });
+  return active;
+}
+
 export default function BassCandidatePanel({ session, setSession, busy, setBusy, setError, setStatus }) {
   const [candidateTakeCount, setCandidateTakeCount] = useState(4);
   const [candidateSeed, setCandidateSeed] = useState("");
@@ -131,6 +177,11 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       }
       try {
         pair.gain.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+      try {
+        pair.filter?.disconnect();
       } catch {
         // ignore disconnect errors
       }
@@ -303,12 +354,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
         });
         return pairs;
       };
-      const activePairs = scheduleLaneNotes(notes, {
-        wave: "triangle",
-        gain: 0.2,
-        attack: 0.01,
-        release: 0.02,
-      });
+      const activePairs = scheduleBrowserBassNotes(ctx, notes, now, 0.24);
       activeNodesRef.current = activePairs;
       setPlayingTakeKey(key);
       setStatus(`Playing ${takeId}…`);
@@ -394,12 +440,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
           attack: 0.008,
           release: 0.022,
         }),
-        ...scheduleLaneNotes(bassNotes, {
-          wave: "sawtooth",
-          gain: bassContextLevel,
-          attack: 0.007,
-          release: 0.04,
-        }),
+        ...scheduleBrowserBassNotes(ctx, bassNotes, now, bassContextLevel),
       ];
       activeNodesRef.current = activePairs;
       setPlayingTakeKey(key);
@@ -469,27 +510,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       await audio.play();
 
       const now = ctx.currentTime + 0.03;
-      const pairs = [];
-      bassNotes.forEach((n) => {
-        const start = now + Math.max(0, Number(n.start) || 0);
-        const end = now + Math.max(0, Number(n.end) || 0);
-        const velocity = Math.max(0, Math.min(127, Number(n.velocity) || 80));
-        const amp = (velocity / 127) * bassContextLevel;
-        const releaseStart = Math.max(start + 0.008, end - 0.04);
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "sawtooth";
-        osc.frequency.value = 440 * 2 ** ((Number(n.pitch) - 69) / 12);
-        gain.gain.setValueAtTime(0, now);
-        gain.gain.linearRampToValueAtTime(amp, start + 0.008);
-        gain.gain.setValueAtTime(amp, releaseStart);
-        gain.gain.linearRampToValueAtTime(0, end);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(start);
-        osc.stop(Math.max(end, start + 0.02));
-        pairs.push({ osc, gain });
-      });
+      const pairs = scheduleBrowserBassNotes(ctx, bassNotes, now, bassContextLevel);
       activeNodesRef.current = pairs;
       setPlayingTakeKey(key);
       setStatus(`Playing ${takeId} against source audio…`);
@@ -592,7 +613,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `bass_candidate_${runId}_${takeId}.mid`;
+        a.download = `bass_candidate_${takeId}.mid`;
         document.body.appendChild(a);
         a.click();
         a.remove();
