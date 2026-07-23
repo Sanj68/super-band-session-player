@@ -1,8 +1,11 @@
 # super-band-session-player
 
-Local rule-based MIDI session generator. Provide a key, tempo, and feel; get back a multi-lane MIDI arrangement (drums, bass, chords, lead) as a downloadable file.
+Local source-aware MIDI session generator. Provide a source, key, tempo, and
+feel; get back a coordinated multi-lane MIDI arrangement (drums, bass, chords,
+lead) as editable MIDI.
 
-No database. No auth. Runs entirely locally.
+No remote database or authentication. Session state persists locally and the
+product runs entirely on the machine.
 
 ## What it does
 
@@ -82,6 +85,31 @@ npm run dev   # http://localhost:5173
 4. Click **Download MIDI for Logic** for one combined MIDI file, or download individual lane MIDI files for drums, bass, chords, and lead.
 5. Drag the downloaded `.mid` file into Logic.
 6. Assign Logic instruments to the imported MIDI tracks.
+
+## Live source-to-bass proof
+
+1. Start the backend with live analysis enabled:
+   ```bash
+   cd backend
+   SESSION_PLAYER_ENABLE_GROOVE_BRIDGE=true .venv/bin/uvicorn app.main:app --reload
+   ```
+2. Create the working session in the web app. Analyser AUs with no explicit
+   session configured automatically bind to the newest created session.
+3. On the source track or bus, insert both audio effects:
+   - **Session Player Bridge** for groove evidence.
+   - **Session Player Listener** for harmonic evidence.
+4. On a software-instrument bass track, insert **Session Player Bass** in the
+   MIDI FX slot before the bass instrument.
+5. Play the source for at least two complete bars. The Listener indicator turns
+   green once its analysis reaches the backend.
+6. Regenerate the bassist or enter a command such as `busier`, `redo bar 2`, or
+   `turnaround on bar 4`.
+7. Download the bass lane from the web app whenever an editable MIDI region is
+   required.
+
+An explicit `SESSION_PLAYER_SESSION_ID` or
+`~/Library/Application Support/Session Player Bridge/config.json` binding still
+overrides automatic newest-session selection.
 
 ## Desktop app (Tauri)
 

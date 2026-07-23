@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cmath>
+#include <utility>
 
 namespace session_player
 {
@@ -84,7 +85,10 @@ void BridgeClient::run()
         const auto now = juce::Time::getMillisecondCounterHiRes();
         if (now - lastConfigReload > 3000.0)
         {
-            config = loadConfig();
+            auto refreshed = loadConfig();
+            if (refreshed.sessionId.isEmpty())
+                refreshed.sessionId = config.sessionId;
+            config = std::move(refreshed);
             lastConfigReload = now;
         }
 
@@ -148,7 +152,7 @@ BridgeConfig BridgeClient::loadConfig() const
     return config;
 }
 
-void BridgeClient::postHeartbeat(const BridgeConfig& config)
+void BridgeClient::postHeartbeat(BridgeConfig& config)
 {
     auto body = juce::String("{\"plugin_instance_id\":\"") + jsonEscape(pluginInstanceId)
         + "\",\"plugin_version\":\"" + pluginVersion + "\"";
@@ -159,7 +163,17 @@ void BridgeClient::postHeartbeat(const BridgeConfig& config)
         body += ",\"source_id\":\"" + jsonEscape(config.sourceId) + "\"";
 
     body += "}";
-    postJson(config.apiBaseUrl + "/heartbeat", body);
+    juce::String responseBody;
+    if (! postJson(config.apiBaseUrl + "/heartbeat", body, &responseBody))
+        return;
+
+    const auto response = juce::JSON::parse(responseBody);
+    if (! response.isObject())
+        return;
+
+    const auto resolvedSessionId = response.getProperty("session_id", "").toString().trim();
+    if (config.sessionId.isEmpty() && resolvedSessionId.isNotEmpty())
+        config.sessionId = resolvedSessionId;
 }
 
 void BridgeClient::postFrames(const BridgeConfig& config, const std::vector<FeatureFrame>& batch)
@@ -220,7 +234,10 @@ juce::String BridgeClient::frameToJson(const BridgeConfig& config, const juce::S
         + "}";
 }
 
-bool BridgeClient::postJson(const juce::String& url, const juce::String& body)
+bool BridgeClient::postJson(
+    const juce::String& url,
+    const juce::String& body,
+    juce::String* responseBody)
 {
     int statusCode = 0;
     juce::URL target(url);
@@ -234,7 +251,11 @@ bool BridgeClient::postJson(const juce::String& url, const juce::String& body)
         .withStatusCode(&statusCode);
 
     auto stream = target.createInputStream(options);
-    return stream != nullptr && statusCode >= 200 && statusCode < 300;
+    if (stream == nullptr || statusCode < 200 || statusCode >= 300)
+        return false;
+    if (responseBody != nullptr)
+        *responseBody = stream->readEntireStreamAsString();
+    return true;
 }
 
 SessionPlayerBridgeAudioProcessor::SessionPlayerBridgeAudioProcessor()

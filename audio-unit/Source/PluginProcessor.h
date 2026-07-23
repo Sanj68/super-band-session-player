@@ -46,13 +46,16 @@ private:
     void run() override;
 
     BridgeConfig loadConfig() const;
-    void postHeartbeat(const BridgeConfig& config);
+    void postHeartbeat(BridgeConfig& config);
     void postFrames(const BridgeConfig& config, const std::vector<FeatureFrame>& frames);
 
     static juce::String makePluginInstanceId();
     static juce::String jsonEscape(const juce::String& text);
     static juce::String frameToJson(const BridgeConfig& config, const juce::String& pluginId, const FeatureFrame& frame);
-    static bool postJson(const juce::String& url, const juce::String& body);
+    static bool postJson(
+        const juce::String& url,
+        const juce::String& body,
+        juce::String* responseBody = nullptr);
 
     juce::AbstractFifo fifo { 512 };
     std::array<FeatureFrame, 512> frames {};

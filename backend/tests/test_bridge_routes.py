@@ -86,6 +86,33 @@ def test_heartbeat_records_plugin_when_enabled(monkeypatch: pytest.MonkeyPatch) 
     body = res.json()
     assert body["connected"] is True
     assert body["plugin_instance_id"] == "plug-1"
+    assert body["session_id"] == "x"
+
+
+def test_unbound_heartbeat_resolves_latest_session_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    client = TestClient(app)
+
+    pending = client.post(
+        "/api/bridge/heartbeat",
+        json={"plugin_instance_id": "plug-pending", "plugin_version": "0.1"},
+    )
+    assert pending.status_code == 200
+    assert pending.json()["session_id"] is None
+
+    first = _create_session(client)
+    second = _create_session(client)
+    bound = client.post(
+        "/api/bridge/heartbeat",
+        json={"plugin_instance_id": "plug-auto", "plugin_version": "0.1"},
+    )
+
+    assert first != second
+    assert bound.status_code == 200
+    assert bound.json()["session_id"] == second
+    assert bridge_store.get_bridge_state(second)["plugin_instance_id"] == "plug-auto"
 
 
 def test_transport_records_for_existing_session(monkeypatch: pytest.MonkeyPatch) -> None:

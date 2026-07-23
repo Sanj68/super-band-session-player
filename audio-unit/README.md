@@ -16,10 +16,12 @@ The compiled AU component is produced under:
 audio-unit/build/SessionPlayerBridge_artefacts/Release/AU/Session Player Bridge.component
 ```
 
-Do not install it until Sanjeev has reviewed and approved the diff. After approval, copy the component to:
+After reviewing the diff, install the component with:
 
-```text
-~/Library/Audio/Plug-Ins/Components/
+```bash
+/usr/bin/ditto \
+  "build/SessionPlayerBridge_artefacts/Release/AU/Session Player Bridge.component" \
+  "$HOME/Library/Audio/Plug-Ins/Components/Session Player Bridge.component"
 ```
 
 ## Backend
@@ -33,7 +35,12 @@ SESSION_PLAYER_ENABLE_GROOVE_BRIDGE=true uvicorn app.main:app --reload
 
 ## Configuration
 
-The plugin reads config from environment variables first, then from:
+When `session_id` is omitted, the plugin asks the backend for the newest created
+session and retains that binding for the life of the plugin instance. This is
+the zero-configuration path for a single working session.
+
+To pin an analyser to a particular session, provide an explicit binding. The
+plugin reads environment variables first, then:
 
 ```text
 ~/Library/Application Support/Session Player Bridge/config.json
@@ -56,3 +63,5 @@ SESSION_PLAYER_BRIDGE_URL
 SESSION_PLAYER_SESSION_ID
 SESSION_PLAYER_SOURCE_ID
 ```
+
+The Session Player Listener AU uses the same optional `session_id` override.

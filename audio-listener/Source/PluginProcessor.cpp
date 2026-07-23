@@ -10,7 +10,9 @@ namespace session_player
 {
 namespace
 {
+constexpr auto bridgeBaseUrl = "http://127.0.0.1:8000/api/bridge";
 constexpr auto harmonicEndpoint = "http://127.0.0.1:8000/api/bridge/harmonic";
+constexpr auto listenerVersion = "0.1.0";
 constexpr double defaultTempo = 120.0;
 constexpr double beatsPerBar = 4.0;
 constexpr double referencePitch = 440.0;
@@ -133,12 +135,18 @@ void HarmonicBridgeClient::run()
 
         if (! batch.empty())
         {
+            const auto configuredSessionId = getSessionId();
+            if (configuredSessionId.isNotEmpty())
+                boundSessionId = configuredSessionId;
+            if (boundSessionId.isEmpty())
+                boundSessionId = resolveLatestSessionId(pluginInstanceId);
+
             juce::String body("[");
             size_t readyCount = 0;
             for (auto& frame : batch)
             {
                 if (frame.sessionId.isEmpty())
-                    frame.sessionId = getSessionId();
+                    frame.sessionId = boundSessionId;
 
                 if (frame.sessionId.isEmpty())
                     continue;
@@ -179,6 +187,21 @@ juce::String HarmonicBridgeClient::getSessionId()
             return parsed.getDynamicObject()->getProperty("session_id").toString().trim();
 
     return {};
+}
+
+juce::String HarmonicBridgeClient::resolveLatestSessionId(const juce::String& pluginId)
+{
+    const auto body = juce::String("{\"plugin_instance_id\":\"") + jsonEscape(pluginId)
+        + "\",\"plugin_version\":\"" + listenerVersion
+        + "\",\"source_id\":\"session-player-listener\"}";
+    juce::String responseBody;
+    if (! postJson(juce::String(bridgeBaseUrl) + "/heartbeat", body, &responseBody))
+        return {};
+
+    const auto response = juce::JSON::parse(responseBody);
+    if (! response.isObject())
+        return {};
+    return response.getProperty("session_id", "").toString().trim();
 }
 
 juce::String HarmonicBridgeClient::jsonEscape(const juce::String& text)
@@ -230,7 +253,10 @@ juce::String HarmonicBridgeClient::frameToJson(
     return json + "}";
 }
 
-bool HarmonicBridgeClient::postJson(const juce::String& url, const juce::String& body)
+bool HarmonicBridgeClient::postJson(
+    const juce::String& url,
+    const juce::String& body,
+    juce::String* responseBody)
 {
     int statusCode = 0;
     juce::URL target(url);
@@ -244,7 +270,11 @@ bool HarmonicBridgeClient::postJson(const juce::String& url, const juce::String&
         .withStatusCode(&statusCode);
 
     auto stream = target.createInputStream(options);
-    return stream != nullptr && statusCode >= 200 && statusCode < 300;
+    if (stream == nullptr || statusCode < 200 || statusCode >= 300)
+        return false;
+    if (responseBody != nullptr)
+        *responseBody = stream->readEntireStreamAsString();
+    return true;
 }
 
 SessionPlayerListenerAudioProcessor::SessionPlayerListenerAudioProcessor()

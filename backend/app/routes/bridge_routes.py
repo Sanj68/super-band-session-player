@@ -44,6 +44,14 @@ def _require_session(session_id: str) -> session_routes.StoredSession:
     return s
 
 
+def _latest_session_id() -> str | None:
+    """Resolve the newest created session for an analyser that is not bound yet."""
+
+    if not session_routes._SESSIONS:
+        return None
+    return next(reversed(session_routes._SESSIONS))
+
+
 def _apply_live_source_groove(
     s: session_routes.StoredSession,
     *,
@@ -112,9 +120,14 @@ def _apply_live_harmonic_context(s: session_routes.StoredSession) -> dict[str, A
 @router.post("/heartbeat")
 def post_heartbeat(req: BridgeHeartbeatRequest) -> dict[str, Any]:
     _require_enabled()
-    bridge_store.record_heartbeat(req)
-    sid = req.session_id or "_pending_"
-    return bridge_store.get_bridge_state(sid)
+    resolved_session_id = req.session_id or _latest_session_id()
+    resolved_req = req.model_copy(update={"session_id": resolved_session_id})
+    bridge_store.record_heartbeat(resolved_req)
+    sid = resolved_session_id or "_pending_"
+    state = bridge_store.get_bridge_state(sid)
+    # "_pending_" is an internal bucket, never a valid binding for an AU.
+    state["session_id"] = resolved_session_id
+    return state
 
 
 @router.post("/sessions/{session_id}/transport")
