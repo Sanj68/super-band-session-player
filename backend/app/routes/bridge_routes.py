@@ -105,10 +105,19 @@ def _apply_live_harmonic_context(s: session_routes.StoredSession) -> dict[str, A
             "source_metadata": metadata,
         }
     )
-    if key_conf >= 0.35:
-        s.key = _pc_name(int(key_pc))
-    if scale_conf >= 0.35 and scale:
-        s.scale = str(scale)
+    # A Listener estimate is evidence, not an instruction to replace harmony
+    # the user has already confirmed for an uploaded musical source. Keep the
+    # estimate in source_analysis_override so it remains inspectable and useful
+    # to the conditioning layer, but preserve the authoritative session key.
+    uploaded_harmony_is_confirmed = (
+        bool(s.reference_audio_path)
+        and not s.harmony_confirmation_required
+    )
+    if not uploaded_harmony_is_confirmed:
+        if key_conf >= 0.35:
+            s.key = _pc_name(int(key_pc))
+        if scale_conf >= 0.35 and scale:
+            s.scale = str(scale)
     return {
         "live_harmonic_bar_count": int(summary["bar_count"]),
         "key": s.key,

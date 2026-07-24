@@ -346,6 +346,59 @@ def test_listener_au_batch_contract_reaches_harmonic_conditioning(
     )
 
 
+def test_listener_estimate_does_not_replace_confirmed_uploaded_harmony(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Listener may advise, but confirmed source harmony remains authoritative."""
+
+    _enable(monkeypatch)
+    client = TestClient(app)
+    sid = _create_phrase_session(client)
+    stored = session_routes._SESSIONS[sid]  # type: ignore[attr-defined]
+    stored.key = "D"
+    stored.scale = "natural_minor"
+    stored.reference_audio_path = "/tmp/confirmed-musical-source.wav"
+    stored.harmony_confirmation_required = False
+    stored.harmony_map_source = "confirmed_user"
+
+    chroma = [0.02] * 12
+    chroma[9] = 0.72
+    frames = [
+        {
+            "plugin_instance_id": "listener-confirmed-harmony-guard",
+            "session_id": sid,
+            "source_id": "session-player-listener",
+            "sample_rate": 48000.0,
+            "host_tempo": 88.0,
+            "tempo_bpm": 88.0,
+            "tempo_confidence": 1.0,
+            "playing": True,
+            "ppq_position": 0.0,
+            "bar_index": 0,
+            "frame_start_seconds": 0.0,
+            "duration_seconds": 0.170667,
+            "chroma": chroma,
+            "key_pc": 9,
+            "key": "A",
+            "scale": "major",
+            "key_confidence": 0.82,
+            "scale_confidence": 0.79,
+            "cadence": "tonic",
+            "cadence_confidence": 0.6,
+        }
+    ]
+
+    bridge_res = client.post("/api/bridge/harmonic", json=frames)
+
+    assert bridge_res.status_code == 200, bridge_res.text
+    assert bridge_res.json()["key"] == "D"
+    assert bridge_res.json()["scale"] == "natural_minor"
+    assert stored.key == "D"
+    assert stored.scale == "natural_minor"
+    assert stored.source_analysis_override.tonal_center_pc_guess == 9
+    assert stored.source_analysis_override.scale_mode_guess == "major"
+
+
 def test_commit_source_groove_updates_session_override_and_visible_to_conditioning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
