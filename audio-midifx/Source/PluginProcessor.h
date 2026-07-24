@@ -28,6 +28,7 @@ struct BassPart
     int barCount = 0;
     int beatsPerBar = 4;
     juce::String preview;
+    juce::String bassInstrument { "finger_bass" };
     float bassExpression = 0.5f;
     std::vector<BassPartNote> notes;
 
@@ -68,17 +69,21 @@ public:
     void requestRegenerate();
     void requestCommand (const juce::String& text);
     juce::String statusText() const;
+    juce::String adviceText() const;
 
     juce::AudioProcessorValueTreeState apvts;
 
     static const juce::StringArray styleChoices;
     static const juce::StringArray playerChoices;
     static const juce::StringArray playerEngineIds;
+    static const juce::StringArray instrumentChoices;
+    static const juce::StringArray instrumentEngineIds;
 
 private:
     // polling thread
     void run() override;
     void fetchPart (bool updateStatus = true);
+    void fetchAdvice();
     std::shared_ptr<const BassPart> currentPart() const;
     juce::String boundSessionId() const;
     void bindSession (const juce::String& sessionId, bool replaceExisting = false);
@@ -90,8 +95,10 @@ private:
     juce::String pendingCommand_;
     juce::CriticalSection commandLock_;
     juce::CriticalSection statusLock_;
+    juce::CriticalSection adviceLock_;
     mutable juce::CriticalSection sessionLock_;
     juce::String status_ { "connecting to engine..." };
+    juce::String advice_ { "Listening to the current source..." };
     juce::String boundSessionId_;
 
     // playback state

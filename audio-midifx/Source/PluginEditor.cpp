@@ -8,6 +8,15 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     styleAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor_.apvts, "style", styleBox_);
 
+    instrumentBox_.addItemList (SessionPlayerMidiFXProcessor::instrumentChoices, 1);
+    addAndMakeVisible (instrumentBox_);
+    instrumentAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+        processor_.apvts, "instrument", instrumentBox_);
+
+    instrumentLabel_.setText ("BASS FAMILY", juce::dontSendNotification);
+    instrumentLabel_.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+    addAndMakeVisible (instrumentLabel_);
+
     lockSlider_.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     lockSlider_.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
     addAndMakeVisible (lockSlider_);
@@ -58,6 +67,11 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     statusLabel_.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel_);
 
+    adviceLabel_.setJustificationType (juce::Justification::centredLeft);
+    adviceLabel_.setFont (juce::Font (juce::FontOptions (12.0f)));
+    adviceLabel_.setColour (juce::Label::textColourId, juce::Colour (0xffb8c4df));
+    addAndMakeVisible (adviceLabel_);
+
     setAdvancedVisible (false);
     startTimerHz (4);
 }
@@ -66,13 +80,16 @@ void SessionPlayerMidiFXEditor::setAdvancedVisible (bool shouldShow)
 {
     commandBox_.setVisible (shouldShow);
     sendButton_.setVisible (shouldShow);
-    setSize (460, shouldShow ? 270 : 228);
+    instrumentBox_.setVisible (shouldShow);
+    instrumentLabel_.setVisible (shouldShow);
+    setSize (460, shouldShow ? 348 : 292);
     resized();
 }
 
 void SessionPlayerMidiFXEditor::timerCallback()
 {
     statusLabel_.setText (processor_.statusText(), juce::dontSendNotification);
+    adviceLabel_.setText (processor_.adviceText(), juce::dontSendNotification);
 }
 
 void SessionPlayerMidiFXEditor::paint (juce::Graphics& g)
@@ -90,6 +107,7 @@ void SessionPlayerMidiFXEditor::resized()
 {
     auto area = getLocalBounds().reduced (16);
     area.removeFromTop (32); // title zone
+    adviceLabel_.setBounds (area.removeFromTop (66).reduced (4, 3));
 
     auto controlRow = area.removeFromTop (112);
     auto left = controlRow.removeFromLeft (controlRow.getWidth() / 2);
@@ -106,6 +124,9 @@ void SessionPlayerMidiFXEditor::resized()
     statusLabel_.setBounds (area.removeFromBottom (22));
     if (advancedButton_.getToggleState())
     {
+        auto instrumentRow = area.removeFromTop (30);
+        instrumentLabel_.setBounds (instrumentRow.removeFromLeft (110).reduced (4, 1));
+        instrumentBox_.setBounds (instrumentRow.reduced (2, 1));
         auto commandRow = area.removeFromBottom (34);
         sendButton_.setBounds (commandRow.removeFromRight (64).reduced (2));
         commandBox_.setBounds (commandRow.reduced (2));

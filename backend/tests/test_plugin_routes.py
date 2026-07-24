@@ -135,3 +135,56 @@ def test_plugin_regenerate_only_mutates_bound_session(client: TestClient) -> Non
     assert res.json()["session_id"] == first
     assert session_routes._SESSIONS[first].bass_style == "melodic"
     assert session_routes._SESSIONS[second].bass_style == "supportive"
+
+
+def test_plugin_lists_neutral_instrument_profiles_including_upright(
+    client: TestClient,
+) -> None:
+    res = client.get("/api/plugin/instrument-profiles")
+    assert res.status_code == 200, res.text
+    assert [row["id"] for row in res.json()] == [
+        "finger_bass",
+        "fretless_bass",
+        "upright_bass",
+        "sub_bass",
+    ]
+
+
+def test_plugin_advice_is_evidence_backed_and_non_destructive(
+    client: TestClient,
+) -> None:
+    from app.routes import session_routes
+
+    sid = _create_session_with_bass(client)
+    stored = session_routes._SESSIONS[sid]
+    original_seed = stored.bass_seed
+    original_bytes = stored.bass_bytes
+
+    res = client.get(
+        "/api/plugin/advice",
+        params={"session_id": sid, "bass_instrument": "fretless_bass"},
+    )
+
+    assert res.status_code == 200, res.text
+    advice = res.json()
+    assert advice["advisory_only"] is True
+    assert advice["instrument_profile"]["id"] == "fretless_bass"
+    assert [path["id"] for path in advice["paths"]] == [
+        "accompany",
+        "counterpoint",
+        "explore",
+    ]
+    assert all(path["preserves"] for path in advice["paths"])
+    assert all(path["changes"] for path in advice["paths"])
+    assert stored.bass_seed == original_seed
+    assert stored.bass_bytes == original_bytes
+
+
+def test_plugin_regenerate_applies_upright_family(client: TestClient) -> None:
+    _create_session_with_bass(client)
+    res = client.post(
+        "/api/plugin/regenerate",
+        json={"bass_instrument": "upright_bass"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["bass_instrument"] == "upright_bass"

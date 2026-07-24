@@ -397,6 +397,7 @@ def _render_bass_performance_bytes(
     perf_notes: tuple[BassPerformanceNote, ...],
     tempo: int,
     expression_amount: float = 0.5,
+    instrument_family: str | None = None,
     conditioning: UnifiedConditioning | None = None,
 ) -> bytes:
     program = _bass_program_from_clean_bytes(clean_bytes)
@@ -405,6 +406,7 @@ def _render_bass_performance_bytes(
         tempo=int(tempo),
         program=program,
         expression_amount=expression_amount,
+        instrument_family=instrument_family,
         source_kick_per_bar=conditioning.source_kick_weight if conditioning else None,
         source_snare_per_bar=conditioning.source_snare_weight if conditioning else None,
         source_pressure_per_bar=conditioning.source_slot_pressure if conditioning else None,
@@ -967,6 +969,7 @@ def _regenerate_lane_on_stored_session(
             perf_notes=perf_notes,
             tempo=s.tempo,
             expression_amount=s.bass_expression,
+            instrument_family=s.bass_instrument,
             conditioning=cond,
         )
         s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
@@ -2082,6 +2085,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 perf_notes=perf_notes,
                 tempo=s.tempo,
                 expression_amount=s.bass_expression,
+                instrument_family=s.bass_instrument,
                 conditioning=cond,
             )
             s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)

@@ -16,6 +16,8 @@ from typing import Final, Literal
 
 import pretty_midi
 
+from app.services.bass_instrument_profiles import bass_instrument_profile
+
 
 BassArticulation = Literal[
     "normal",
@@ -88,6 +90,7 @@ def infer_bass_articulations(
     style: str | None = None,
     source: BassPerformanceSource | None = None,
     expression_amount: float = 0.5,
+    instrument_family: str | None = None,
 ) -> tuple[BassPerformanceNote, ...]:
     """Return copies with deterministic, style-aware articulation labels.
 
@@ -103,6 +106,7 @@ def infer_bass_articulations(
     _ = source
     normalized_style = str(style or "supportive").strip().lower()
     amount = max(0.0, min(1.0, float(expression_amount)))
+    instrument = bass_instrument_profile(instrument_family)
     sixteenth = 60.0 / float(max(1, tempo)) / 4.0
     out: list[BassPerformanceNote] = []
     ordered = tuple(sorted(enumerate(notes), key=lambda item: (item[1].start, item[1].pitch, item[1].end)))
@@ -116,11 +120,19 @@ def infer_bass_articulations(
         articulation: BassArticulation = "normal"
         next_note = next_by_original_index.get(idx)
         previous_note = previous_by_original_index.get(idx)
-        if amount >= 0.15 and _is_grace_note(note, next_note, sixteenth=sixteenth):
+        if (
+            amount >= 0.15
+            and instrument.allow_grace
+            and _is_grace_note(note, next_note, sixteenth=sixteenth)
+        ):
             articulation = "grace"
-        elif amount >= 0.25 and _is_ghost_note(note, sixteenth=sixteenth):
+        elif (
+            amount >= 0.25
+            and instrument.allow_ghost
+            and _is_ghost_note(note, sixteenth=sixteenth)
+        ):
             articulation = "ghost"
-        elif amount > 0.5 and _is_dead_note_candidate(
+        elif amount > 0.5 and instrument.allow_dead and _is_dead_note_candidate(
             note,
             style=normalized_style,
             sixteenth=sixteenth,
@@ -134,6 +146,7 @@ def infer_bass_articulations(
                 style=normalized_style,
                 sixteenth=sixteenth,
                 expression_amount=amount,
+                connected_bias=instrument.connected_bias,
             )
         out.append(replace(note, articulation=articulation))
     return tuple(out)
@@ -205,6 +218,7 @@ def _connected_articulation(
     style: str,
     sixteenth: float,
     expression_amount: float,
+    connected_bias: float,
 ) -> BassArticulation:
     """Infer believable connected-note intent from an adjacent pitch pair."""
 
@@ -215,6 +229,7 @@ def _connected_articulation(
         "slap": 0.10,
         "fusion": 0.48,
     }.get(style, 0.0)
+    style_ceiling *= max(0.0, float(connected_bias))
     if previous_note is None or style_ceiling <= 0.0:
         return "normal"
     gap = float(note.start) - float(previous_note.end)

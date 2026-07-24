@@ -15,6 +15,7 @@ from app.services.anchor_lane_roles import (
 )
 from app.services.bass_articulation import ghost_eligibility, shape_note
 from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
+from app.services.bass_instrument_profiles import constrain_instrument_controls
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
 from app.services.bass_vocabulary.paul_chambers import (
@@ -44,7 +45,16 @@ from app.utils import music_theory as mt
 _BASS_STYLES: Final[frozenset[str]] = frozenset(
     {"supportive", "melodic", "rhythmic", "slap", "fusion"}
 )
-_BASS_INSTRUMENTS: Final[frozenset[str]] = frozenset({"finger_bass", "slap_bass", "synth_bass"})
+_BASS_INSTRUMENTS: Final[frozenset[str]] = frozenset(
+    {
+        "finger_bass",
+        "fretless_bass",
+        "upright_bass",
+        "sub_bass",
+        "slap_bass",
+        "synth_bass",
+    }
+)
 _BASS_PLAYER_IDS: Final[frozenset[str]] = (
     frozenset({"bootsy", "marcus", "pino"}) | BASS_STYLE_ADAPTER.bass_player_ids()
 )
@@ -205,11 +215,15 @@ def normalize_bass_engine(bass_engine: str | None) -> str:
 
 
 def bass_midi_program(bass_instrument: str, bass_style: str) -> int:
-    """GM programs: 33 finger, 36 slap, 38 synth. Instrument choice wins for slap_bass."""
+    """Return the closest General MIDI bass program for the chosen family."""
     bi = normalize_bass_instrument(bass_instrument)
+    if bi == "upright_bass":
+        return 32
+    if bi == "fretless_bass":
+        return 35
     if bi == "slap_bass":
         return 36
-    if bi == "synth_bass":
+    if bi in ("synth_bass", "sub_bass"):
         return 38
     if bass_style == "slap":
         return 36
@@ -1199,6 +1213,11 @@ def generate_bass(
     expression_amount: float = 0.5,
     candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
+    density_bias, expression_amount = constrain_instrument_controls(
+        bass_instrument,
+        density_bias=density_bias,
+        expression_amount=expression_amount,
+    )
     rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
     if engine_mode == "phrase_v2":
@@ -2258,6 +2277,7 @@ def generate_bass(
                 style=style,
                 source="baseline",
                 expression_amount=expression_amount,
+                instrument_family=bi,
             )
         )
     preview = _preview(

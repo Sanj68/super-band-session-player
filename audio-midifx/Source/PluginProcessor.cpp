@@ -6,6 +6,7 @@ namespace
 constexpr auto kBassPartUrl   = "http://127.0.0.1:8000/api/plugin/bass-part";
 constexpr auto kRegenerateUrl = "http://127.0.0.1:8000/api/plugin/regenerate";
 constexpr auto kCommandUrl    = "http://127.0.0.1:8000/api/plugin/command";
+constexpr auto kAdviceUrl     = "http://127.0.0.1:8000/api/plugin/advice";
 constexpr int  kPollMs = 2000;
 }
 
@@ -24,6 +25,14 @@ const juce::StringArray SessionPlayerMidiFXProcessor::playerEngineIds {
     "none", "james_jamerson", "pino", "bootsy", "marcus", "jaco_pastorius", "paul_chambers"
 };
 
+const juce::StringArray SessionPlayerMidiFXProcessor::instrumentChoices {
+    "Fingered", "Fretless", "Upright", "Sub / Synth"
+};
+
+const juce::StringArray SessionPlayerMidiFXProcessor::instrumentEngineIds {
+    "finger_bass", "fretless_bass", "upright_bass", "sub_bass"
+};
+
 static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
@@ -39,6 +48,9 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "expression", 1 }, "Character",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "instrument", 1 }, "Bass Family",
+        SessionPlayerMidiFXProcessor::instrumentChoices, 0));
     return layout;
 }
 
@@ -74,6 +86,7 @@ void SessionPlayerMidiFXProcessor::run()
             setStatus ("regenerating...");
             auto* styleParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("style"));
             auto* playerParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("player"));
+            auto* instrumentParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("instrument"));
             auto lockValue = apvts.getRawParameterValue ("lock")->load();
             auto expressionValue = apvts.getRawParameterValue ("expression")->load();
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
@@ -82,6 +95,8 @@ void SessionPlayerMidiFXProcessor::run()
                 body->setProperty ("session_id", sessionId);
             body->setProperty ("bass_style", styleChoices[styleParam ? styleParam->getIndex() : 0]);
             body->setProperty ("bass_player", playerEngineIds[playerParam ? playerParam->getIndex() : 0]);
+            body->setProperty ("bass_instrument",
+                               instrumentEngineIds[instrumentParam ? instrumentParam->getIndex() : 0]);
             body->setProperty ("lock_to_groove", (double) lockValue);
             body->setProperty ("bass_expression", (double) expressionValue);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
@@ -128,6 +143,7 @@ void SessionPlayerMidiFXProcessor::run()
         }
 
         fetchPart();
+        fetchAdvice();
 
         for (int i = 0; i < kPollMs / 100 && ! threadShouldExit() && ! regenerateRequested_.load(); ++i)
             wait (100);
@@ -162,6 +178,7 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     fresh->barCount    = (int) parsed.getProperty ("bar_count", 0);
     fresh->beatsPerBar = (int) parsed.getProperty ("beats_per_bar", 4);
     fresh->preview     = parsed.getProperty ("preview", "").toString();
+    fresh->bassInstrument = parsed.getProperty ("bass_instrument", "finger_bass").toString();
     fresh->bassExpression = (float) parsed.getProperty ("bass_expression", 0.5);
     if (auto* arr = parsed.getProperty ("notes", juce::var()).getArray())
     {
@@ -192,6 +209,36 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
                           ? "reference-locked"
                           : (part_->preview.contains ("too thin") ? "no reference lock (thin evidence)"
                                                                   : "standard pocket")));
+    }
+}
+
+void SessionPlayerMidiFXProcessor::fetchAdvice()
+{
+    const auto sessionId = boundSessionId();
+    if (sessionId.isEmpty())
+        return;
+    auto* instrumentParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("instrument"));
+    const auto instrumentIndex = instrumentParam ? instrumentParam->getIndex() : 0;
+    juce::URL url { kAdviceUrl };
+    url = url.withParameter ("session_id", sessionId)
+             .withParameter ("bass_instrument", instrumentEngineIds[instrumentIndex]);
+    auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                       .withConnectionTimeoutMs (3000);
+    if (auto stream = url.createInputStream (options))
+    {
+        const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+        if (parsed.isObject())
+        {
+            auto text = parsed.getProperty ("summary", "").toString();
+            juce::StringArray pathLabels;
+            if (auto* paths = parsed.getProperty ("paths", juce::var()).getArray())
+                for (const auto& path : *paths)
+                    pathLabels.add (path.getProperty ("label", "").toString());
+            if (! pathLabels.isEmpty())
+                text += "\nSuggested paths: " + pathLabels.joinIntoString ("  ·  ");
+            const juce::ScopedLock l (adviceLock_);
+            advice_ = text;
+        }
     }
 }
 
@@ -242,6 +289,12 @@ juce::String SessionPlayerMidiFXProcessor::statusText() const
 {
     const juce::ScopedLock l (statusLock_);
     return status_;
+}
+
+juce::String SessionPlayerMidiFXProcessor::adviceText() const
+{
+    const juce::ScopedLock l (adviceLock_);
+    return advice_;
 }
 
 // ---- transport-synced playback ---------------------------------------------

@@ -13,13 +13,16 @@ part. The producer's working session is, in practice, the newest one.
 from __future__ import annotations
 
 import io
+from dataclasses import asdict
 
 import pretty_midi
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.models.session import LaneName, RegenerateSelectedBody
+from app.models.session import BassInstrument, LaneName, RegenerateSelectedBody
 from app.routes import session_routes
+from app.services.bass_instrument_profiles import public_bass_instrument_profiles
+from app.services.bass_journey_advisor import build_bass_journey_advice
 
 router = APIRouter()
 
@@ -63,6 +66,7 @@ class PluginBassPart(BaseModel):
     lock_to_groove: float | None
     bass_expression: float
     bass_style: str
+    bass_instrument: str
     bass_player: str | None
     notes: list[PluginNote]
 
@@ -96,6 +100,7 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
         lock_to_groove=s.bass_lock_to_groove,
         bass_expression=float(s.bass_expression),
         bass_style=s.bass_style,
+        bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         notes=notes,
     )
@@ -115,6 +120,7 @@ class PluginRegenerateBody(BaseModel):
         description="Persistent session binding owned by this plugin instance.",
     )
     bass_style: str | None = Field(default=None)
+    bass_instrument: BassInstrument | None = Field(default=None)
     bass_player: str | None = Field(default=None, description="Legacy internal profile id.")
     lock_to_groove: float | None = Field(default=None, ge=0.0, le=1.0)
     bass_expression: float | None = Field(
@@ -227,6 +233,8 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
     if body.bass_style is not None:
         s.bass_style = body.bass_style
+    if body.bass_instrument is not None:
+        s.bass_instrument = body.bass_instrument.value
     if body.bass_player is not None:
         s.bass_player = None if body.bass_player.strip().lower() in ("", "none") else body.bass_player
     if body.lock_to_groove is not None:
@@ -236,3 +244,85 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s.bass_engine = _engine_for_player(s.bass_player)
     session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
     return _bass_part_for_session(s)
+
+
+class PluginInstrumentProfile(BaseModel):
+    id: str
+    label: str
+    description: str
+    density_ceiling: float
+    expression_ceiling: float
+    connected_bias: float
+    allow_ghost: bool
+    allow_dead: bool
+    allow_grace: bool
+    sustain_multiplier: float
+    timing_scale: float
+
+
+class PluginSourceTrait(BaseModel):
+    id: str
+    label: str
+    strength: float
+    confidence: float
+    evidence: str
+
+
+class PluginStyleOrientation(BaseModel):
+    id: str
+    label: str
+    strength: float
+    confidence: float
+
+
+class PluginJourneyPath(BaseModel):
+    id: str
+    label: str
+    summary: str
+    preserves: list[str]
+    changes: list[str]
+    suggested_style: str
+    suggested_expression: float
+    suggested_lock_to_groove: float
+    suggested_density_bias: float
+
+
+class PluginJourneyAdvice(BaseModel):
+    summary: str
+    confidence: float
+    confidence_label: str
+    instrument_profile: PluginInstrumentProfile
+    traits: list[PluginSourceTrait]
+    style_orientation: list[PluginStyleOrientation]
+    paths: list[PluginJourneyPath]
+    advisory_only: bool
+
+
+@router.get("/instrument-profiles", response_model=list[PluginInstrumentProfile])
+def plugin_instrument_profiles() -> list[PluginInstrumentProfile]:
+    return [
+        PluginInstrumentProfile.model_validate(asdict(profile))
+        for profile in public_bass_instrument_profiles()
+    ]
+
+
+@router.get("/advice", response_model=PluginJourneyAdvice)
+def plugin_journey_advice(
+    session_id: str | None = None,
+    bass_instrument: BassInstrument | None = None,
+) -> PluginJourneyAdvice:
+    """Return evidence-backed, non-destructive musical routes."""
+
+    s = _bass_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    selected_instrument = (
+        bass_instrument.value if bass_instrument is not None else s.bass_instrument
+    )
+    conditioning = session_routes._conditioning_for_generation(s, context=None)  # noqa: SLF001
+    assert conditioning is not None
+    advice = build_bass_journey_advice(
+        conditioning,
+        instrument_family=selected_instrument,
+    )
+    return PluginJourneyAdvice.model_validate(asdict(advice))

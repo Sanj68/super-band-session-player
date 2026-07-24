@@ -22,6 +22,7 @@ import io
 
 import pretty_midi
 
+from app.services.bass_instrument_profiles import bass_instrument_profile
 from app.services.bass_performance import BassPerformanceNote
 
 
@@ -83,6 +84,7 @@ def render_performance_bass_midi(
     tempo: int,
     program: int,
     expression_amount: float = 0.5,
+    instrument_family: str | None = None,
     source_kick_per_bar: tuple[tuple[float, ...], ...] | None = None,
     source_snare_per_bar: tuple[tuple[float, ...], ...] | None = None,
     source_pressure_per_bar: tuple[tuple[float, ...], ...] | None = None,
@@ -111,6 +113,7 @@ def render_performance_bass_midi(
     amount = max(0.0, min(1.0, float(expression_amount)))
     feel_scale = min(1.5, amount * 2.0)
     connected_scale = max(0.0, min(1.0, (amount - 0.5) * 2.0))
+    instrument = bass_instrument_profile(instrument_family)
     ordered = tuple(
         sorted(
             notes,
@@ -130,6 +133,8 @@ def render_performance_bass_midi(
             source_pressure_per_bar=source_pressure_per_bar,
             feel_scale=feel_scale,
             connected_scale=connected_scale,
+            sustain_multiplier=instrument.sustain_multiplier,
+            timing_scale=instrument.timing_scale,
         )
         rendered_notes.append(rendered)
 
@@ -159,6 +164,8 @@ def _shape_note(
     source_pressure_per_bar: tuple[tuple[float, ...], ...] | None,
     feel_scale: float,
     connected_scale: float,
+    sustain_multiplier: float,
+    timing_scale: float,
 ) -> pretty_midi.Note:
     pitch = int(note.pitch)
     velocity = int(note.velocity)
@@ -195,7 +202,9 @@ def _shape_note(
 
     # 2) v0.8 feel layer: applied to normal/slide/hammer notes only.
     vel_delta = int(round(_ROLE_VEL_DELTA.get(role, 0) * feel_scale))
-    dur_mult = 1.0 + (_ROLE_DUR_MULT.get(role, 1.0) - 1.0) * feel_scale
+    dur_mult = (
+        1.0 + (_ROLE_DUR_MULT.get(role, 1.0) - 1.0) * feel_scale
+    ) * max(0.5, min(1.5, float(sustain_multiplier)))
 
     # 4-bar phrase arc on velocity (bar % 4).
     if bar is not None:
@@ -227,7 +236,11 @@ def _shape_note(
     end = start + duration
 
     # 4) Bounded deterministic micro-timing offset (no rng; hash-based).
-    offset = _micro_timing_offset(role=role, bar=bar, slot=slot, pitch=pitch) * feel_scale
+    offset = (
+        _micro_timing_offset(role=role, bar=bar, slot=slot, pitch=pitch)
+        * feel_scale
+        * max(0.0, min(1.0, float(timing_scale)))
+    )
     if offset != 0.0:
         new_start = max(0.0, start + offset)
         # Keep duration constant under timing nudge.

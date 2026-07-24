@@ -82,6 +82,9 @@ class LeadPlayer(str, Enum):
 
 class BassInstrument(str, Enum):
     finger_bass = "finger_bass"
+    fretless_bass = "fretless_bass"
+    upright_bass = "upright_bass"
+    sub_bass = "sub_bass"
     slap_bass = "slap_bass"
     synth_bass = "synth_bass"
 

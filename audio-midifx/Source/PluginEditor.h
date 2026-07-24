@@ -22,6 +22,8 @@ private:
     SessionPlayerMidiFXProcessor& processor_;
 
     juce::ComboBox styleBox_;
+    juce::ComboBox instrumentBox_;
+    juce::Label instrumentLabel_;
     juce::Slider lockSlider_;
     juce::Label lockLabel_;
     juce::Slider expressionSlider_;
@@ -30,9 +32,11 @@ private:
     juce::TextButton advancedButton_ { "Advanced" };
     juce::TextEditor commandBox_;
     juce::TextButton sendButton_ { "Say it" };
+    juce::Label adviceLabel_;
     juce::Label statusLabel_;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> styleAttach_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instrumentAttach_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lockAttach_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> expressionAttach_;
 

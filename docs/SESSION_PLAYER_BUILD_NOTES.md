@@ -212,6 +212,48 @@ work, not reasons to expand the React audition lab.
 Verification for this slice: 495 backend tests passed; the AU Release
 build completed and `auval -v aumi SpMx SOne` passed.
 
+### 2026-07-24 listening advisor and bass-family constraints
+
+The next plugin foundation is now implemented without making exploration
+destructive.
+
+The read-only `/api/plugin/advice` contract:
+
+- measures neutral source traits: syncopation, eighth-note offbeat
+  emphasis, musical space and harmonic colour;
+- reports strength, confidence and plain evidence for every trait;
+- uses reggae/funk/jazz language only as a secondary orientation;
+- offers Accompany, Counterpoint and Explore routes;
+- states what each route preserves and changes;
+- adjusts its suggestions for the selected bass family;
+- never regenerates or promotes a take.
+
+The actual accepted 88 BPM combined source currently yields: "subtle
+harmonic colour — jazz orientation; confidence medium." That restraint is
+intentional. The confirmed chord map is trustworthy, but the combined
+audio's style/rhythmic evidence is not strong enough to invent a confident
+reggae or funk label.
+
+Four neutral capability profiles now sit between performance intent and
+MIDI rendering:
+
+- **Fingered** — balanced attacks, space, ghosts and connections;
+- **Fretless** — more connected intent and sustain, no automatic dead or
+  ghost notes;
+- **Upright (pizzicato)** — a distinct double-bass family with natural
+  decay, restrained connected playing and voice-leading movement;
+- **Sub / Synth** — lower density and expression ceilings, protected
+  low-register space, longer tones and no automatic grace/ghost/dead or
+  connected-note intent.
+
+The AU displays the listening summary and its three suggested routes.
+Bass Family lives in Advanced and updates the advice before regeneration.
+Public automation exposes Fingered, Fretless, Upright and Sub / Synth.
+
+Still deliberately pending: applying a recommended route. That action
+must land with keep/lock/history/recall so trying Explore cannot destroy a
+good idea.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

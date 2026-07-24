@@ -32,7 +32,16 @@ from app.services.style_adapter import BASS_STYLE_ADAPTER
 from app.utils import music_theory as mt
 
 _BASS_STYLES = frozenset({"supportive", "melodic", "rhythmic", "slap", "fusion"})
-_BASS_INSTRUMENTS = frozenset({"finger_bass", "slap_bass", "synth_bass"})
+_BASS_INSTRUMENTS = frozenset(
+    {
+        "finger_bass",
+        "fretless_bass",
+        "upright_bass",
+        "sub_bass",
+        "slap_bass",
+        "synth_bass",
+    }
+)
 _BASS_PLAYERS = frozenset({"bootsy", "marcus", "pino"}) | BASS_STYLE_ADAPTER.bass_player_ids()
 
 
@@ -61,9 +70,13 @@ def normalize_bass_instrument(bass_instrument: str | None) -> str:
 
 def bass_midi_program(bass_instrument: str, bass_style: str) -> int:
     bi = normalize_bass_instrument(bass_instrument)
+    if bi == "upright_bass":
+        return 32
+    if bi == "fretless_bass":
+        return 35
     if bi == "slap_bass":
         return 36
-    if bi == "synth_bass":
+    if bi in ("synth_bass", "sub_bass"):
         return 38
     if bass_style == "slap":
         return 36
@@ -471,6 +484,7 @@ def generate_bass_phrase_v2(
                     style=style,
                     source="phrase_v2",
                     expression_amount=expression_amount,
+                    instrument_family=bi,
                 )
             )
             return buf.getvalue(), preview, tuple(perf_notes)
@@ -581,6 +595,7 @@ def generate_bass_phrase_v2(
                     style=style,
                     source="phrase_v2",
                     expression_amount=expression_amount,
+                    instrument_family=bi,
                 )
             )
             return buf.getvalue(), preview, tuple(perf_notes)
@@ -810,6 +825,7 @@ def generate_bass_phrase_v2(
                 style=style,
                 source="phrase_v2",
                 expression_amount=expression_amount,
+                instrument_family=bi,
             )
         )
         return buf.getvalue(), preview, tuple(perf_notes)
