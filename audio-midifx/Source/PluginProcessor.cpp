@@ -177,10 +177,13 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     fresh->sessionId   = parsed.getProperty ("session_id", "").toString();
     fresh->key         = parsed.getProperty ("key", "").toString();
     fresh->scale       = parsed.getProperty ("scale", "").toString();
+    fresh->bassStyle   = parsed.getProperty ("bass_style", "supportive").toString();
     fresh->barCount    = (int) parsed.getProperty ("bar_count", 0);
     fresh->beatsPerBar = (int) parsed.getProperty ("beats_per_bar", 4);
     fresh->preview     = parsed.getProperty ("preview", "").toString();
     fresh->bassInstrument = parsed.getProperty ("bass_instrument", "finger_bass").toString();
+    const auto lockValue = parsed.getProperty ("lock_to_groove", 0.5);
+    fresh->lockToGroove = lockValue.isVoid() ? 0.5f : (float) lockValue;
     fresh->bassExpression = (float) parsed.getProperty ("bass_expression", 0.5);
     if (auto* arr = parsed.getProperty ("notes", juce::var()).getArray())
     {
@@ -196,6 +199,8 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
         }
     }
     bindSession (fresh->sessionId);
+    if (! parametersHydratedFromPart_.exchange (true))
+        hydrateParametersFromPart (*fresh);
 
     {
         const juce::SpinLock::ScopedLockType l (partLock_);
@@ -214,6 +219,23 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
                           : (part_->preview.contains ("too thin") ? "no reference lock (thin evidence)"
                                                                   : "standard pocket")));
     }
+}
+
+void SessionPlayerMidiFXProcessor::hydrateParametersFromPart (const BassPart& part)
+{
+    const auto setParameter = [this] (const juce::String& parameterId, float value)
+    {
+        if (auto* parameter = apvts.getParameter (parameterId))
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+    };
+
+    const auto styleIndex = juce::jmax (0, styleChoices.indexOf (part.bassStyle));
+    const auto instrumentIndex = juce::jmax (
+        0, instrumentEngineIds.indexOf (part.bassInstrument));
+    setParameter ("style", (float) styleIndex);
+    setParameter ("instrument", (float) instrumentIndex);
+    setParameter ("lock", juce::jlimit (0.0f, 1.0f, part.lockToGroove));
+    setParameter ("expression", juce::jlimit (0.0f, 1.0f, part.bassExpression));
 }
 
 void SessionPlayerMidiFXProcessor::fetchAdvice()
@@ -265,7 +287,11 @@ void SessionPlayerMidiFXProcessor::bindSession (const juce::String& sessionId,
         return;
     const juce::ScopedLock l (sessionLock_);
     if (replaceExisting || boundSessionId_.isEmpty())
+    {
+        if (replaceExisting || boundSessionId_ != sessionId)
+            parametersHydratedFromPart_ = false;
         boundSessionId_ = sessionId;
+    }
 }
 
 void SessionPlayerMidiFXProcessor::requestRegenerate()

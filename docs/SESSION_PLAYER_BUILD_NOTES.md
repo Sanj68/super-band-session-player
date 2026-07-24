@@ -269,6 +269,18 @@ B-flat minor while the accepted session remained confirmed D natural
 minor. The tentative Listener estimate must never silently replace
 confirmed session harmony. Both rebuilt AUs pass Apple validation.
 
+Second Logic UI check:
+
+- the Listener now visibly reports a tentative G minor estimate at 50%
+  confidence while the Bass AU independently reports D natural minor
+  (confirmed);
+- the live-harmonic bridge now preserves confirmed uploaded-source
+  harmony while retaining Listener evidence inside source analysis;
+- the Bass controls now hydrate once from the bound session, so Style,
+  Bass Family, Character and Groove Lock describe the loaded part before
+  the user asks for another idea. This fixes the accepted 0.70 groove
+  lock appearing as the plug-in's 0.50 parameter default.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

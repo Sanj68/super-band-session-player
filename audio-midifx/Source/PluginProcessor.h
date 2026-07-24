@@ -27,10 +27,12 @@ struct BassPart
     juce::String sessionId;
     juce::String key;
     juce::String scale;
+    juce::String bassStyle { "supportive" };
     int barCount = 0;
     int beatsPerBar = 4;
     juce::String preview;
     juce::String bassInstrument { "finger_bass" };
+    float lockToGroove = 0.5f;
     float bassExpression = 0.5f;
     std::vector<BassPartNote> notes;
 
@@ -86,12 +88,14 @@ private:
     void run() override;
     void fetchPart (bool updateStatus = true);
     void fetchAdvice();
+    void hydrateParametersFromPart (const BassPart& part);
     std::shared_ptr<const BassPart> currentPart() const;
     juce::String boundSessionId() const;
     void bindSession (const juce::String& sessionId, bool replaceExisting = false);
 
     std::shared_ptr<const BassPart> part_;
     mutable juce::SpinLock partLock_;
+    std::atomic<bool> parametersHydratedFromPart_ { false };
 
     std::atomic<bool> regenerateRequested_ { false };
     juce::String pendingCommand_;
