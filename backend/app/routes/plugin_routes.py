@@ -59,6 +59,8 @@ class PluginNote(BaseModel):
 class PluginBassPart(BaseModel):
     session_id: str
     tempo: int
+    key: str
+    scale: str
     bar_count: int
     beats_per_bar: int = 4
     source: str = Field(description="clean or performance render")
@@ -94,6 +96,8 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
     return PluginBassPart(
         session_id=s.id,
         tempo=int(s.tempo),
+        key=s.key,
+        scale=s.scale,
         bar_count=int(s.bar_count),
         source=source,
         preview=s.bass_preview or "",

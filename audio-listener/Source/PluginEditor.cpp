@@ -45,7 +45,14 @@ void SessionPlayerListenerAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xff7f8b98));
     g.setFont(juce::FontOptions(13.0f));
-    g.drawText("Current key", 34, 76, getWidth() - 68, 20, juce::Justification::centredLeft);
+    const auto confidence = juce::roundToInt(audioProcessor.getCurrentKeyConfidence() * 100.0f);
+    g.drawText(
+        "Tentative live estimate - " + juce::String(confidence) + "% confidence",
+        34,
+        76,
+        getWidth() - 68,
+        20,
+        juce::Justification::centredLeft);
 }
 
 void SessionPlayerListenerAudioProcessorEditor::resized()

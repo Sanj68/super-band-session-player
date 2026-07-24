@@ -175,6 +175,8 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
 
     auto fresh = std::make_shared<BassPart>();
     fresh->sessionId   = parsed.getProperty ("session_id", "").toString();
+    fresh->key         = parsed.getProperty ("key", "").toString();
+    fresh->scale       = parsed.getProperty ("scale", "").toString();
     fresh->barCount    = (int) parsed.getProperty ("bar_count", 0);
     fresh->beatsPerBar = (int) parsed.getProperty ("beats_per_bar", 4);
     fresh->preview     = parsed.getProperty ("preview", "").toString();
@@ -203,8 +205,10 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
         return;
     {
         const juce::SpinLock::ScopedLockType l (partLock_);
-        setStatus (juce::String (part_->notes.size()) + " notes · "
-                   + juce::String (part_->barCount) + " bars · "
+        auto scaleLabel = part_->scale.replaceCharacter ('_', ' ');
+        setStatus (part_->key + " " + scaleLabel + " (confirmed) | "
+                   + juce::String (part_->notes.size()) + " notes | "
+                   + juce::String (part_->barCount) + " bars | "
                    + (part_->preview.contains ("locked to the reference groove")
                           ? "reference-locked"
                           : (part_->preview.contains ("too thin") ? "no reference lock (thin evidence)"
@@ -235,7 +239,7 @@ void SessionPlayerMidiFXProcessor::fetchAdvice()
                 for (const auto& path : *paths)
                     pathLabels.add (path.getProperty ("label", "").toString());
             if (! pathLabels.isEmpty())
-                text += "\nSuggested paths: " + pathLabels.joinIntoString ("  ·  ");
+                text += "\nSuggested paths: " + pathLabels.joinIntoString (" | ");
             const juce::ScopedLock l (adviceLock_);
             advice_ = text;
         }

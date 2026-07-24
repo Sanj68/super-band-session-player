@@ -254,6 +254,21 @@ Still deliberately pending: applying a recommended route. That action
 must land with keep/lock/history/recall so trying Explore cannot destroy a
 good idea.
 
+First Logic UI check:
+
+- the Bass AU loaded the advisor and all three paths successfully;
+- UTF-8 middle-dot separators rendered as `Â·`, so all public C++ copy now
+  uses ASCII separators;
+- Character and Groove Lock labels were simplified to avoid crowding;
+- the Bass AU now displays its **confirmed** session key/scale;
+- the separate Listener's live estimate is explicitly labelled tentative
+  with its confidence percentage.
+
+The screenshot exposed a real trust boundary: the live Listener proposed
+B-flat minor while the accepted session remained confirmed D natural
+minor. The tentative Listener estimate must never silently replace
+confirmed session harmony. Both rebuilt AUs pass Apple validation.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

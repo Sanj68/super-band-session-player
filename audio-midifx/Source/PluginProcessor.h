@@ -25,6 +25,8 @@ struct BassPartNote
 struct BassPart
 {
     juce::String sessionId;
+    juce::String key;
+    juce::String scale;
     int barCount = 0;
     int beatsPerBar = 4;
     juce::String preview;

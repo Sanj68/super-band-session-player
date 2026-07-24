@@ -51,6 +51,8 @@ def test_bass_part_returns_latest_session_notes(client: TestClient) -> None:
     part = res.json()
     assert part["session_id"] == sid
     assert part["tempo"] == 100
+    assert part["key"] == "C"
+    assert part["scale"] == "major"
     assert part["bar_count"] == 2
     assert part["beats_per_bar"] == 4
     assert len(part["notes"]) > 0

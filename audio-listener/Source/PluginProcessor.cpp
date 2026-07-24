@@ -415,6 +415,11 @@ juce::String SessionPlayerListenerAudioProcessor::getCurrentKeyText() const
     return currentKeyText;
 }
 
+float SessionPlayerListenerAudioProcessor::getCurrentKeyConfidence() const
+{
+    return currentKeyConfidence.load();
+}
+
 void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
 {
     currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
@@ -477,6 +482,7 @@ void SessionPlayerListenerAudioProcessor::maybeEmitBarFrame(const juce::AudioPla
     {
         const juce::ScopedLock lock(keyLock);
         currentKeyText = frame.key + " " + frame.scale;
+        currentKeyConfidence = frame.keyConfidence;
     }
 
     lastEmittedBar = barIndex;

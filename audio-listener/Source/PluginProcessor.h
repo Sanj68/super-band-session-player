@@ -96,6 +96,7 @@ public:
 
     bool isConnected() const;
     juce::String getCurrentKeyText() const;
+    float getCurrentKeyConfidence() const;
 
 private:
     static constexpr int fftOrder = 13;
@@ -125,7 +126,8 @@ private:
     int fallbackBarIndex = 0;
 
     mutable juce::CriticalSection keyLock;
-    juce::String currentKeyText = "C major";
+    juce::String currentKeyText = "No estimate yet";
+    std::atomic<float> currentKeyConfidence { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SessionPlayerListenerAudioProcessor)
 };

@@ -34,7 +34,7 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     expressionAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor_.apvts, "expression", expressionSlider_);
 
-    expressionLabel_.setText ("RESTRAINED  ·  BOLD", juce::dontSendNotification);
+    expressionLabel_.setText ("CHARACTER", juce::dontSendNotification);
     expressionLabel_.setJustificationType (juce::Justification::centred);
     expressionLabel_.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
     addAndMakeVisible (expressionLabel_);
@@ -46,7 +46,7 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     advancedButton_.onClick = [this] { setAdvancedVisible (advancedButton_.getToggleState()); };
     addAndMakeVisible (advancedButton_);
 
-    commandBox_.setTextToShowWhenEmpty ("describe a change... (more space · redo bar 2)",
+    commandBox_.setTextToShowWhenEmpty ("describe a change... (more space - redo bar 2)",
                                         juce::Colours::grey);
     commandBox_.setFont (juce::Font (juce::FontOptions (13.0f)));
     commandBox_.onReturnKey = [this]
@@ -97,7 +97,7 @@ void SessionPlayerMidiFXEditor::paint (juce::Graphics& g)
     g.fillAll (juce::Colour (0xff14141c));
     g.setColour (juce::Colours::white);
     g.setFont (juce::Font (juce::FontOptions (17.0f, juce::Font::bold)));
-    g.drawText ("SESSION PLAYER  ·  BASS", 16, 12, getWidth() - 32, 22,
+    g.drawText ("SESSION PLAYER - BASS", 16, 12, getWidth() - 32, 22,
                 juce::Justification::centredLeft);
     g.setColour (juce::Colour (0xff6366f1));
     g.fillRect (16, 36, getWidth() - 32, 2);
