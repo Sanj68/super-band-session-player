@@ -282,6 +282,15 @@ def _harmonic_bar_plan(
     context: SessionAnchorContext | None,
     conditioning: UnifiedConditioning | None = None,
 ) -> tuple[int, list[int], list[int], list[int], float]:
+    harm = conditioning.harmonic_bar(bar) if conditioning is not None else None
+    if harm is not None and str(harm.source) == "confirmed_chord_progression":
+        return (
+            int(harm.root_pc),
+            [int(x) for x in harm.target_pcs],
+            [int(x) for x in harm.passing_pcs],
+            [int(x) for x in harm.avoid_pcs],
+            float(harm.confidence),
+        )
     if context is not None and bar < len(context.harmonic_target_pcs_per_bar):
         root = int(context.harmonic_root_pc_per_bar[bar])
         stable = [int(x) for x in context.harmonic_target_pcs_per_bar[bar]]
@@ -289,7 +298,6 @@ def _harmonic_bar_plan(
         avoid = [int(x) for x in context.harmonic_avoid_pcs_per_bar[bar]]
         conf = float(context.harmonic_confidence_per_bar[bar]) if bar < len(context.harmonic_confidence_per_bar) else 0.2
         return root, stable, passing, avoid, conf
-    harm = conditioning.harmonic_bar(bar) if conditioning is not None else None
     if harm is not None:
         return (
             int(harm.root_pc),
@@ -591,6 +599,16 @@ def generate_bass_phrase_v2(
         if dense <= -0.25:
             slots = [s for s in slots if s == 0 or rng.random() > (-dense * 0.55)]
         root_pc, stable_pcs, passing_pcs, avoid_pcs, conf = harmonic_plan[bar]
+        confirmed_harmonic = conditioning.harmonic_bar(bar) if conditioning is not None else None
+        if (
+            str(bass_style or "supportive") == "supportive"
+            and confirmed_harmonic is not None
+            and str(confirmed_harmonic.source) == "confirmed_chord_progression"
+        ):
+            # A confirmed chart is stronger evidence than global scale
+            # membership. Supportive lines use chord tones here; the explicit
+            # late-bar approach below remains the controlled source of color.
+            passing_pcs = []
         next_root_pc = harmonic_plan[(bar + 1) % len(harmonic_plan)][0]
         bar_t0 = bar_anchor + bar * 4.0 * spb
         bar_t1 = bar_anchor + (bar + 1) * 4.0 * spb

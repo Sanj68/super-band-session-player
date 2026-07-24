@@ -56,6 +56,47 @@ Tests: 29 passed. Engines exercised: drums, bass (baseline + phrase_v2),
 chords, lead. Reference audio upload + analysis pipeline already present
 but not yet driving generation in the demoable way v0.3 requires.
 
+### 2026-07-24 controlled combined-source acceptance
+
+The first combined-source audition exposed a harmonic-fit defect rather
+than a scale-safety defect: a repeated B-flat was legal in D natural
+minor but unsupported in the C bars of the source. The uploaded-audio
+path had confirmed only a global key and silently supplied I-IV-V-I to
+generation and scoring.
+
+The bounded repair is now:
+
+- audio analysis proposes an explicitly tentative repeating bar-level
+  chord map;
+- uploaded-audio sessions require separate confirmation of both
+  key/scale and the bar-level map;
+- a confirmed chord chart becomes the conditioning harmony used by the
+  phrase engine and candidate scoring;
+- supportive Phrase Engine v2 lines use confirmed chord tones plus
+  controlled resolving approaches, rather than arbitrary global-scale
+  passing tones;
+- candidates with unsupported structural notes are rejected, with no
+  unsafe final-fill fallback.
+
+The exact combined Logic bounce still reads 87.598 BPM / 16 bars and
+proposes `Bb | C | D | Gm` with four-bar repeat similarity 0.9913. The
+chord confidences are low, so the map remains a user-confirmed
+suggestion. The accepted browser run is
+`cand_20260724T045514_2c69b4f6` in session
+`92e7b255-8fba-43a3-8d8c-742d64a91778`.
+
+All four downloaded takes are 88 BPM and 64 playable beats, with no
+same-pitch overlaps, sub-25 ms notes, loop overruns, scale-unsafe notes
+or chord-map guard violations. Pairwise note/slot/pitch Jaccard distance
+is 0.267–0.409; 67.9–69.2% of note onsets land in each source bar's four
+strongest detected kick slots at groove lock 0.70.
+
+Verification: 486 backend tests passed and the frontend production build
+passed. The validation-pack command currently reports 5/15, not the
+11/15 stated in the morning handoff; this discrepancy predates the
+bar-level harmony changes and must be reconciled separately rather than
+reported as passing.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

@@ -669,6 +669,25 @@ class SessionState(BaseModel):
         default=False,
         description="True when source key analysis is too uncertain to permit harmonic generation.",
     )
+    harmony_map_confirmation_required: bool = Field(
+        default=False,
+        description=(
+            "True when uploaded audio has no confirmed bar-level chord map. "
+            "Global key confirmation alone does not clear this gate."
+        ),
+    )
+    suggested_chord_progression: list[str] | None = Field(
+        default=None,
+        description="Tentative audio-derived chord symbols offered for user confirmation.",
+    )
+    suggested_chord_confidence: list[float] | None = Field(
+        default=None,
+        description="Per-chord confidence for the tentative uploaded-audio harmony map.",
+    )
+    harmony_map_source: str = Field(
+        default="none",
+        description="Harmony-map provenance: none, uploaded_audio_chroma_tentative, or confirmed_user.",
+    )
     lanes: dict[str, LaneState]
     message: str | None = None
 

@@ -59,6 +59,30 @@ def test_infer_bar_count_from_beats_tolerates_missing_edge_beats(
     assert asa.infer_bar_count_from_beats(beat_count) == expected
 
 
+def test_tentative_chord_map_folds_repeating_four_bar_audio_profiles() -> None:
+    def chord_profile(root: int, third: int, fifth: int) -> np.ndarray:
+        row = np.zeros(12, dtype=float)
+        row[root] = 0.5
+        row[third] = 0.28
+        row[fifth] = 0.22
+        return row
+
+    phrase = [
+        chord_profile(10, 2, 5),  # Bb
+        chord_profile(0, 4, 7),   # C
+        chord_profile(2, 6, 9),   # D
+        chord_profile(7, 10, 2),  # Gm
+    ]
+
+    result = asa.infer_tentative_chord_map_from_profiles(phrase * 4)
+
+    assert result["chords"] == ["Bb", "C", "D", "Gm"]
+    assert result["period_bars"] == 4
+    assert result["repeat_similarity"] == pytest.approx(1.0)
+    assert result["source"] == "uploaded_audio_chroma_tentative"
+    assert all(float(value) > 0.0 for value in result["confidence"])
+
+
 def test_audio_analysis_applies_filename_context_before_building_structure(tmp_path) -> None:
     import soundfile as sf
 

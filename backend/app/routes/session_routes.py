@@ -48,7 +48,7 @@ from app.services.bass_performance import BassPerformanceNote
 from app.services.bass_performance_render import render_performance_bass_midi
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
 from app.services.audio_source_analysis import analyze_reference_audio
-from app.services.bass_quality import analyze_bass_take
+from app.services.bass_quality import analyze_bass_take, count_unsupported_structural_notes
 from app.services.midi_note_extract import extract_lane_notes
 from app.services.lead_generator import normalize_lead_style
 from app.services.midi_export import lane_midi_response, merge_lane_midis, zip_all_lanes
@@ -151,6 +151,10 @@ class StoredSession:
     groove_reference_audio_head_trim_seconds: float = 0.0
     groove_reference_analysis_override: object | None = None
     harmony_confirmation_required: bool = False
+    harmony_map_confirmation_required: bool = False
+    suggested_chord_progression: list[str] | None = None
+    suggested_chord_confidence: list[float] | None = None
+    harmony_map_source: str = "none"
     current_bass_candidate_run_id: str | None = None
     current_bass_candidate_take_id: str | None = None
 
@@ -216,6 +220,7 @@ def _lane_states(s: StoredSession) -> dict[str, LaneState]:
 
 
 def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
+    _sync_harmony_map_gate(s)
     ctx = build_session_context(s)
     musical_src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
     src = fuse_source_and_groove(musical_src, s.groove_reference_analysis_override)
@@ -281,6 +286,18 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         reference_audio=ref_audio,
         groove_reference_audio=groove_ref_audio,
         harmony_confirmation_required=s.harmony_confirmation_required,
+        harmony_map_confirmation_required=s.harmony_map_confirmation_required,
+        suggested_chord_progression=(
+            list(s.suggested_chord_progression)
+            if s.suggested_chord_progression is not None
+            else None
+        ),
+        suggested_chord_confidence=(
+            list(s.suggested_chord_confidence)
+            if s.suggested_chord_confidence is not None
+            else None
+        ),
+        harmony_map_source=s.harmony_map_source,
         lanes=_lane_states(s),
         message=message,
     )
@@ -293,13 +310,55 @@ def _get_session_or_404(session_id: str) -> StoredSession:
     return s
 
 
+def _sync_harmony_map_gate(s: StoredSession) -> None:
+    """Harden restored pre-gate audio sessions and hydrate stored suggestions."""
+    if not s.reference_audio_path:
+        return
+    if s.chord_progression:
+        s.harmony_map_confirmation_required = False
+        if s.harmony_map_source == "none":
+            s.harmony_map_source = "confirmed_user"
+        return
+    if s.source_analysis_override is not None and not s.suggested_chord_progression:
+        metadata = getattr(s.source_analysis_override, "source_metadata", {}) or {}
+        suggestion = metadata.get("harmony_suggestions", {})
+        chords = suggestion.get("chords", []) if isinstance(suggestion, dict) else []
+        confidence = suggestion.get("confidence", []) if isinstance(suggestion, dict) else []
+        if isinstance(chords, list):
+            clean = [str(chord).strip() for chord in chords if str(chord).strip()]
+            s.suggested_chord_progression = clean or None
+        if isinstance(confidence, list):
+            s.suggested_chord_confidence = [
+                max(0.0, min(1.0, float(value))) for value in confidence
+            ] or None
+    s.harmony_map_confirmation_required = True
+    s.harmony_map_source = (
+        "uploaded_audio_chroma_tentative"
+        if s.suggested_chord_progression
+        else "none"
+    )
+
+
 def _require_confirmed_harmony(s: StoredSession) -> None:
+    _sync_harmony_map_gate(s)
     if s.harmony_confirmation_required:
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "harmony_confirmation_required",
                 "message": "Confirm or correct the tentative key and scale before generating harmonic parts.",
+            },
+        )
+    if s.harmony_map_confirmation_required:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "harmony_map_confirmation_required",
+                "message": (
+                    "Confirm or correct the tentative bar-level chord map before "
+                    "generating harmonic parts from uploaded audio."
+                ),
+                "suggested_chord_progression": list(s.suggested_chord_progression or []),
             },
         )
 
@@ -422,6 +481,18 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         groove_reference_audio_head_trim_seconds=src.groove_reference_audio_head_trim_seconds,
         groove_reference_analysis_override=src.groove_reference_analysis_override,
         harmony_confirmation_required=src.harmony_confirmation_required,
+        harmony_map_confirmation_required=src.harmony_map_confirmation_required,
+        suggested_chord_progression=(
+            list(src.suggested_chord_progression)
+            if src.suggested_chord_progression is not None
+            else None
+        ),
+        suggested_chord_confidence=(
+            list(src.suggested_chord_confidence)
+            if src.suggested_chord_confidence is not None
+            else None
+        ),
+        harmony_map_source=src.harmony_map_source,
         current_bass_candidate_run_id=src.current_bass_candidate_run_id,
         current_bass_candidate_take_id=src.current_bass_candidate_take_id,
     )
@@ -538,6 +609,10 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
     s.reference_audio_head_trim_seconds = 0.0
     s.source_analysis_override = None
     s.harmony_confirmation_required = True
+    s.harmony_map_confirmation_required = True
+    s.suggested_chord_progression = None
+    s.suggested_chord_confidence = None
+    s.harmony_map_source = "none"
     return _to_state(s, message="Reference audio uploaded. Call /analyze-audio to run DSP analysis.")
 
 
@@ -576,6 +651,21 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
         not bool(filename_key)
         and float(result.source_analysis.tonal_center_confidence) < 0.5
     )
+    suggestion = result.source_analysis.source_metadata.get("harmony_suggestions", {})
+    suggested_chords = suggestion.get("chords", []) if isinstance(suggestion, dict) else []
+    suggested_confidence = suggestion.get("confidence", []) if isinstance(suggestion, dict) else []
+    s.suggested_chord_progression = (
+        [str(chord) for chord in suggested_chords if str(chord).strip()]
+        if isinstance(suggested_chords, list)
+        else None
+    )
+    s.suggested_chord_confidence = (
+        [max(0.0, min(1.0, float(value))) for value in suggested_confidence]
+        if isinstance(suggested_confidence, list)
+        else None
+    )
+    s.harmony_map_confirmation_required = True
+    s.harmony_map_source = "uploaded_audio_chroma_tentative"
     s.reference_audio_duration_seconds = result.duration_seconds
     s.reference_audio_head_trim_seconds = result.head_trim_seconds
     return _to_state(s, message="Reference audio analyzed and source analysis updated.")
@@ -723,7 +813,18 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
         parts.append("Chord style updated")
     if "chord_progression" in body.model_dump(exclude_unset=True):
         s.chord_progression = list(body.chord_progression) if body.chord_progression else None
-        parts.append("Chord progression updated")
+        if s.chord_progression:
+            s.harmony_map_confirmation_required = False
+            s.harmony_map_source = "confirmed_user"
+            parts.append("Bar-level harmony map confirmed")
+        else:
+            s.harmony_map_confirmation_required = bool(s.reference_audio_path)
+            s.harmony_map_source = (
+                "uploaded_audio_chroma_tentative"
+                if s.suggested_chord_progression
+                else "none"
+            )
+            parts.append("Chord progression cleared")
     if "chord_player" in body.model_dump(exclude_unset=True):
         s.chord_player = body.chord_player.value if body.chord_player is not None else None
         parts.append("Chord player updated")
@@ -807,6 +908,8 @@ def _regenerate_lane_on_stored_session(
     context: object | None = None,
 ) -> None:
     """Regenerate one lane in-place using current stored session settings."""
+    if lane != LaneName.drums:
+        _require_confirmed_harmony(s)
     cond = _conditioning_for_generation(s, context=context)
     if lane == LaneName.drums:
         d_bytes, d_prev = generator.generate_drums(
@@ -1049,6 +1152,7 @@ def regenerate_lane(session_id: str, lane: LaneName) -> RegenerateLaneResult:
 @router.post("/{session_id}/lanes/bass/regenerate-bars", response_model=SessionState)
 def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> SessionState:
     s = _get_session_or_404(session_id)
+    _require_confirmed_harmony(s)
     if body.bar_start < 0:
         raise HTTPException(
             status_code=400,
@@ -1324,6 +1428,8 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
 
     requested = int(body.take_count)
     hidden_count = max(requested, min(36, requested * 3))
+    strict_harmonic_guard = bool(s.reference_audio_path and s.chord_progression)
+    harmonically_rejected = 0
     scored_pool: list[tuple[float, tuple[tuple[int, ...], ...], str, BassCandidateTake, dict[str, object]]] = []
     for i in range(hidden_count):
         seed_i = base_seed + i
@@ -1335,6 +1441,14 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             context=ctx,
         )
         notes = extract_lane_notes(data)
+        if strict_harmonic_guard and count_unsupported_structural_notes(
+            notes,
+            tempo=cond.tempo if cond is not None else s.tempo,
+            conditioning=cond,
+            style=s.bass_style,
+        ):
+            harmonically_rejected += 1
+            continue
         quality = analyze_bass_take(
             notes,
             tempo=cond.tempo if cond is not None else s.tempo,
@@ -1383,6 +1497,14 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     ):
         vocab_bytes = _normalize_bass_bytes_for_session(vocab.midi_bytes, s)
         notes = extract_lane_notes(vocab_bytes)
+        if strict_harmonic_guard and count_unsupported_structural_notes(
+            notes,
+            tempo=cond.tempo if cond is not None else s.tempo,
+            conditioning=cond,
+            style=s.bass_style,
+        ):
+            harmonically_rejected += 1
+            continue
         quality = analyze_bass_take(
             notes,
             tempo=cond.tempo if cond is not None else s.tempo,
@@ -1551,6 +1673,21 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
         row["top_pool_score"] = top_pool_score
         takes.append(take)
         take_rows.append(row)
+
+    if len(takes) < requested:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "harmonic_candidate_shortfall",
+                "message": (
+                    "The confirmed chord map rejected too many structurally unsupported "
+                    "bass takes. No unsafe fallback candidates were returned."
+                ),
+                "requested": requested,
+                "eligible": len(takes),
+                "harmonically_rejected": harmonically_rejected,
+            },
+        )
 
     for idx, row in enumerate(take_rows):
         row["rank"] = idx + 1

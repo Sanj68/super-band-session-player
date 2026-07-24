@@ -91,6 +91,89 @@ def _group_notes_by_bar(
     return out
 
 
+def count_unsupported_structural_notes(
+    notes: list[LaneNote],
+    *,
+    tempo: int,
+    conditioning: UnifiedConditioning | None,
+    style: str,
+) -> int:
+    """Count bass notes that a confirmed chord map cannot support.
+
+    Supportive bass may use a short semitone/whole-step approach only on the
+    last sixteenth before a beat, resolving immediately to a chord tone.
+    Everything else must be supported by the confirmed bar-level harmony.
+    """
+    if conditioning is None or not conditioning.harmonic_bars or not notes:
+        return 0
+    spb = 60.0 / float(max(40, min(240, tempo)))
+    loop_duration = float(conditioning.bar_count) * 4.0 * spb
+    max_resolution_gap_beats = 0.2 if str(style) == "supportive" else 0.3
+    ordered = sorted(notes, key=lambda note: (float(note.start), int(note.pitch)))
+    violations = 0
+    for index, note in enumerate(ordered):
+        note_beats = float(note.start) / spb
+        bar = max(
+            0,
+            min(
+                int(math.floor((note_beats + 0.02) / 4.0)),
+                conditioning.bar_count - 1,
+            ),
+        )
+        harmonic = conditioning.harmonic_bar(bar)
+        if (
+            harmonic is None
+            or float(harmonic.confidence) < 0.9
+            or str(harmonic.source) != "confirmed_chord_progression"
+        ):
+            continue
+        target = {int(pc) % 12 for pc in harmonic.target_pcs}
+        pitch_pc = int(note.pitch) % 12
+        if pitch_pc in target:
+            continue
+
+        beat_position = float(note.start) / spb
+        sixteenth_slot = int(round((beat_position % 1.0) * 4.0)) % 4
+        next_note = ordered[index + 1] if index + 1 < len(ordered) else ordered[0]
+        next_note_start = (
+            float(next_note.start)
+            if index + 1 < len(ordered)
+            else float(next_note.start) + loop_duration
+        )
+        resolves = False
+        if next_note is not None:
+            next_note_beats = next_note_start / spb
+            next_bar = max(
+                0,
+                min(
+                    int(math.floor((next_note_beats + 0.02) / 4.0))
+                    % conditioning.bar_count,
+                    conditioning.bar_count - 1,
+                ),
+            )
+            next_harmonic = conditioning.harmonic_bar(next_bar)
+            next_target = (
+                {int(pc) % 12 for pc in next_harmonic.target_pcs}
+                if next_harmonic is not None
+                else set()
+            )
+            interval_raw = abs((int(next_note.pitch) % 12) - (int(note.pitch) % 12))
+            interval = min(interval_raw, 12 - interval_raw)
+            gap_beats = max(0.0, (next_note_start - float(note.end)) / spb)
+            crosses_bar = next_bar != bar
+            late_bar_cadence = crosses_bar and (note_beats % 4.0) >= 2.9
+            resolves = (
+                (sixteenth_slot == 3 or late_bar_cadence)
+                and int(next_note.pitch) % 12 in next_target
+                and interval <= 2
+                and gap_beats <= max_resolution_gap_beats
+            )
+        if not resolves:
+            violations += 1
+
+    return violations
+
+
 def _rhythm_signature(rows: list[list[LaneNote]], *, tempo: int, bar_anchor: float) -> tuple[tuple[int, ...], ...]:
     spb = 60.0 / float(max(40, min(240, tempo)))
     sixteenth = spb / 4.0

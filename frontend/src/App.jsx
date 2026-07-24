@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addPartToSuit,
   createSession,
@@ -185,6 +185,7 @@ export default function App() {
   });
   const [evalTakes, setEvalTakes] = useState([]);
   const [evalSummary, setEvalSummary] = useState(null);
+  const harmonyDraftTokenRef = useRef("");
 
   const refreshSetups = useCallback(async () => {
     try {
@@ -244,6 +245,28 @@ export default function App() {
     setEvalClipId(defaultClipId);
     setEvalTakeId(`${defaultClipId}-take-${Date.now()}`);
   }, [session?.id]);
+
+  useEffect(() => {
+    const progression = session?.chord_progression?.length
+      ? session.chord_progression
+      : session?.suggested_chord_progression;
+    if (!session?.id || !Array.isArray(progression) || progression.length === 0) return;
+    const token = [
+      session.id,
+      session?.reference_audio?.filename ?? "",
+      session?.harmony_map_source ?? "",
+      progression.join("|"),
+    ].join(":");
+    if (harmonyDraftTokenRef.current === token) return;
+    harmonyDraftTokenRef.current = token;
+    setChordProgression(progression.join(" | "));
+  }, [
+    session?.id,
+    session?.reference_audio?.filename,
+    session?.harmony_map_source,
+    session?.chord_progression,
+    session?.suggested_chord_progression,
+  ]);
 
   useEffect(() => {
     if (!abMessage) return undefined;
@@ -981,6 +1004,12 @@ export default function App() {
     setLeadPlayer(s.lead_player ?? "");
     setBassStyle(s.bass_style);
     setChordStyle(s.chord_style);
+    setChordProgression(
+      (s.chord_progression?.length
+        ? s.chord_progression
+        : s.suggested_chord_progression ?? []
+      ).join(" | "),
+    );
     setChordPlayer(s.chord_player ?? "");
     setDrumStyle(s.drum_style);
     setLeadInstrument(s.lead_instrument ?? "flute");
@@ -1244,7 +1273,9 @@ export default function App() {
                     <strong>
                       {session?.chord_progression?.length
                         ? session.chord_progression.join(" · ")
-                        : "Follow source tonality"}
+                        : session?.suggested_chord_progression?.length
+                          ? `Tentative: ${session.suggested_chord_progression.join(" · ")}`
+                          : "Global key only — confirmation required"}
                     </strong>
                   </div>
                 </>
@@ -1258,12 +1289,25 @@ export default function App() {
               key={`${session?.reference_audio?.filename ?? "no-source"}-${session?.reference_audio?.analyzed ? "analysed" : "pending"}`}
               className="sp-correction"
               defaultOpen={
-                Boolean(session?.reference_audio?.analyzed) &&
-                Number(session?.engine_data?.source_analysis?.tonal_center_confidence ?? 1) < 0.5 &&
-                !session?.engine_data?.source_analysis?.source_metadata?.filename_hints?.key
+                Boolean(
+                  session?.harmony_confirmation_required ||
+                  session?.harmony_map_confirmation_required ||
+                  (
+                    session?.reference_audio?.analyzed &&
+                    Number(session?.engine_data?.source_analysis?.tonal_center_confidence ?? 1) < 0.5 &&
+                    !session?.engine_data?.source_analysis?.source_metadata?.filename_hints?.key
+                  )
+                )
               }
             >
-              <summary>Correct the AI <span>optional</span></summary>
+              <summary>
+                Confirm or correct the AI{" "}
+                <span>
+                  {session?.harmony_confirmation_required || session?.harmony_map_confirmation_required
+                    ? "required"
+                    : "optional"}
+                </span>
+              </summary>
               <div className="sp-correction-body">
                 <div className="sp-grid">
                   <label className="sp-field">
@@ -1324,28 +1368,37 @@ export default function App() {
                   </label>
                 </div>
                 <label className="sp-field" style={{ marginTop: 10 }}>
-                  Chord progression
+                  Bar-level harmony map
                   <input
                     value={chordProgression}
                     onChange={(e) => setChordProgression(e.target.value)}
-                    placeholder="Optional — e.g. F#m7 | Dmaj7 | A | E"
+                    placeholder="Required for uploaded audio — e.g. Bb | C | D | Gm"
                     disabled={busy}
                   />
                 </label>
                 <p className="sp-correction-note">
-                  Leave chords blank to let the player follow the detected key and scale.
+                  Audio chord suggestions are tentative. Confirm or correct the repeating bar map before generation; global key alone is not enough.
                 </p>
                 <div className="sp-actions">
                   {session?.id ? (
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={busy}
+                      disabled={
+                        busy ||
+                        (
+                          session?.harmony_map_confirmation_required &&
+                          parseChordProgressionInput(chordProgression).length === 0
+                        )
+                      }
                       onClick={async () => {
                         setBusy(true);
                         setError(null);
                         try {
                           const progression = parseChordProgressionInput(chordProgression);
+                          if (session?.harmony_map_confirmation_required && progression.length === 0) {
+                            throw new Error("Confirm or correct the bar-level harmony map before generating.");
+                          }
                           const payload = {
                             tempo,
                             key: keyNote,
@@ -1500,6 +1553,19 @@ export default function App() {
                 }}
               >
                 Key and scale are still tentative. Confirm or correct the AI Musical Read above before generating bass takes.
+              </div>
+            ) : session?.harmony_map_confirmation_required ? (
+              <div
+                style={{
+                  padding: "0.75rem 0.9rem",
+                  border: "1px solid #f59e0b",
+                  borderRadius: 10,
+                  background: "#fffbeb",
+                  color: "#92400e",
+                  fontSize: 13,
+                }}
+              >
+                The bar-level harmony map is tentative. Confirm or correct it in the AI Musical Read above before generating bass takes.
               </div>
             ) : session ? (
               <BassCandidatePanel

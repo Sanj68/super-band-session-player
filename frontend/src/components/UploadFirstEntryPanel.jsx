@@ -138,22 +138,19 @@ export default function UploadFirstEntryPanel({
 
       if (!hasFilenameKey && keyConfidence < 0.5) {
         setStatus(
-          `Tempo ${tempoEstimate} BPM and ${barsGuess} bars detected. Key reading ${keyGuess} ${scaleGuess.replaceAll("_", " ")} is tentative—confirm or correct it below before generating.`,
+          `Tempo ${tempoEstimate} BPM and ${barsGuess} bars detected. Key reading ${keyGuess} ${scaleGuess.replaceAll("_", " ")} and the bar-level harmony map are tentative—confirm or correct both below before generating.`,
         );
         return;
       }
 
-      await patchSession(activeSession.id, {
+      activeSession = await patchSession(activeSession.id, {
         key: keyGuess,
         scale: scaleGuess,
         bass_engine: selectedGrooveFile ? "phrase_v2" : undefined,
       });
-      const generated = await generateSession(activeSession.id);
-      setSession(generated.session);
+      setSession(activeSession);
       setStatus(
-        selectedGrooveFile
-          ? "Source harmony and groove reference understood. Pocket-aware takes generated."
-          : "Source understood. Musical context applied and takes generated.",
+        `Tempo ${tempoEstimate} BPM and ${barsGuess} bars detected. Confirm or correct the tentative bar-level harmony map below before generation.`,
       );
     } catch (e) {
       setError(e.message || String(e));
@@ -199,6 +196,10 @@ export default function UploadFirstEntryPanel({
 
   const onApplyAndGenerateFromReference = async () => {
     if (!session?.id || !source) return;
+    if (session?.harmony_map_confirmation_required) {
+      setError("Confirm or correct the bar-level harmony map in AI Musical Read before generating.");
+      return;
+    }
     const tempoEstimate = Math.max(40, Math.min(240, Math.round(Number(source.tempo_estimate_bpm) || 108)));
     const keyGuess = PC_TO_KEY[Math.max(0, Math.min(11, Number(source.tonal_center_pc_guess) || 0))];
     const scaleGuess = normalizedDetectedScale(source.scale_mode_guess);
@@ -264,7 +265,7 @@ export default function UploadFirstEntryPanel({
       </div>
       <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <button type="button" onClick={onCreateFromSource} disabled={busy || !selectedFile}>
-          {busy ? "Listening…" : "Create Takes From Source"}
+          {busy ? "Listening…" : "Analyse Source"}
         </button>
         {session?.id ? (
           <button type="button" onClick={onAddGrooveAndRegenerate} disabled={busy || !selectedGrooveFile}>
@@ -282,7 +283,11 @@ export default function UploadFirstEntryPanel({
           <button type="button" onClick={onAnalyze} disabled={busy || !session?.id || !session?.reference_audio}>
             Analyse Only
           </button>
-          <button type="button" onClick={onApplyAndGenerateFromReference} disabled={busy || !session?.id || !source}>
+          <button
+            type="button"
+            onClick={onApplyAndGenerateFromReference}
+            disabled={busy || !session?.id || !source || session?.harmony_map_confirmation_required}
+          >
             Apply Analysis + Generate
           </button>
         </div>
@@ -317,6 +322,13 @@ export default function UploadFirstEntryPanel({
           {Array.isArray(source?.sections) && source.sections.length > 0
             ? ` · ${source.sections.map((s) => `${s.label}[${s.start_bar}-${s.end_bar}]`).join(" · ")}`
             : ""}
+        </div>
+        <div>
+          <strong>Tentative harmony map:</strong>{" "}
+          {session?.suggested_chord_progression?.length
+            ? session.suggested_chord_progression.join(" · ")
+            : "—"}
+          {session?.harmony_map_confirmation_required ? " · confirmation required" : ""}
         </div>
         <div>
           <strong>Source-analysis status:</strong> {source?.source_lane ?? "none"}

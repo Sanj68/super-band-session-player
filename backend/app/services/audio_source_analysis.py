@@ -21,6 +21,20 @@ _MODE_CANDIDATES: tuple[str, ...] = (
     "major",
     "minor",
 )
+_CHORD_ROOT_NAMES: tuple[str, ...] = (
+    "C",
+    "C#",
+    "D",
+    "Eb",
+    "E",
+    "F",
+    "F#",
+    "G",
+    "Ab",
+    "A",
+    "Bb",
+    "B",
+)
 
 # Albrecht-Shanahan (2013) key profiles — derived from an audio corpus rather
 # than probe-tone ratings, so they fit chroma vectors far better than
@@ -68,6 +82,133 @@ def parse_filename_musical_hints(filename: str | None) -> FilenameMusicalHints:
         scale = "major" if mode.lower() in {"maj", "major"} else "natural_minor"
 
     return FilenameMusicalHints(tempo_bpm=tempo_bpm, key=key, scale=scale)
+
+
+def _profile_cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator <= 1e-12:
+        return 0.0
+    return max(0.0, min(1.0, float(np.dot(left, right)) / denominator))
+
+
+def infer_tentative_chord_map_from_profiles(
+    bar_profiles: list[np.ndarray],
+) -> dict[str, object]:
+    """Return an explicitly tentative chord map from per-bar pitch-class energy.
+
+    This is a suggestion surface, not clearance for generation. Repeating
+    material is folded only when the measured profiles actually recur.
+    """
+    profiles: list[np.ndarray] = []
+    for raw in bar_profiles:
+        row = np.asarray(raw, dtype=float).reshape(-1)
+        if row.size != 12:
+            continue
+        row = np.maximum(row, 0.0)
+        total = float(np.sum(row))
+        if total <= 1e-12:
+            continue
+        profiles.append(row / total)
+    if not profiles:
+        return {
+            "chords": [],
+            "confidence": [],
+            "period_bars": 0,
+            "repeat_similarity": 0.0,
+            "source": "uploaded_audio_chroma_tentative",
+        }
+
+    period = len(profiles)
+    repeat_similarity = 0.0
+    for candidate in (1, 2, 4, 8):
+        if candidate >= len(profiles) or len(profiles) % candidate != 0:
+            continue
+        similarities = [
+            _profile_cosine_similarity(profiles[i], profiles[i % candidate])
+            for i in range(candidate, len(profiles))
+        ]
+        mean_similarity = float(np.mean(similarities)) if similarities else 0.0
+        if mean_similarity >= 0.94:
+            period = candidate
+            repeat_similarity = mean_similarity
+            break
+
+    folded = [
+        np.mean(profiles[offset::period], axis=0)
+        for offset in range(period)
+    ]
+    root_rows: list[tuple[int, float, float]] = []
+    confidences: list[float] = []
+    for profile in folded:
+        candidates: list[tuple[float, int, str]] = []
+        for root_pc, _root_name in enumerate(_CHORD_ROOT_NAMES):
+            for suffix, intervals in (("", (0, 4, 7)), ("m", (0, 3, 7))):
+                chord_pcs = tuple((root_pc + interval) % 12 for interval in intervals)
+                score = (0.22 * float(profile[root_pc])) + (
+                    0.30 * sum(float(profile[pc]) for pc in chord_pcs)
+                )
+                candidates.append((score, root_pc, suffix))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        top_score, top_root, _top_suffix = candidates[0]
+        second_score = candidates[1][0] if len(candidates) > 1 else 0.0
+        confidence = (
+            max(0.0, min(1.0, (top_score - second_score) / top_score))
+            if top_score > 1e-12
+            else 0.0
+        )
+        major_score = next(
+            score for score, root, suffix in candidates if root == top_root and suffix == ""
+        )
+        minor_score = next(
+            score for score, root, suffix in candidates if root == top_root and suffix == "m"
+        )
+        root_rows.append((top_root, major_score, minor_score))
+        confidences.append(round(confidence, 4))
+
+    # Resolve weak major/minor ties against one common diatonic pitch set.
+    # This corrects noisy-third flips (for example Bb -> Bbm in a D-minor
+    # source) without overriding clear borrowed-chord evidence such as D major.
+    scale_candidates: list[tuple[float, set[int]]] = []
+    for tonic in range(12):
+        for mode in ("major", "natural_minor"):
+            scale_pcs = {
+                (tonic + interval) % 12
+                for interval in mt.scale_intervals(mode)
+            }
+            compatibility = 0.0
+            for root_pc, _major_score, _minor_score in root_rows:
+                major = {(root_pc + interval) % 12 for interval in (0, 4, 7)}
+                minor = {(root_pc + interval) % 12 for interval in (0, 3, 7)}
+                compatibility += max(
+                    len(major & scale_pcs),
+                    len(minor & scale_pcs),
+                ) / 3.0
+            scale_candidates.append((compatibility, scale_pcs))
+    common_scale = max(scale_candidates, key=lambda item: item[0])[1]
+
+    chords: list[str] = []
+    for (root_pc, major_score, minor_score), confidence in zip(
+        root_rows,
+        confidences,
+        strict=False,
+    ):
+        suffix = "" if major_score >= minor_score else "m"
+        if confidence < 0.08:
+            major = {(root_pc + interval) % 12 for interval in (0, 4, 7)}
+            minor = {(root_pc + interval) % 12 for interval in (0, 3, 7)}
+            major_diatonic = major.issubset(common_scale)
+            minor_diatonic = minor.issubset(common_scale)
+            if major_diatonic != minor_diatonic:
+                suffix = "" if major_diatonic else "m"
+        chords.append(f"{_CHORD_ROOT_NAMES[root_pc]}{suffix}")
+
+    return {
+        "chords": chords,
+        "confidence": confidences,
+        "period_bars": period,
+        "repeat_similarity": round(repeat_similarity, 4),
+        "source": "uploaded_audio_chroma_tentative",
+    }
 
 
 def infer_bar_count_from_duration(duration_seconds: float, tempo_bpm: float) -> int | None:
@@ -919,6 +1060,31 @@ def analyze_reference_audio(
     if filename_hints.scale is not None:
         mode_guess = _normalize_mode_label(filename_hints.scale)
         mode_conf = max(float(mode_conf), 0.9)
+
+    bar_profiles: list[np.ndarray] = []
+    bar_duration_seconds = 240.0 / max(40.0, min(240.0, float(tempo_est)))
+    local_duration_seconds = float(len(y_trimmed)) / float(sr)
+    for bar in range(max(1, int(bar_count))):
+        start_seconds = float(bar) * bar_duration_seconds
+        end_seconds = min(local_duration_seconds, start_seconds + bar_duration_seconds)
+        if end_seconds - start_seconds < 0.4:
+            break
+        start_frame = max(
+            0,
+            int(librosa.time_to_frames(start_seconds, sr=sr, hop_length=_HOP_LENGTH)),
+        )
+        end_frame = min(
+            int(chroma.shape[1]),
+            int(librosa.time_to_frames(end_seconds, sr=sr, hop_length=_HOP_LENGTH)),
+        )
+        if end_frame <= start_frame:
+            continue
+        profile = (
+            0.72 * np.mean(chroma[:, start_frame:end_frame], axis=1)
+            + 0.28 * np.mean(low_chroma[:, start_frame:end_frame], axis=1)
+        )
+        bar_profiles.append(np.asarray(profile, dtype=float))
+    groove_meta["harmony_suggestions"] = infer_tentative_chord_map_from_profiles(bar_profiles)
 
     sections = _build_sections(bar_energy, bar_accent, bar_count)
     source = SourceAnalysis(

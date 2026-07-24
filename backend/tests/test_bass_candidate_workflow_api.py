@@ -48,6 +48,55 @@ def test_tentative_harmony_blocks_candidates_until_key_is_confirmed() -> None:
     assert confirmed.json()["harmony_confirmation_required"] is False
 
 
+def test_uploaded_audio_requires_confirmed_bar_level_harmony_map() -> None:
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 88, "key": "D", "scale": "natural_minor", "bar_count": 16},
+    )
+    session_id = created.json()["session"]["id"]
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    stored.reference_audio_path = "source.wav"
+    stored.reference_audio_filename = "source.wav"
+    stored.harmony_map_confirmation_required = True
+    stored.suggested_chord_progression = ["Bb", "C", "D", "Gm"]
+    stored.suggested_chord_confidence = [0.4, 0.5, 0.6, 0.5]
+    stored.harmony_map_source = "uploaded_audio_chroma_tentative"
+
+    blocked = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 88},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["error"] == "harmony_map_confirmation_required"
+    assert blocked.json()["detail"]["suggested_chord_progression"] == ["Bb", "C", "D", "Gm"]
+
+    key_only = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"key": "D", "scale": "natural_minor"},
+    )
+    assert key_only.json()["harmony_map_confirmation_required"] is True
+
+    confirmed = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"chord_progression": ["Bb", "C", "D", "Gm"]},
+    )
+    state = confirmed.json()
+    assert state["harmony_map_confirmation_required"] is False
+    assert state["harmony_map_source"] == "confirmed_user"
+    assert state["engine_data"]["harmony_plan"]["source"] == "confirmed_chord_progression"
+    assert {
+        bar["source"] for bar in state["engine_data"]["harmony_plan"]["bars"]
+    } == {"confirmed_chord_progression"}
+
+    cleared = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"chord_progression": []},
+    )
+    assert cleared.json()["harmony_map_confirmation_required"] is True
+
+
 def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> None:
     # Isolate candidate-run persistence for this test.
     bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]

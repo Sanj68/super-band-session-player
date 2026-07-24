@@ -333,6 +333,35 @@ def build_harmony_plan(session: Any, _source: SourceAnalysis) -> HarmonyPlan:
     key = str(getattr(session, "key", "C") or "C")
     scale = str(getattr(session, "scale", "major") or "major")
     bars = max(1, int(getattr(session, "bar_count", 8) or 8))
+    confirmed_progression = list(getattr(session, "chord_progression", []) or [])
+    if confirmed_progression:
+        parsed = mt.progression_chords_for_bars(confirmed_progression, bars)
+        scale_pcs = {
+            (mt.key_root_pc(key) + interval) % 12
+            for interval in mt.scale_intervals(scale)
+        }
+        out: list[HarmonyPlanBar] = []
+        for bar, chord in enumerate(parsed):
+            target = sorted({int(pc) % 12 for pc in chord.tone_pcs})
+            passing = sorted(pc for pc in scale_pcs if pc not in target)
+            avoid = sorted(pc for pc in range(12) if pc not in target and pc not in passing)
+            out.append(
+                HarmonyPlanBar(
+                    bar_index=bar,
+                    root_pc=int(chord.root_pc) % 12,
+                    target_pcs=target,
+                    passing_pcs=passing,
+                    avoid_pcs=avoid,
+                    confidence=1.0,
+                    source="confirmed_chord_progression",
+                )
+            )
+        return HarmonyPlan(
+            key_center=key,
+            scale=scale,
+            source="confirmed_chord_progression",
+            bars=out,
+        )
     live_harmonic = (_source.source_metadata or {}).get("bridge_harmonic")
     if isinstance(live_harmonic, dict) and isinstance(live_harmonic.get("bars"), list):
         out: list[HarmonyPlanBar] = []
