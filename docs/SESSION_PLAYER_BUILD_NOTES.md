@@ -281,6 +281,34 @@ Second Logic UI check:
   the user asks for another idea. This fixes the accepted 0.70 groove
   lock appearing as the plug-in's 0.50 parameter default.
 
+### 2026-07-24 recoverable Bass AU exploration
+
+The first recovery layer is implemented in the Logic Bass AU:
+
+- every **Generate idea** and every recognised text command automatically
+  snapshots the exact current clean/performance MIDI before changing it;
+- **KEEP** pins the current idea without creating duplicates;
+- **Earlier** and **Later** restore the exact MIDI plus the Style, Bass
+  Family, Character, Groove Lock, density, engine and seed that explain it;
+- history is local, session-bound and harmony-context-bound. An idea from a
+  different session, key, chord map, source or loop length cannot be recalled
+  into the wrong context;
+- unkept exploration is bounded to the 48 most recent ideas per session while
+  kept ideas are retained;
+- the plugin shows the current history position and kept count, and rehydrates
+  its controls after recall.
+
+The backend endpoints also support explicit snapshot recall for a future
+expanded history browser. The AU deliberately exposes only three small
+controls so recovery does not overwhelm the playing surface.
+
+Still pending: a real Logic ear-test of exact Earlier/Later recovery, applying
+the advisor's Accompany/Counterpoint/Explore routes, and bar/phrase locking.
+Do not enable a route button until the recovery ear-test passes.
+
+Verification: 507 backend tests passed; the frontend production build passed;
+the Bass AU Release build completed and `auval -v aumi SpMx SOne` passed.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

@@ -29,10 +29,14 @@ private:
     juce::Slider expressionSlider_;
     juce::Label expressionLabel_;
     juce::TextButton regenerateButton_ { "Generate idea" };
+    juce::TextButton earlierButton_ { "Earlier" };
+    juce::TextButton keepButton_ { "KEEP" };
+    juce::TextButton laterButton_ { "Later" };
     juce::TextButton advancedButton_ { "Advanced" };
     juce::TextEditor commandBox_;
     juce::TextButton sendButton_ { "Say it" };
     juce::Label adviceLabel_;
+    juce::Label historyLabel_;
     juce::Label statusLabel_;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> styleAttach_;

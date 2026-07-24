@@ -190,3 +190,120 @@ def test_plugin_regenerate_applies_upright_family(client: TestClient) -> None:
     )
     assert res.status_code == 200, res.text
     assert res.json()["bass_instrument"] == "upright_bass"
+
+
+def test_plugin_keep_regenerate_and_history_navigation_are_exact(
+    client: TestClient,
+) -> None:
+    sid = _create_session_with_bass(client)
+    original = client.get(
+        "/api/plugin/bass-part", params={"session_id": sid}
+    ).json()
+
+    kept = client.post("/api/plugin/keep", json={"session_id": sid})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["message"].startswith("Idea kept")
+    kept_history = kept.json()["history"]
+    assert kept_history["count"] == 1
+    assert kept_history["kept_count"] == 1
+    assert kept_history["current_index"] == 1
+    assert kept_history["current_is_kept"] is True
+    assert kept_history["can_previous"] is False
+    assert kept_history["can_next"] is False
+
+    regenerated = client.post(
+        "/api/plugin/regenerate",
+        json={
+            "session_id": sid,
+            "bass_style": "melodic",
+            "lock_to_groove": 0.9,
+            "bass_expression": 0.85,
+        },
+    )
+    assert regenerated.status_code == 200, regenerated.text
+    changed = regenerated.json()
+    assert changed["notes"] != original["notes"]
+
+    history = client.get(
+        "/api/plugin/history", params={"session_id": sid}
+    )
+    assert history.status_code == 200, history.text
+    assert history.json()["count"] == 1
+    assert history.json()["current_index"] is None
+    assert history.json()["can_previous"] is True
+    assert history.json()["can_next"] is False
+
+    keep_changed = client.post("/api/plugin/keep", json={"session_id": sid})
+    assert keep_changed.status_code == 200, keep_changed.text
+    assert keep_changed.json()["history"]["count"] == 2
+    assert keep_changed.json()["history"]["kept_count"] == 2
+
+    earlier = client.post(
+        "/api/plugin/history/navigate",
+        json={"session_id": sid, "direction": "previous"},
+    )
+    assert earlier.status_code == 200, earlier.text
+    recalled_original = earlier.json()["part"]
+    assert recalled_original["notes"] == original["notes"]
+    assert recalled_original["bass_style"] == original["bass_style"]
+    assert earlier.json()["history"]["current_index"] == 1
+    assert earlier.json()["history"]["can_next"] is True
+
+    later = client.post(
+        "/api/plugin/history/navigate",
+        json={"session_id": sid, "direction": "next"},
+    )
+    assert later.status_code == 200, later.text
+    recalled_changed = later.json()["part"]
+    assert recalled_changed["notes"] == changed["notes"]
+    assert recalled_changed["bass_style"] == "melodic"
+    assert recalled_changed["lock_to_groove"] == pytest.approx(0.9)
+    assert recalled_changed["bass_expression"] == pytest.approx(0.85)
+
+
+def test_plugin_history_recall_is_bound_to_session_and_context(
+    client: TestClient,
+) -> None:
+    first = _create_session_with_bass(client)
+    second = _create_session_with_bass(client)
+
+    kept = client.post("/api/plugin/keep", json={"session_id": first})
+    snapshot_id = kept.json()["history"]["entries"][0]["snapshot_id"]
+
+    wrong_session = client.post(
+        "/api/plugin/history/recall",
+        json={"session_id": second, "snapshot_id": snapshot_id},
+    )
+    assert wrong_session.status_code == 404
+    assert wrong_session.json()["detail"]["error"] == "history_snapshot_not_found"
+
+    from app.routes import session_routes
+
+    session_routes._SESSIONS[first].key = "D"  # noqa: SLF001
+    changed_context = client.post(
+        "/api/plugin/history/recall",
+        json={"session_id": first, "snapshot_id": snapshot_id},
+    )
+    assert changed_context.status_code == 404
+    assert changed_context.json()["detail"]["error"] == "history_snapshot_not_found"
+
+
+def test_plugin_history_boundary_fails_without_mutating_part(
+    client: TestClient,
+) -> None:
+    sid = _create_session_with_bass(client)
+    before = client.get(
+        "/api/plugin/bass-part", params={"session_id": sid}
+    ).json()
+
+    response = client.post(
+        "/api/plugin/history/navigate",
+        json={"session_id": sid, "direction": "previous"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "history_boundary"
+    after = client.get(
+        "/api/plugin/bass-part", params={"session_id": sid}
+    ).json()
+    assert after == before

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import asdict
+from typing import Literal
 
 import pretty_midi
 from fastapi import APIRouter, HTTPException
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.models.session import BassInstrument, LaneName, RegenerateSelectedBody
 from app.routes import session_routes
+from app.services import bass_history_store
 from app.services.bass_instrument_profiles import public_bass_instrument_profiles
 from app.services.bass_journey_advisor import build_bass_journey_advice
 
@@ -193,6 +195,8 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
             part=None,
         )
 
+    # Commands may surprise musically, never destructively.
+    bass_history_store.capture(s)
     if plan.density_delta:
         s.bass_density_bias = float(max(-1.0, min(1.0, s.bass_density_bias + plan.density_delta)))
     if plan.lock_set is not None:
@@ -235,6 +239,8 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    # Preserve the exact playable part before changing controls or MIDI.
+    bass_history_store.capture(s)
     if body.bass_style is not None:
         s.bass_style = body.bass_style
     if body.bass_instrument is not None:
@@ -248,6 +254,136 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s.bass_engine = _engine_for_player(s.bass_player)
     session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
     return _bass_part_for_session(s)
+
+
+class PluginHistoryEntry(BaseModel):
+    snapshot_id: str
+    created_at: str
+    kept: bool
+    bass_style: str
+    bass_instrument: str
+
+
+class PluginHistoryState(BaseModel):
+    session_id: str
+    count: int
+    kept_count: int
+    current_index: int | None
+    current_is_kept: bool
+    can_previous: bool
+    can_next: bool
+    entries: list[PluginHistoryEntry]
+
+
+class PluginHistoryActionResult(BaseModel):
+    message: str
+    history: PluginHistoryState
+    part: PluginBassPart
+
+
+class PluginHistoryBody(BaseModel):
+    session_id: str | None = Field(
+        default=None,
+        description="Persistent session binding owned by this plugin instance.",
+    )
+
+
+class PluginHistoryNavigateBody(PluginHistoryBody):
+    direction: Literal["previous", "next"]
+
+
+class PluginHistoryRecallBody(PluginHistoryBody):
+    snapshot_id: str = Field(min_length=1, max_length=128)
+
+
+@router.get("/history", response_model=PluginHistoryState)
+def plugin_history(session_id: str | None = None) -> PluginHistoryState:
+    s = _bass_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    return PluginHistoryState.model_validate(bass_history_store.history_state(s))
+
+
+@router.post("/keep", response_model=PluginHistoryActionResult)
+def plugin_keep(body: PluginHistoryBody) -> PluginHistoryActionResult:
+    s = _bass_session(body.session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    bass_history_store.capture(s, kept=True)
+    return PluginHistoryActionResult(
+        message="Idea kept. You can explore and return to it.",
+        history=PluginHistoryState.model_validate(
+            bass_history_store.history_state(s)
+        ),
+        part=_bass_part_for_session(s),
+    )
+
+
+@router.post("/history/navigate", response_model=PluginHistoryActionResult)
+def plugin_history_navigate(
+    body: PluginHistoryNavigateBody,
+) -> PluginHistoryActionResult:
+    s = _bass_session(body.session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    try:
+        bass_history_store.navigate(s, body.direction)
+    except IndexError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "history_boundary",
+                "direction": body.direction,
+                "message": f"No {body.direction} bass idea is available.",
+            },
+        ) from exc
+    return PluginHistoryActionResult(
+        message=(
+            "Recalled earlier bass idea."
+            if body.direction == "previous"
+            else "Recalled later bass idea."
+        ),
+        history=PluginHistoryState.model_validate(
+            bass_history_store.history_state(s)
+        ),
+        part=_bass_part_for_session(s),
+    )
+
+
+@router.post("/history/recall", response_model=PluginHistoryActionResult)
+def plugin_history_recall(
+    body: PluginHistoryRecallBody,
+) -> PluginHistoryActionResult:
+    s = _bass_session(body.session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    # Preserve an unlisted current state before jumping to a specific idea.
+    bass_history_store.capture(s)
+    try:
+        bass_history_store.recall(s, body.snapshot_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "history_snapshot_not_found",
+                "snapshot_id": body.snapshot_id,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "history_snapshot_invalid",
+                "snapshot_id": body.snapshot_id,
+            },
+        ) from exc
+    return PluginHistoryActionResult(
+        message="Recalled kept bass idea.",
+        history=PluginHistoryState.model_validate(
+            bass_history_store.history_state(s)
+        ),
+        part=_bass_part_for_session(s),
+    )
 
 
 class PluginInstrumentProfile(BaseModel):

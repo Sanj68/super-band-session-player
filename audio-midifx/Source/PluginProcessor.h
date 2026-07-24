@@ -72,8 +72,13 @@ public:
     // engine I/O (editor calls these)
     void requestRegenerate();
     void requestCommand (const juce::String& text);
+    void requestKeep();
+    void requestHistoryStep (int direction);
     juce::String statusText() const;
     juce::String adviceText() const;
+    juce::String historyText() const;
+    bool canRecallEarlier() const { return canRecallEarlier_.load(); }
+    bool canRecallLater() const { return canRecallLater_.load(); }
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -88,6 +93,7 @@ private:
     void run() override;
     void fetchPart (bool updateStatus = true);
     void fetchAdvice();
+    void fetchHistory();
     void hydrateParametersFromPart (const BassPart& part);
     std::shared_ptr<const BassPart> currentPart() const;
     juce::String boundSessionId() const;
@@ -98,13 +104,19 @@ private:
     std::atomic<bool> parametersHydratedFromPart_ { false };
 
     std::atomic<bool> regenerateRequested_ { false };
+    std::atomic<bool> keepRequested_ { false };
+    std::atomic<int> historyStepRequested_ { 0 };
+    std::atomic<bool> canRecallEarlier_ { false };
+    std::atomic<bool> canRecallLater_ { false };
     juce::String pendingCommand_;
     juce::CriticalSection commandLock_;
     juce::CriticalSection statusLock_;
     juce::CriticalSection adviceLock_;
+    juce::CriticalSection historyLock_;
     mutable juce::CriticalSection sessionLock_;
     juce::String status_ { "connecting to engine..." };
     juce::String advice_ { "Listening to the current source..." };
+    juce::String history_ { "No saved ideas yet" };
     juce::String boundSessionId_;
 
     // playback state

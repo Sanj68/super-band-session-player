@@ -42,6 +42,14 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     regenerateButton_.onClick = [this] { processor_.requestRegenerate(); };
     addAndMakeVisible (regenerateButton_);
 
+    earlierButton_.onClick = [this] { processor_.requestHistoryStep (-1); };
+    addAndMakeVisible (earlierButton_);
+    keepButton_.onClick = [this] { processor_.requestKeep(); };
+    keepButton_.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff31405d));
+    addAndMakeVisible (keepButton_);
+    laterButton_.onClick = [this] { processor_.requestHistoryStep (1); };
+    addAndMakeVisible (laterButton_);
+
     advancedButton_.setClickingTogglesState (true);
     advancedButton_.onClick = [this] { setAdvancedVisible (advancedButton_.getToggleState()); };
     addAndMakeVisible (advancedButton_);
@@ -72,6 +80,11 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     adviceLabel_.setColour (juce::Label::textColourId, juce::Colour (0xffb8c4df));
     addAndMakeVisible (adviceLabel_);
 
+    historyLabel_.setJustificationType (juce::Justification::centredRight);
+    historyLabel_.setFont (juce::Font (juce::FontOptions (11.0f)));
+    historyLabel_.setColour (juce::Label::textColourId, juce::Colour (0xff9aa7bd));
+    addAndMakeVisible (historyLabel_);
+
     setAdvancedVisible (false);
     startTimerHz (4);
 }
@@ -82,7 +95,7 @@ void SessionPlayerMidiFXEditor::setAdvancedVisible (bool shouldShow)
     sendButton_.setVisible (shouldShow);
     instrumentBox_.setVisible (shouldShow);
     instrumentLabel_.setVisible (shouldShow);
-    setSize (460, shouldShow ? 348 : 292);
+    setSize (460, shouldShow ? 382 : 326);
     resized();
 }
 
@@ -90,6 +103,9 @@ void SessionPlayerMidiFXEditor::timerCallback()
 {
     statusLabel_.setText (processor_.statusText(), juce::dontSendNotification);
     adviceLabel_.setText (processor_.adviceText(), juce::dontSendNotification);
+    historyLabel_.setText (processor_.historyText(), juce::dontSendNotification);
+    earlierButton_.setEnabled (processor_.canRecallEarlier());
+    laterButton_.setEnabled (processor_.canRecallLater());
 }
 
 void SessionPlayerMidiFXEditor::paint (juce::Graphics& g)
@@ -108,6 +124,12 @@ void SessionPlayerMidiFXEditor::resized()
     auto area = getLocalBounds().reduced (16);
     area.removeFromTop (32); // title zone
     adviceLabel_.setBounds (area.removeFromTop (66).reduced (4, 3));
+
+    auto historyRow = area.removeFromTop (34);
+    earlierButton_.setBounds (historyRow.removeFromLeft (72).reduced (2, 2));
+    keepButton_.setBounds (historyRow.removeFromLeft (64).reduced (2, 2));
+    laterButton_.setBounds (historyRow.removeFromLeft (64).reduced (2, 2));
+    historyLabel_.setBounds (historyRow.reduced (4, 1));
 
     auto controlRow = area.removeFromTop (112);
     auto left = controlRow.removeFromLeft (controlRow.getWidth() / 2);

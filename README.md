@@ -104,7 +104,9 @@ npm run dev   # http://localhost:5173
    green once its analysis reaches the backend.
 6. Regenerate the bassist or enter a command such as `busier`, `redo bar 2`, or
    `turnaround on bar 4`.
-7. Download the bass lane from the web app whenever an editable MIDI region is
+7. Use **KEEP** before a favourite idea. Every regeneration is also preserved
+   automatically; **Earlier** and **Later** recall exact prior MIDI and controls.
+8. Download the bass lane from the web app whenever an editable MIDI region is
    required.
 
 An explicit `SESSION_PLAYER_SESSION_ID` or

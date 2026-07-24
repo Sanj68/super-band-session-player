@@ -7,6 +7,9 @@ constexpr auto kBassPartUrl   = "http://127.0.0.1:8000/api/plugin/bass-part";
 constexpr auto kRegenerateUrl = "http://127.0.0.1:8000/api/plugin/regenerate";
 constexpr auto kCommandUrl    = "http://127.0.0.1:8000/api/plugin/command";
 constexpr auto kAdviceUrl     = "http://127.0.0.1:8000/api/plugin/advice";
+constexpr auto kKeepUrl       = "http://127.0.0.1:8000/api/plugin/keep";
+constexpr auto kHistoryUrl    = "http://127.0.0.1:8000/api/plugin/history";
+constexpr auto kNavigateUrl   = "http://127.0.0.1:8000/api/plugin/history/navigate";
 constexpr int  kPollMs = 2000;
 }
 
@@ -81,6 +84,55 @@ void SessionPlayerMidiFXProcessor::run()
 {
     while (! threadShouldExit())
     {
+        if (keepRequested_.exchange (false))
+        {
+            setStatus ("keeping idea...");
+            juce::DynamicObject::Ptr body = new juce::DynamicObject();
+            const auto sessionId = boundSessionId();
+            if (sessionId.isNotEmpty())
+                body->setProperty ("session_id", sessionId);
+            const auto json = juce::JSON::toString (juce::var (body.get()), true);
+            juce::URL url { kKeepUrl };
+            auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+                               .withExtraHeaders ("Content-Type: application/json")
+                               .withConnectionTimeoutMs (4000);
+            if (auto stream = url.withPOSTData (json).createInputStream (options))
+            {
+                const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+                setStatus (parsed.getProperty ("message", "Idea kept.").toString());
+            }
+            else
+                setStatus ("engine offline (keep failed)");
+            fetchHistory();
+        }
+
+        const auto historyStep = historyStepRequested_.exchange (0);
+        if (historyStep != 0)
+        {
+            const auto goingEarlier = historyStep < 0;
+            setStatus (goingEarlier ? "recalling earlier idea..." : "recalling later idea...");
+            juce::DynamicObject::Ptr body = new juce::DynamicObject();
+            const auto sessionId = boundSessionId();
+            if (sessionId.isNotEmpty())
+                body->setProperty ("session_id", sessionId);
+            body->setProperty ("direction", goingEarlier ? "previous" : "next");
+            const auto json = juce::JSON::toString (juce::var (body.get()), true);
+            juce::URL url { kNavigateUrl };
+            auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+                               .withExtraHeaders ("Content-Type: application/json")
+                               .withConnectionTimeoutMs (4000);
+            if (auto stream = url.withPOSTData (json).createInputStream (options))
+            {
+                const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+                setStatus (parsed.getProperty ("message", "Idea recalled.").toString());
+                parametersHydratedFromPart_ = false;
+                fetchPart (false);
+            }
+            else
+                setStatus (goingEarlier ? "no earlier idea available" : "no later idea available");
+            fetchHistory();
+        }
+
         if (regenerateRequested_.exchange (false))
         {
             setStatus ("regenerating...");
@@ -137,6 +189,7 @@ void SessionPlayerMidiFXProcessor::run()
             }
             else
                 setStatus ("engine offline (command failed)");
+            parametersHydratedFromPart_ = false;
             fetchPart (false); // refresh the part; keep the reply on screen
             for (int i = 0; i < 30 && ! threadShouldExit(); ++i)
                 wait (100);     // let the reply read for ~3s
@@ -144,6 +197,7 @@ void SessionPlayerMidiFXProcessor::run()
 
         fetchPart();
         fetchAdvice();
+        fetchHistory();
 
         for (int i = 0; i < kPollMs / 100 && ! threadShouldExit() && ! regenerateRequested_.load(); ++i)
             wait (100);
@@ -268,6 +322,41 @@ void SessionPlayerMidiFXProcessor::fetchAdvice()
     }
 }
 
+void SessionPlayerMidiFXProcessor::fetchHistory()
+{
+    const auto sessionId = boundSessionId();
+    if (sessionId.isEmpty())
+        return;
+    juce::URL url { kHistoryUrl };
+    url = url.withParameter ("session_id", sessionId);
+    auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                       .withConnectionTimeoutMs (3000);
+    if (auto stream = url.createInputStream (options))
+    {
+        const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+        if (! parsed.isObject())
+            return;
+        const auto count = (int) parsed.getProperty ("count", 0);
+        const auto keptCount = (int) parsed.getProperty ("kept_count", 0);
+        const auto current = parsed.getProperty ("current_index", juce::var());
+        const auto currentIsKept = (bool) parsed.getProperty ("current_is_kept", false);
+        canRecallEarlier_ = (bool) parsed.getProperty ("can_previous", false);
+        canRecallLater_ = (bool) parsed.getProperty ("can_next", false);
+
+        juce::String text;
+        if (count == 0)
+            text = "No saved ideas yet";
+        else if (current.isVoid())
+            text = juce::String (count) + " earlier | " + juce::String (keptCount) + " kept";
+        else
+            text = "Idea " + juce::String ((int) current) + "/" + juce::String (count)
+                   + " | " + juce::String (keptCount) + " kept"
+                   + (currentIsKept ? " | KEPT" : "");
+        const juce::ScopedLock l (historyLock_);
+        history_ = text;
+    }
+}
+
 std::shared_ptr<const BassPart> SessionPlayerMidiFXProcessor::currentPart() const
 {
     const juce::SpinLock::ScopedLockType l (partLock_);
@@ -309,6 +398,18 @@ void SessionPlayerMidiFXProcessor::requestCommand (const juce::String& text)
     notify();
 }
 
+void SessionPlayerMidiFXProcessor::requestKeep()
+{
+    keepRequested_ = true;
+    notify();
+}
+
+void SessionPlayerMidiFXProcessor::requestHistoryStep (int direction)
+{
+    historyStepRequested_ = direction < 0 ? -1 : 1;
+    notify();
+}
+
 void SessionPlayerMidiFXProcessor::setStatus (const juce::String& s)
 {
     const juce::ScopedLock l (statusLock_);
@@ -325,6 +426,12 @@ juce::String SessionPlayerMidiFXProcessor::adviceText() const
 {
     const juce::ScopedLock l (adviceLock_);
     return advice_;
+}
+
+juce::String SessionPlayerMidiFXProcessor::historyText() const
+{
+    const juce::ScopedLock l (historyLock_);
+    return history_;
 }
 
 // ---- transport-synced playback ---------------------------------------------
