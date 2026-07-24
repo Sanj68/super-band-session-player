@@ -8,6 +8,7 @@ from typing import Any
 
 import pretty_midi
 
+from app.services.bass_candidate_roles import bass_candidate_role_spec
 from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
 from app.services.conditioning import (
     UnifiedConditioning,
@@ -336,10 +337,30 @@ def _pick_pitch(
     passing_pcs: list[int],
     avoid_pcs: list[int],
     conf: float,
+    candidate_role: str | None = None,
+    previous_pitch: int | None = None,
+    scale_pcs: set[int] | None = None,
     rng: random.Random | object = random,
 ) -> int:
     strong = slot % 4 == 0
+    if candidate_role == "harmonic_alternative" and slot != 0:
+        safe_stable = [
+            pc
+            for pc in stable_pcs
+            if pc not in set(avoid_pcs) and (scale_pcs is None or pc in scale_pcs)
+        ]
+        colored = [pc for pc in safe_stable if pc != root_pc]
+        if colored:
+            target_pc = rng.choice(colored)
+            center = previous_pitch if previous_pitch is not None else _pc_to_bass_register(root_pc, octave=2)
+            options = [
+                _pc_to_bass_register(target_pc, octave=octave, lo=30, hi=62)
+                for octave in (1, 2, 3)
+            ]
+            return min(options, key=lambda pitch: (abs(pitch - center), pitch))
     if strong or role == "anchor":
+        return _pc_to_bass_register(root_pc, octave=2)
+    if candidate_role == "rhythmic_alternative" and rng.random() < 0.68:
         return _pc_to_bass_register(root_pc, octave=2)
     if passing_pcs and rng.random() < min(0.5, 0.15 + 0.5 * conf):
         return _pc_to_bass_register(rng.choice(passing_pcs), octave=2)
@@ -365,6 +386,7 @@ def generate_bass_phrase_v2(
     return_performance_notes: bool = False,
     lock_to_groove: float | None = None,
     density_bias: float = 0.0,
+    candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
@@ -380,6 +402,7 @@ def generate_bass_phrase_v2(
     player_persona = BASS_STYLE_ADAPTER.bass_persona(player) if player is not None else None
     player_profile_raw = player_persona.get("profile") if player_persona is not None else None
     player_profile: dict[str, Any] = dict(player_profile_raw) if isinstance(player_profile_raw, dict) else {}
+    candidate_role_spec = bass_candidate_role_spec(candidate_role)
 
     if player == "paul_chambers":
         harmonic = [
@@ -569,6 +592,10 @@ def generate_bass_phrase_v2(
         _harmonic_bar_plan(b, key=key, scale=scale, context=context, conditioning=conditioning)
         for b in range(max(1, bar_count))
     ]
+    confirmed_scale_pcs = {
+        (mt.key_root_pc(key) + interval) % 12 for interval in mt.scale_intervals(scale)
+    }
+    previous_pitch: int | None = None
 
     for bar in range(max(1, bar_count)):
         role = _bar_role(bar, role_span)
@@ -578,15 +605,28 @@ def generate_bass_phrase_v2(
             kick_slots = live_slots
         elif live_slots:
             kick_slots = sorted(set(kick_slots).union(live_slots[:2]))
-        dense = float(max(-1.0, min(1.0, density_bias)))
+        role_density_delta = candidate_role_spec.density_delta if candidate_role_spec is not None else 0.0
+        dense = float(max(-1.0, min(1.0, density_bias + role_density_delta)))
+        if candidate_role == "rhythmic_alternative":
+            sync_slots = (3, 7, 10, 14) if bar % 2 == 0 else (2, 6, 11, 14)
+            kick_slots = sorted(set(kick_slots).union(sync_slots))
         if lock_state == "locked":
             # kick_lock_mult: higher lock pulls more kick-adjacent slots into
             # the phrase (and allows one extra hit at full glue).
             slots = _phrase_slots(
                 role,
                 kick_slots,
-                kick_take=3 + (1 if lock >= 0.7 else 0) + (1 if dense >= 0.25 else 0),
-                extra_hits=(1 if lock >= 0.75 else 0) + (1 if dense >= 0.25 else 0),
+                kick_take=(
+                    3
+                    + (1 if lock >= 0.7 else 0)
+                    + (1 if dense >= 0.25 else 0)
+                    - (1 if candidate_role == "pocket_keeper" else 0)
+                ),
+                extra_hits=(
+                    (1 if lock >= 0.75 else 0)
+                    + (1 if dense >= 0.25 else 0)
+                    + (1 if candidate_role == "rhythmic_alternative" else 0)
+                ),
             )
         else:
             slots = _phrase_slots(
@@ -645,6 +685,9 @@ def generate_bass_phrase_v2(
                 passing_pcs=passing_pcs,
                 avoid_pcs=avoid_pcs,
                 conf=conf,
+                candidate_role=candidate_role,
+                previous_pitch=previous_pitch,
+                scale_pcs=confirmed_scale_pcs,
                 rng=rng,
             )
             # Resolve into the next chord: in release/answer bars the final
@@ -664,7 +707,9 @@ def generate_bass_phrase_v2(
                     next_root -= 12
                 approaches = get_chromatic_approaches(pitch, next_root)
                 if approaches:
-                    pitch = int(approaches[-1])
+                    approach_pitch = int(approaches[-1])
+                    if candidate_role is None or approach_pitch % 12 in confirmed_scale_pcs:
+                        pitch = approach_pitch
             start = bar_t0 + slot * sixteenth
             if context is not None and context.anchor_lane == "drums":
                 start += sixteenth * 0.05 * drum_kick_weight(context, bar, slot)
@@ -677,6 +722,16 @@ def generate_bass_phrase_v2(
             dur = sixteenth * (1.2 if slot % 4 == 0 else 0.85)
             if role == "release":
                 dur *= 0.9
+            if candidate_role == "pocket_keeper":
+                dur *= 1.18 if slot % 4 == 0 else 1.0
+            elif candidate_role == "rhythmic_alternative":
+                dur *= 0.72 if slot % 4 != 0 else 0.88
+            elif candidate_role == "performance_alternative":
+                if slot % 4 != 0:
+                    start += spb * 0.018
+                    dur *= 0.56
+                else:
+                    dur *= 1.24
             end = min(bar_t1 - 1e-4, start + dur)
             if end <= start:
                 continue
@@ -690,6 +745,13 @@ def generate_bass_phrase_v2(
                 vel += 4
             elif role == "release":
                 vel -= 5
+            if candidate_role == "rhythmic_alternative" and slot % 4 != 0:
+                vel += 5
+            elif candidate_role == "performance_alternative":
+                if slot % 4 != 0:
+                    vel -= 17 if slot % 8 in (2, 6) else 10
+                elif slot in (0, 8):
+                    vel += 5
             final_vel = max(54, min(112, vel + rng.randint(-6, 6)))
             inst.notes.append(
                 pretty_midi.Note(
@@ -714,6 +776,7 @@ def generate_bass_phrase_v2(
                         confidence=None,
                     )
                 )
+            previous_pitch = int(pitch)
 
     pm.instruments.append(inst)
     buf = io.BytesIO()
@@ -734,6 +797,8 @@ def generate_bass_phrase_v2(
         "kick-aware phrase roles, rest-space gating, bar-level harmonic targets"
         + groove_clause
     )
+    if candidate_role_spec is not None:
+        preview += f" Role: {candidate_role_spec.label} — {candidate_role_spec.description}"
     if return_performance_notes:
         perf_notes = list(
             infer_bass_articulations(

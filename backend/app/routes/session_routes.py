@@ -42,6 +42,11 @@ from app.routes.midi_routes import get_audition_player
 from app.services import generator
 from app.services import bass_candidate_store
 from app.services.bass_bar_splice import splice_bass_bars
+from app.services.bass_candidate_roles import (
+    ROLE_ORDER,
+    bass_candidate_role_for_index,
+    bass_candidate_role_spec,
+)
 from app.services.bass_loop_boundary import normalize_bass_loop_bytes
 from app.services.bass_vocabulary.candidates import generate_vocabulary_candidates
 from app.services.bass_performance import BassPerformanceNote
@@ -1248,6 +1253,7 @@ def _render_bass_take_with_seed(
     seed: int,
     conditioning: UnifiedConditioning | None,
     context: SessionAnchorContext | None,
+    candidate_role: str | None = None,
 ) -> tuple[bytes, str]:
     raw_bytes, preview = generator.generate_bass(
         tempo=s.tempo,
@@ -1258,8 +1264,9 @@ def _render_bass_take_with_seed(
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
-            lock_to_groove=s.bass_lock_to_groove,
-            density_bias=s.bass_density_bias,
+        lock_to_groove=s.bass_lock_to_groove,
+        density_bias=s.bass_density_bias,
+        candidate_role=candidate_role,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=context,
@@ -1293,6 +1300,15 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
                     signature_distance=(float(t["signature_distance"]) if t.get("signature_distance") is not None else None),
                     quality_floor_cutoff=(float(t["quality_floor_cutoff"]) if t.get("quality_floor_cutoff") is not None else None),
                     top_pool_score=(float(t["top_pool_score"]) if t.get("top_pool_score") is not None else None),
+                    candidate_role=(str(t["candidate_role"]) if t.get("candidate_role") is not None else None),
+                    candidate_role_label=(
+                        str(t["candidate_role_label"]) if t.get("candidate_role_label") is not None else None
+                    ),
+                    candidate_role_description=(
+                        str(t["candidate_role_description"])
+                        if t.get("candidate_role_description") is not None
+                        else None
+                    ),
                 )
             )
     return BassCandidateRun(
@@ -1304,6 +1320,7 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
         bass_engine=str(raw.get("bass_engine", "baseline")),
         bass_player=(str(raw.get("bass_player")) if raw.get("bass_player") is not None else None),
         bass_instrument=str(raw.get("bass_instrument", "finger_bass")),
+        variation_mode=str(raw.get("variation_mode", "ranked")),
         clip_id=(str(raw.get("clip_id")) if raw.get("clip_id") is not None else None),
         conditioning_tempo=int(raw.get("conditioning_tempo", 120)),
         conditioning_phase_offset=int(raw.get("conditioning_phase_offset", 0)),
@@ -1412,6 +1429,234 @@ def _style_floor_margin(style: str) -> float:
     return 0.08
 
 
+def _generate_controlled_role_bass_candidates(
+    *,
+    s: StoredSession,
+    body: GenerateBassCandidatesBody,
+    context: SessionAnchorContext,
+    conditioning: UnifiedConditioning,
+    base_seed: int,
+    run_id: str,
+    created_at: str,
+) -> BassCandidateRun:
+    """Return purposeful alternatives that each change one musical dimension."""
+    if s.bass_engine != "phrase_v2":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "controlled_roles_requires_phrase_v2",
+                "message": "Purposeful four-role comparison requires Phrase Engine v2.",
+            },
+        )
+    if s.bass_player:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "controlled_roles_requires_neutral_player",
+                "message": (
+                    "Purposeful role comparison currently requires the neutral player profile; "
+                    "turn the named player profile off first."
+                ),
+            },
+        )
+
+    requested = int(body.take_count)
+    requested_roles = [bass_candidate_role_for_index(i) for i in range(requested)]
+    attempts_per_role = max(3, min(9, (requested * 3 + len(ROLE_ORDER) - 1) // len(ROLE_ORDER)))
+    strict_harmonic_guard = bool(s.reference_audio_path and s.chord_progression)
+    harmonically_rejected = 0
+    pools: dict[str, list[tuple[float, tuple[tuple[int, ...], ...], BassCandidateTake, dict[str, object]]]] = {
+        role: [] for role in ROLE_ORDER
+    }
+    seed_cursor = 0
+
+    for role in ROLE_ORDER:
+        spec = bass_candidate_role_spec(role)
+        assert spec is not None
+        for _ in range(attempts_per_role):
+            seed_i = int(base_seed) + seed_cursor
+            seed_cursor += 1
+            private_take_id = f"{run_id}_{role}_{seed_i}"
+            data, preview = _render_bass_take_with_seed(
+                s,
+                seed=seed_i,
+                conditioning=conditioning,
+                context=context,
+                candidate_role=role,
+            )
+            notes = extract_lane_notes(data)
+            if strict_harmonic_guard and count_unsupported_structural_notes(
+                notes,
+                tempo=conditioning.tempo,
+                conditioning=conditioning,
+                style=s.bass_style,
+            ):
+                harmonically_rejected += 1
+                continue
+            quality = analyze_bass_take(
+                notes,
+                tempo=conditioning.tempo,
+                bar_count=conditioning.bar_count,
+                key=s.key,
+                scale=s.scale,
+                style=s.bass_style,
+                conditioning=conditioning,
+                context=context,
+            )
+            family = f"controlled_{role}"
+            take = BassCandidateTake(
+                take_id=private_take_id,
+                seed=seed_i,
+                note_count=len(notes),
+                byte_length=len(data),
+                preview=preview,
+                quality_total=quality.total,
+                quality_scores=quality.scores,
+                quality_reason=quality.reason,
+                motif_family=family,
+                candidate_role=role,
+                candidate_role_label=spec.label,
+                candidate_role_description=spec.description,
+            )
+            row: dict[str, object] = {
+                "take_id": private_take_id,
+                "seed": seed_i,
+                "note_count": len(notes),
+                "byte_length": len(data),
+                "preview": preview,
+                "quality_total": quality.total,
+                "quality_scores": quality.scores,
+                "quality_reason": quality.reason,
+                "motif_family": family,
+                "candidate_role": role,
+                "candidate_role_label": spec.label,
+                "candidate_role_description": spec.description,
+                "midi_b64": base64.b64encode(data).decode("ascii"),
+            }
+            pools[role].append((quality.total, quality.signature, take, row))
+
+    for pool in pools.values():
+        pool.sort(key=lambda item: (item[0], -item[2].note_count), reverse=True)
+
+    missing_roles = sorted({role for role in requested_roles if not pools[role]})
+    if missing_roles:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "harmonic_candidate_shortfall",
+                "message": (
+                    "The confirmed chord map rejected every safe candidate for one or more "
+                    "purposeful roles. No unsafe fallback candidates were returned."
+                ),
+                "missing_roles": missing_roles,
+                "harmonically_rejected": harmonically_rejected,
+            },
+        )
+
+    min_distance, _ = _style_diversity_gate(s.bass_style)
+    selected_signatures: list[tuple[tuple[int, ...], ...]] = []
+    role_offsets: dict[str, int] = {role: 0 for role in ROLE_ORDER}
+    takes: list[BassCandidateTake] = []
+    take_rows: list[dict[str, object]] = []
+    hidden_pool_size = sum(len(pool) for pool in pools.values())
+
+    for role in requested_roles:
+        pool = pools[role]
+        role_top_score = float(pool[0][0])
+        floor_cutoff = max(0.0, role_top_score - _style_floor_margin(s.bass_style))
+        start_at = role_offsets[role]
+        eligible = [
+            item
+            for item in pool[start_at:]
+            if float(item[0]) >= floor_cutoff
+        ]
+        if not eligible:
+            eligible = pool[start_at:] or pool
+
+        chosen = None
+        if selected_signatures:
+            for item in eligible:
+                if all(
+                    _signature_distance(item[1], existing) >= min_distance * 0.45
+                    for existing in selected_signatures
+                ):
+                    chosen = item
+                    break
+        if chosen is None:
+            chosen = eligible[0]
+
+        score, signature, take, row = chosen
+        role_offsets[role] = min(len(pool), pool.index(chosen) + 1)
+        sig_dist = (
+            min(_signature_distance(signature, existing) for existing in selected_signatures)
+            if selected_signatures
+            else None
+        )
+        stage = "strict" if sig_dist is None or sig_dist >= min_distance * 0.45 else "relaxed"
+        selected_signatures.append(signature)
+        public_take_id = f"{run_id}_t{len(takes) + 1}"
+        take = take.model_copy(
+            update={
+                "take_id": public_take_id,
+                "selection_stage": stage,
+                "signature_distance": sig_dist,
+                "quality_floor_cutoff": floor_cutoff,
+                "top_pool_score": role_top_score,
+            }
+        )
+        row = dict(row)
+        row.update(
+            {
+                "take_id": public_take_id,
+                "selection_stage": stage,
+                "signature_distance": sig_dist,
+                "quality_floor_cutoff": floor_cutoff,
+                "top_pool_score": role_top_score,
+                "rank": len(takes) + 1,
+                "hidden_pool_size": hidden_pool_size,
+            }
+        )
+        takes.append(take)
+        take_rows.append(row)
+
+    takes = [
+        take.model_copy(
+            update={
+                "quality_reason": (
+                    f"purposeful role {index + 1}/{len(takes)}; "
+                    f"role={take.candidate_role}; {take.quality_reason}"
+                )
+            }
+        )
+        for index, take in enumerate(takes)
+    ]
+    for index, row in enumerate(take_rows):
+        row["quality_reason"] = takes[index].quality_reason
+
+    run = BassCandidateRun(
+        run_id=run_id,
+        session_id=s.id,
+        created_at=created_at,
+        take_count=len(takes),
+        bass_style=s.bass_style,
+        bass_engine=s.bass_engine,
+        bass_player=s.bass_player,
+        bass_instrument=s.bass_instrument,
+        variation_mode="controlled_roles",
+        clip_id=body.clip_id,
+        conditioning_tempo=conditioning.tempo,
+        conditioning_phase_offset=conditioning.beat_phase_offset_beats,
+        conditioning_phase_confidence=conditioning.beat_phase_confidence,
+        conditioning_sections_count=len(conditioning.sections),
+        conditioning_harmonic_bar_count=len(conditioning.harmonic_bars),
+        takes=takes,
+    )
+    run_payload = run.model_dump(mode="json")
+    run_payload["takes"] = take_rows
+    bass_candidate_store.append_run(run_payload)
+    return run
+
+
 @router.post("/{session_id}/bass-candidates", response_model=BassCandidateRun)
 def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody = GenerateBassCandidatesBody()) -> BassCandidateRun:
     """
@@ -1425,6 +1670,16 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     base_seed = int(body.seed) if body.seed is not None else _new_bass_seed()
     run_id = f"cand_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
     created_at = datetime.now(timezone.utc).isoformat()
+    if body.variation_mode == "controlled_roles":
+        return _generate_controlled_role_bass_candidates(
+            s=s,
+            body=body,
+            context=ctx,
+            conditioning=cond,
+            base_seed=base_seed,
+            run_id=run_id,
+            created_at=created_at,
+        )
 
     requested = int(body.take_count)
     hidden_count = max(requested, min(36, requested * 3))
@@ -1708,6 +1963,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
         bass_engine=s.bass_engine,
         bass_player=s.bass_player,
         bass_instrument=s.bass_instrument,
+        variation_mode="ranked",
         clip_id=body.clip_id,
         conditioning_tempo=cond.tempo if cond is not None else s.tempo,
         conditioning_phase_offset=cond.beat_phase_offset_beats if cond is not None else 0,
@@ -1793,14 +2049,19 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 bass_instrument=s.bass_instrument,
                 bass_player=s.bass_player,
                 bass_engine=s.bass_engine,
-            lock_to_groove=s.bass_lock_to_groove,
-            density_bias=s.bass_density_bias,
+                lock_to_groove=s.bass_lock_to_groove,
+                density_bias=s.bass_density_bias,
                 chord_progression=s.chord_progression,
                 session_preset=s.session_preset,
                 context=ctx,
                 conditioning=cond,
                 seed=int(s.bass_seed),
                 return_performance_notes=True,
+                candidate_role=(
+                    str(take.get("candidate_role"))
+                    if take.get("candidate_role") is not None
+                    else None
+                ),
             )
             perf_bytes = _render_bass_performance_bytes(
                 clean_bytes=s.bass_bytes,

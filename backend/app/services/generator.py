@@ -60,6 +60,7 @@ def generate_bass(
     return_performance_notes: bool = False,
     lock_to_groove: float | None = None,
     density_bias: float = 0.0,
+    candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
     return generate_bass_impl(
@@ -79,6 +80,7 @@ def generate_bass(
         return_performance_notes=return_performance_notes,
         lock_to_groove=lock_to_groove,
         density_bias=density_bias,
+        candidate_role=candidate_role,
     )
 
 

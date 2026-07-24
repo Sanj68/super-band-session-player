@@ -78,6 +78,7 @@ function scheduleBrowserBassNotes(ctx, notes, now, level) {
 
 export default function BassCandidatePanel({ session, setSession, busy, setBusy, setError, setStatus }) {
   const [candidateTakeCount, setCandidateTakeCount] = useState(4);
+  const [candidateVariationMode, setCandidateVariationMode] = useState("controlled_roles");
   const [candidateSeed, setCandidateSeed] = useState("");
   const [candidateClipId, setCandidateClipId] = useState("");
   const [adjustBarStart, setAdjustBarStart] = useState("2");
@@ -112,6 +113,13 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     if (!session?.id) return;
     setCandidateClipId(session.id);
   }, [session?.id]);
+
+  useEffect(() => {
+    const supportsControlledRoles = session?.bass_engine === "phrase_v2" && !session?.bass_player;
+    if (!supportsControlledRoles && candidateVariationMode === "controlled_roles") {
+      setCandidateVariationMode("ranked");
+    }
+  }, [session?.bass_engine, session?.bass_player, candidateVariationMode]);
 
   const refreshMidiAudition = useCallback(async () => {
     try {
@@ -637,6 +645,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
         take_count: Math.max(2, Math.min(12, Number(candidateTakeCount) || 4)),
         seed: candidateSeed.trim() ? Number(candidateSeed.trim()) : null,
         clip_id: candidateClipId.trim() || null,
+        variation_mode: candidateVariationMode,
       });
       await refreshBassCandidates();
       setStatus(`Generated ${created.take_count} bass candidates (${created.run_id}).`);
@@ -650,6 +659,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     candidateTakeCount,
     candidateSeed,
     candidateClipId,
+    candidateVariationMode,
     refreshBassCandidates,
     setBusy,
     setError,
@@ -763,7 +773,29 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Bass Candidates (conditioning run)</summary>
       <div style={{ marginTop: 10, display: "grid", gap: "0.6rem", maxWidth: 900 }}>
         <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>{getSourceAwareBassStatusLine(session)}</p>
+        <p style={{ margin: 0, fontSize: 12, color: "#475569" }}>
+          Purposeful roles keep the confirmed harmony and groove lock fixed, then change one musical dimension per take.
+        </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
+          <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+            Comparison
+            <select
+              value={candidateVariationMode}
+              onChange={(e) => {
+                const mode = e.target.value;
+                setCandidateVariationMode(mode);
+                if (mode === "controlled_roles") setCandidateTakeCount(4);
+              }}
+            >
+              <option
+                value="controlled_roles"
+                disabled={session?.bass_engine !== "phrase_v2" || !!session?.bass_player}
+              >
+                Four purposeful roles
+              </option>
+              <option value="ranked">Ranked variations</option>
+            </select>
+          </label>
           <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
             Take count
             <input
@@ -771,6 +803,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
               min={2}
               max={12}
               value={candidateTakeCount}
+              disabled={candidateVariationMode === "controlled_roles"}
               onChange={(e) => setCandidateTakeCount(Math.max(2, Math.min(12, Number(e.target.value) || 4)))}
             />
           </label>
@@ -1046,6 +1079,14 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                     ? String(take.template_id).trim()
                     : null;
                 const isSubOneVocabulary = !!(vocabLabel || templateId);
+                const candidateRoleLabel =
+                  take?.candidate_role_label != null && String(take.candidate_role_label).trim()
+                    ? String(take.candidate_role_label).trim()
+                    : null;
+                const candidateRoleDescription =
+                  take?.candidate_role_description != null && String(take.candidate_role_description).trim()
+                    ? String(take.candidate_role_description).trim()
+                    : null;
                 return (
                   <div
                     key={take.take_id}
@@ -1058,6 +1099,29 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                       padding: "0.45rem 0.55rem",
                     }}
                   >
+                    {candidateRoleLabel ? (
+                      <div style={{ display: "grid", gap: 3 }}>
+                        <div
+                          style={{
+                            width: "fit-content",
+                            background: "#ecfeff",
+                            color: "#155e75",
+                            border: "1px solid #67e8f9",
+                            borderRadius: 999,
+                            padding: "2px 9px",
+                            fontSize: 12,
+                            fontWeight: 700,
+                          }}
+                        >
+                          {candidateRoleLabel}
+                        </div>
+                        {candidateRoleDescription ? (
+                          <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.35 }}>
+                            {candidateRoleDescription}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {vocabLabel || templateId ? (
                       <div style={{ display: "grid", gap: 2 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>

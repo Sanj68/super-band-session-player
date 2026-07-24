@@ -794,6 +794,13 @@ class GenerateBassCandidatesBody(BaseModel):
         default=None,
         description="Optional clip/reference id for evaluation bookkeeping.",
     )
+    variation_mode: Literal["ranked", "controlled_roles"] = Field(
+        default="ranked",
+        description=(
+            "ranked preserves the existing hidden-pool selector; controlled_roles "
+            "deliberately compares pocket, rhythm, harmony, and performance."
+        ),
+    )
 
 
 class BassCandidateTake(BaseModel):
@@ -812,6 +819,14 @@ class BassCandidateTake(BaseModel):
     signature_distance: float | None = None
     quality_floor_cutoff: float | None = None
     top_pool_score: float | None = None
+    candidate_role: Literal[
+        "pocket_keeper",
+        "rhythmic_alternative",
+        "harmonic_alternative",
+        "performance_alternative",
+    ] | None = None
+    candidate_role_label: str | None = None
+    candidate_role_description: str | None = None
 
 
 class BassCandidateRun(BaseModel):
@@ -823,6 +838,7 @@ class BassCandidateRun(BaseModel):
     bass_engine: str
     bass_player: str | None = None
     bass_instrument: str
+    variation_mode: Literal["ranked", "controlled_roles"] = "ranked"
     clip_id: str | None = None
     conditioning_tempo: int = Field(ge=40, le=240)
     conditioning_phase_offset: int = Field(ge=0, le=3)

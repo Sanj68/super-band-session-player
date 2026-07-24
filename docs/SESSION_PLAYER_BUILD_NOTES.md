@@ -97,6 +97,56 @@ passed. The validation-pack command currently reports 5/15, not the
 bar-level harmony changes and must be reconciled separately rather than
 reported as passing.
 
+### 2026-07-24 controlled player-personality slice
+
+The accepted four takes held the source pocket but were too closely
+related. The next bounded slice now offers an explicit
+`controlled_roles` candidate mode. It preserves the confirmed harmony,
+Phrase Engine v2 and shared groove lock while generating one take for
+each neutral musical purpose:
+
+- **Pocket Keeper** — most restrained root/pocket reading;
+- **Rhythmic Alternative** — more syncopated answers and shorter attacks;
+- **Harmonic Alternative** — more chord-tone voice leading, constrained
+  to the confirmed global scale as well as the confirmed chord map;
+- **Performance Alternative** — conservative note choice with different
+  accents, note lengths and laid-back timing.
+
+The existing ranked hidden-pool workflow remains available as
+`variation_mode=ranked` for backwards compatibility. Purposeful roles
+require Phrase Engine v2 and the neutral player profile; the API fails
+honestly instead of attaching role labels to engines that do not yet
+implement them.
+
+Real combined-source proof:
+
+- session: `92e7b255-8fba-43a3-8d8c-742d64a91778`
+- run: `cand_20260724T155518_40d9df54`
+- source: 88 BPM, 16 bars, D natural minor, confirmed
+  `Bb | C | D | Gm`, groove lock 0.70
+- note counts by role: 43 / 65 / 53 / 54
+- pairwise note/slot/pitch distance: 0.494–0.820 (previous accepted set:
+  0.267–0.409)
+- all takes: exactly 64 playable beats, no same-pitch overlaps, no
+  sub-25 ms notes, no loop overruns and no D-natural-minor-unsafe notes.
+
+The first real-source pass caught an F-sharp edge: the plain `D` chord
+symbol is parsed as D major while the session scale is D natural minor.
+The Harmonic Alternative now uses only the intersection of confirmed
+chord tones and confirmed scale tones; controlled chromatic approaches
+are likewise suppressed when they would break the confirmed scale.
+
+The React controls remain the development/audition lab. The role IDs and
+API contract are deliberately UI-neutral so the same four-purpose
+comparison can be surfaced in the existing Logic MIDI FX chassis. Do not
+grow a separate web-only product. The next DAW task is to expose this
+role comparison and candidate selection in the AU, before Trilian or
+another instrument in Logic. Public controls remain neutral; do not add
+artist names to the new role system.
+
+Verification: 490 backend tests passed and the frontend production build
+passed.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability
