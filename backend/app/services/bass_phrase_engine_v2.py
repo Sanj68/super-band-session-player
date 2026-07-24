@@ -386,6 +386,7 @@ def generate_bass_phrase_v2(
     return_performance_notes: bool = False,
     lock_to_groove: float | None = None,
     density_bias: float = 0.0,
+    expression_amount: float = 0.5,
     candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
@@ -469,6 +470,7 @@ def generate_bass_phrase_v2(
                     tempo=tempo,
                     style=style,
                     source="phrase_v2",
+                    expression_amount=expression_amount,
                 )
             )
             return buf.getvalue(), preview, tuple(perf_notes)
@@ -578,6 +580,7 @@ def generate_bass_phrase_v2(
                     tempo=tempo,
                     style=style,
                     source="phrase_v2",
+                    expression_amount=expression_amount,
                 )
             )
             return buf.getvalue(), preview, tuple(perf_notes)
@@ -806,6 +809,7 @@ def generate_bass_phrase_v2(
                 tempo=tempo,
                 style=style,
                 source="phrase_v2",
+                expression_amount=expression_amount,
             )
         )
         return buf.getvalue(), preview, tuple(perf_notes)

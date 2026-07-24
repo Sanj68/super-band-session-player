@@ -147,6 +147,71 @@ artist names to the new role system.
 Verification: 490 backend tests passed and the frontend production build
 passed.
 
+### 2026-07-24 Logic plugin exploration direction
+
+The Logic plugin is not a static preset panel. Its purpose is to take the
+producer on a recoverable musical journey:
+
+1. listen to and analyse the supplied reference;
+2. offer one strong best-fit performance;
+3. describe the source as a blend of evidenced traits, using familiar
+   genre words only as orientation;
+4. recommend an **Accompany** route that reinforces the source and a
+   **Counterpoint** route that complements it;
+5. let the user explore bounded alternatives, keep what works and return
+   to any earlier idea.
+
+The listening language should be honest and mixed: for example, "strong
+offbeat space, a syncopated pocket and moderate harmonic colour —
+reggae/funk with some jazz-like movement, confidence medium." The engine
+acts on timing, density, harmonic colour, phrase shape and articulation;
+it does not reduce a source to one genre label. Every recommendation must
+say what it preserves and what it changes.
+
+Instrument choice is part of the musical reasoning, not merely a sound
+selection after MIDI generation. The intended pipeline is:
+
+> source traits → musical role → performance intent → instrument
+> capability profile → MIDI.
+
+Start with neutral bass families: fingered, picked, fretless, upright,
+slap and sub/synth. A fretless profile can favour sustained connections,
+slides and legato arrivals; a sub profile must protect low-register space,
+limit rapid retriggers and respect envelope length. Exact products such
+as Trilian come later as render profiles that translate the same universal
+intent into their keyswitches, CCs and articulation layout.
+
+Product decisions from the first controlled-take audition:
+
+- prioritise human expression;
+- simple default view with advanced controls behind disclosure;
+- one restrained-to-bold Character control;
+- style-aware articulations chosen automatically;
+- analyse first, then create a complete editable MIDI region;
+- experimentation must be recoverable: no destructive "surprise me"
+  without history and recall.
+
+The first bounded implementation slice now provides:
+
+- `bass_expression` from 0.0 to 1.0 across session and plugin APIs;
+- midpoint 0.5 preserves the prior conservative grace/ghost behaviour;
+- above the midpoint, deterministic style-aware rules can add muted
+  punctuation and connected-note intent;
+- hammer/slide destinations get a bounded generic legato fallback while
+  later instrument profiles remain responsible for keyswitch/CC/pitch-bend
+  translation;
+- the AU exposes Character while keeping advanced text control collapsed;
+- public AU automation uses neutral trait labels. Legacy named profile ids
+  remain an internal compatibility map only.
+
+Still deliberately unclaimed: source-style mixture advice, the
+Accompany/Counterpoint recommendation engine, keep/lock/history/recall,
+and direct Logic-region materialisation. Those are the next plugin-journey
+work, not reasons to expand the React audition lab.
+
+Verification for this slice: 495 backend tests passed; the AU Release
+build completed and `auval -v aumi SpMx SOne` passed.
+
 ## 4. Revised Roadmap
 
 Order has been re-staged based on the latest strategic review. Capability

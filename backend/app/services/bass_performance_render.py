@@ -82,6 +82,7 @@ def render_performance_bass_midi(
     *,
     tempo: int,
     program: int,
+    expression_amount: float = 0.5,
     source_kick_per_bar: tuple[tuple[float, ...], ...] | None = None,
     source_snare_per_bar: tuple[tuple[float, ...], ...] | None = None,
     source_pressure_per_bar: tuple[tuple[float, ...], ...] | None = None,
@@ -107,6 +108,9 @@ def render_performance_bass_midi(
         return buf.getvalue()
 
     sixteenth = 60.0 / float(max(1, int(tempo))) / 4.0
+    amount = max(0.0, min(1.0, float(expression_amount)))
+    feel_scale = min(1.5, amount * 2.0)
+    connected_scale = max(0.0, min(1.0, (amount - 0.5) * 2.0))
     ordered = tuple(
         sorted(
             notes,
@@ -124,11 +128,19 @@ def render_performance_bass_midi(
             source_kick_per_bar=source_kick_per_bar,
             source_snare_per_bar=source_snare_per_bar,
             source_pressure_per_bar=source_pressure_per_bar,
+            feel_scale=feel_scale,
+            connected_scale=connected_scale,
         )
         rendered_notes.append(rendered)
 
     # Sort by (start, pitch) so the next-note overlap guard is meaningful.
     rendered_notes.sort(key=lambda n: (float(n.start), int(n.pitch), float(n.end)))
+    _apply_connected_note_intent(
+        rendered_notes,
+        ordered,
+        sixteenth=sixteenth,
+        connected_scale=connected_scale,
+    )
     _enforce_no_excessive_overlap(rendered_notes)
     inst.notes.extend(rendered_notes)
 
@@ -145,6 +157,8 @@ def _shape_note(
     source_kick_per_bar: tuple[tuple[float, ...], ...] | None,
     source_snare_per_bar: tuple[tuple[float, ...], ...] | None,
     source_pressure_per_bar: tuple[tuple[float, ...], ...] | None,
+    feel_scale: float,
+    connected_scale: float,
 ) -> pretty_midi.Note:
     pitch = int(note.pitch)
     velocity = int(note.velocity)
@@ -174,16 +188,18 @@ def _shape_note(
         max_dur = sixteenth * _DEAD_DUR_FRAC
         end = _shorten_to(start, end, max_dur)
         return pretty_midi.Note(pitch=pitch, velocity=velocity, start=start, end=end)
-    # slide_from / slide_to / hammer keep v0.5 pass-through semantics for now,
-    # but still receive the v0.8 feel layer below.
+    if note.articulation == "slide_to":
+        velocity = _clamp_int(round(velocity * (1.0 - 0.10 * connected_scale)), 1, 127)
+    elif note.articulation == "hammer":
+        velocity = _clamp_int(round(velocity * (1.0 - 0.16 * connected_scale)), 1, 127)
 
     # 2) v0.8 feel layer: applied to normal/slide/hammer notes only.
-    vel_delta = _ROLE_VEL_DELTA.get(role, 0)
-    dur_mult = _ROLE_DUR_MULT.get(role, 1.0)
+    vel_delta = int(round(_ROLE_VEL_DELTA.get(role, 0) * feel_scale))
+    dur_mult = 1.0 + (_ROLE_DUR_MULT.get(role, 1.0) - 1.0) * feel_scale
 
     # 4-bar phrase arc on velocity (bar % 4).
     if bar is not None:
-        vel_delta += _PHRASE_ARC_VEL_DELTA[int(bar) % 4]
+        vel_delta += int(round(_PHRASE_ARC_VEL_DELTA[int(bar) % 4] * feel_scale))
 
     # Source-pressure response (optional).
     src_kick = _grid_value(source_kick_per_bar, bar, slot)
@@ -191,10 +207,10 @@ def _shape_note(
     src_pressure = _grid_value(source_pressure_per_bar, bar, slot)
 
     if src_kick is not None and src_kick > 0.0:
-        vel_delta += int(round(_SOURCE_KICK_ACCENT_MAX * min(1.0, src_kick)))
+        vel_delta += int(round(_SOURCE_KICK_ACCENT_MAX * min(1.0, src_kick) * feel_scale))
     if src_snare is not None and src_kick is not None:
         if src_snare >= 0.5 and src_kick < 0.25:
-            vel_delta -= int(round(_SOURCE_SNARE_PENALTY_MAX * min(1.0, src_snare)))
+            vel_delta -= int(round(_SOURCE_SNARE_PENALTY_MAX * min(1.0, src_snare) * feel_scale))
     if src_pressure is not None:
         # High pressure => slightly drives note (longer); low pressure => slightly
         # opens space (shorter). Bounded.
@@ -203,7 +219,7 @@ def _shape_note(
             scale = 1.0 - _SOURCE_PRESSURE_DUR_RANGE
         if scale > 1.0 + _SOURCE_PRESSURE_DUR_RANGE:
             scale = 1.0 + _SOURCE_PRESSURE_DUR_RANGE
-        dur_mult *= scale
+        dur_mult *= 1.0 + (scale - 1.0) * feel_scale
 
     # 3) Apply velocity & duration shaping.
     velocity = _clamp_int(velocity + vel_delta, 1, 127)
@@ -211,7 +227,7 @@ def _shape_note(
     end = start + duration
 
     # 4) Bounded deterministic micro-timing offset (no rng; hash-based).
-    offset = _micro_timing_offset(role=role, bar=bar, slot=slot, pitch=pitch)
+    offset = _micro_timing_offset(role=role, bar=bar, slot=slot, pitch=pitch) * feel_scale
     if offset != 0.0:
         new_start = max(0.0, start + offset)
         # Keep duration constant under timing nudge.
@@ -228,6 +244,33 @@ def _shape_note(
         end = start + _MIN_NOTE_DURATION
 
     return pretty_midi.Note(pitch=pitch, velocity=velocity, start=start, end=end)
+
+
+def _apply_connected_note_intent(
+    rendered: list[pretty_midi.Note],
+    source: tuple[BassPerformanceNote, ...],
+    *,
+    sixteenth: float,
+    connected_scale: float,
+) -> None:
+    """Create a tiny generic legato overlap for slide/hammer destinations.
+
+    Instrument profiles can later translate the same intent to keyswitches,
+    CCs, or pitch bend. The generic fallback remains useful with ordinary
+    monophonic bass patches and stays below the renderer's overlap guard.
+    """
+
+    if connected_scale <= 0.0 or len(rendered) != len(source):
+        return
+    overlap = min(0.0035, max(0.001, sixteenth * 0.03 * connected_scale))
+    for idx in range(1, len(rendered)):
+        if source[idx].articulation not in ("slide_to", "hammer"):
+            continue
+        previous = rendered[idx - 1]
+        current = rendered[idx]
+        if abs(int(current.pitch) - int(previous.pitch)) > 7:
+            continue
+        previous.end = max(float(previous.end), float(current.start) + overlap)
 
 
 def _grid_value(

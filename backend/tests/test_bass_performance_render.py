@@ -179,6 +179,37 @@ def test_dead_articulation_is_short_and_quiet() -> None:
     assert rendered.end - rendered.start < 0.5
 
 
+def test_bold_connected_note_intent_adds_bounded_generic_legato() -> None:
+    source = (
+        _note(
+            pitch=40,
+            start=0.0,
+            end=0.48,
+            velocity=92,
+            articulation="normal",
+        ),
+        _note(
+            pitch=42,
+            start=0.5,
+            end=0.9,
+            velocity=86,
+            articulation="hammer",
+        ),
+    )
+
+    raw = render_performance_bass_midi(
+        source,
+        tempo=120,
+        program=33,
+        expression_amount=1.0,
+    )
+    rendered = sorted(_read(raw).instruments[0].notes, key=lambda note: note.start)
+
+    overlap = rendered[0].end - rendered[1].start
+    assert 0.0 < overlap < 0.005
+    assert rendered[1].velocity < source[1].velocity
+
+
 def test_role_bar_slot_metadata_applies_bounded_deterministic_feel() -> None:
     src = (
         _note(

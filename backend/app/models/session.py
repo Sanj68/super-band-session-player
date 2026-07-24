@@ -269,6 +269,15 @@ class SessionPatch(BaseModel):
             "reference kick. Send null to return to the engine default."
         ),
     )
+    bass_expression: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Performance character: 0 = clean and restrained, 0.5 = natural "
+            "default, 1 = bold style-aware expression."
+        ),
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="When set, updates stored drum player profile (regenerate drums to apply). Send null to clear.",
@@ -369,6 +378,15 @@ class SessionCreate(BaseModel):
         ge=0.0,
         le=1.0,
         description="Reference lock-to-groove (phrase_v2); omit for engine default.",
+    )
+    bass_expression: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Performance character: 0 = clean and restrained, 0.5 = natural "
+            "default, 1 = bold style-aware expression."
+        ),
     )
     drum_player: DrumPlayer | None = Field(
         default=None,
@@ -625,6 +643,15 @@ class SessionState(BaseModel):
             "Reference lock-to-groove knob (phrase_v2 only): 0 = loose pocket, "
             "1 = glued to the reference kick. None = engine default (0.5 when "
             "reference evidence is strong)."
+        ),
+    )
+    bass_expression: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Performance character: 0 = clean and restrained, 0.5 = natural "
+            "default, 1 = bold style-aware expression."
         ),
     )
     bass_seed: int | None = Field(

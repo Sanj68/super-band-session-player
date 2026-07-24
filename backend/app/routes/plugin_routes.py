@@ -61,6 +61,7 @@ class PluginBassPart(BaseModel):
     source: str = Field(description="clean or performance render")
     preview: str
     lock_to_groove: float | None
+    bass_expression: float
     bass_style: str
     bass_player: str | None
     notes: list[PluginNote]
@@ -93,6 +94,7 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
         source=source,
         preview=s.bass_preview or "",
         lock_to_groove=s.bass_lock_to_groove,
+        bass_expression=float(s.bass_expression),
         bass_style=s.bass_style,
         bass_player=s.bass_player,
         notes=notes,
@@ -113,15 +115,14 @@ class PluginRegenerateBody(BaseModel):
         description="Persistent session binding owned by this plugin instance.",
     )
     bass_style: str | None = Field(default=None)
-    bass_player: str | None = Field(
-        default=None,
-        description=(
-            "Player persona id (bootsy, marcus, pino, paul_chambers, "
-            "jaco_pastorius, james_jamerson) — the musical depth lives here. "
-            "Send 'none' to clear back to style-only generation."
-        ),
-    )
+    bass_player: str | None = Field(default=None, description="Legacy internal profile id.")
     lock_to_groove: float | None = Field(default=None, ge=0.0, le=1.0)
+    bass_expression: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="0 clean/restrained, 0.5 natural, 1 bold style-aware expression.",
+    )
 
 
 # Persona -> engine routing. The two bass engines deliberately stay separate
@@ -230,6 +231,8 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
         s.bass_player = None if body.bass_player.strip().lower() in ("", "none") else body.bass_player
     if body.lock_to_groove is not None:
         s.bass_lock_to_groove = float(body.lock_to_groove)
+    if body.bass_expression is not None:
+        s.bass_expression = float(body.bass_expression)
     s.bass_engine = _engine_for_player(s.bass_player)
     session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
     return _bass_part_for_session(s)

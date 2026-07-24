@@ -8,11 +8,6 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     styleAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor_.apvts, "style", styleBox_);
 
-    playerBox_.addItemList (SessionPlayerMidiFXProcessor::playerChoices, 1);
-    addAndMakeVisible (playerBox_);
-    playerAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
-        processor_.apvts, "player", playerBox_);
-
     lockSlider_.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     lockSlider_.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
     addAndMakeVisible (lockSlider_);
@@ -24,11 +19,25 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     lockLabel_.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
     addAndMakeVisible (lockLabel_);
 
+    expressionSlider_.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    expressionSlider_.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
+    addAndMakeVisible (expressionSlider_);
+    expressionAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor_.apvts, "expression", expressionSlider_);
+
+    expressionLabel_.setText ("RESTRAINED  ·  BOLD", juce::dontSendNotification);
+    expressionLabel_.setJustificationType (juce::Justification::centred);
+    expressionLabel_.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    addAndMakeVisible (expressionLabel_);
+
     regenerateButton_.onClick = [this] { processor_.requestRegenerate(); };
     addAndMakeVisible (regenerateButton_);
 
-    // v0.7 prompting layer: "busier" · "like jamerson" · "turnaround on bar 4"
-    commandBox_.setTextToShowWhenEmpty ("tell the bassist... (busier · like jamerson · redo bar 2)",
+    advancedButton_.setClickingTogglesState (true);
+    advancedButton_.onClick = [this] { setAdvancedVisible (advancedButton_.getToggleState()); };
+    addAndMakeVisible (advancedButton_);
+
+    commandBox_.setTextToShowWhenEmpty ("describe a change... (more space · redo bar 2)",
                                         juce::Colours::grey);
     commandBox_.setFont (juce::Font (juce::FontOptions (13.0f)));
     commandBox_.onReturnKey = [this]
@@ -49,8 +58,16 @@ SessionPlayerMidiFXEditor::SessionPlayerMidiFXEditor (SessionPlayerMidiFXProcess
     statusLabel_.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel_);
 
-    setSize (420, 240);
+    setAdvancedVisible (false);
     startTimerHz (4);
+}
+
+void SessionPlayerMidiFXEditor::setAdvancedVisible (bool shouldShow)
+{
+    commandBox_.setVisible (shouldShow);
+    sendButton_.setVisible (shouldShow);
+    setSize (460, shouldShow ? 270 : 228);
+    resized();
 }
 
 void SessionPlayerMidiFXEditor::timerCallback()
@@ -74,17 +91,23 @@ void SessionPlayerMidiFXEditor::resized()
     auto area = getLocalBounds().reduced (16);
     area.removeFromTop (32); // title zone
 
-    auto row = area.removeFromTop (96);
-    auto left = row.removeFromLeft (row.getWidth() / 2);
-    styleBox_.setBounds (left.removeFromTop (28).reduced (4, 0));
-    playerBox_.setBounds (left.removeFromTop (28).reduced (4, 1));
-    regenerateButton_.setBounds (left.removeFromTop (34).reduced (4, 3));
+    auto controlRow = area.removeFromTop (112);
+    auto left = controlRow.removeFromLeft (controlRow.getWidth() / 2);
+    styleBox_.setBounds (left.removeFromTop (30).reduced (4, 1));
+    regenerateButton_.setBounds (left.removeFromTop (36).reduced (4, 3));
+    advancedButton_.setBounds (left.removeFromTop (32).reduced (4, 3));
 
-    lockLabel_.setBounds (row.removeFromTop (16));
-    lockSlider_.setBounds (row.reduced (8, 0));
+    auto expressionArea = controlRow.removeFromLeft (controlRow.getWidth() / 2);
+    expressionLabel_.setBounds (expressionArea.removeFromTop (18));
+    expressionSlider_.setBounds (expressionArea.reduced (6, 0));
+    lockLabel_.setBounds (controlRow.removeFromTop (18));
+    lockSlider_.setBounds (controlRow.reduced (6, 0));
 
     statusLabel_.setBounds (area.removeFromBottom (22));
-    auto commandRow = area.removeFromBottom (30);
-    sendButton_.setBounds (commandRow.removeFromRight (64).reduced (2));
-    commandBox_.setBounds (commandRow.reduced (2));
+    if (advancedButton_.getToggleState())
+    {
+        auto commandRow = area.removeFromBottom (34);
+        sendButton_.setBounds (commandRow.removeFromRight (64).reduced (2));
+        commandBox_.setBounds (commandRow.reduced (2));
+    }
 }

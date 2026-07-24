@@ -28,6 +28,7 @@ struct BassPart
     int barCount = 0;
     int beatsPerBar = 4;
     juce::String preview;
+    float bassExpression = 0.5f;
     std::vector<BassPartNote> notes;
 
     double loopBeats() const { return juce::jmax(1, barCount) * (double) beatsPerBar; }
@@ -72,6 +73,7 @@ public:
 
     static const juce::StringArray styleChoices;
     static const juce::StringArray playerChoices;
+    static const juce::StringArray playerEngineIds;
 
 private:
     // polling thread

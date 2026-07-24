@@ -91,3 +91,88 @@ def test_all_output_articulations_are_locked_vocabulary() -> None:
     inferred = infer_bass_articulations(notes, tempo=100)
 
     assert {n.articulation for n in inferred}.issubset(_VALID_ARTICULATIONS)
+
+
+def test_midpoint_preserves_conservative_inference() -> None:
+    notes = (
+        _note(pitch=40, start=0.0, end=0.45, velocity=92, slot_index=0),
+        _note(pitch=43, start=0.5, end=0.95, velocity=88, slot_index=4),
+    )
+
+    inferred = infer_bass_articulations(
+        notes,
+        tempo=120,
+        style="fusion",
+        expression_amount=0.5,
+    )
+
+    assert [note.articulation for note in inferred] == ["normal", "normal"]
+
+
+def test_bold_melodic_expression_adds_connected_note_intent_deterministically() -> None:
+    notes = (
+        _note(pitch=40, start=0.0, end=0.48, velocity=92, bar_index=0, slot_index=0),
+        _note(pitch=42, start=0.5, end=0.98, velocity=84, bar_index=0, slot_index=2),
+        _note(pitch=45, start=1.0, end=1.48, velocity=86, bar_index=0, slot_index=4),
+    )
+
+    first = infer_bass_articulations(
+        notes,
+        tempo=120,
+        style="melodic",
+        expression_amount=1.0,
+    )
+    second = infer_bass_articulations(
+        notes,
+        tempo=120,
+        style="melodic",
+        expression_amount=1.0,
+    )
+
+    assert first == second
+    assert any(note.articulation in {"hammer", "slide_to"} for note in first)
+
+
+def test_supportive_expression_never_invents_dead_notes() -> None:
+    notes = tuple(
+        _note(
+            pitch=40 + (slot % 3),
+            start=slot * 0.125,
+            end=slot * 0.125 + 0.10,
+            velocity=80,
+            role="answer",
+            bar_index=0,
+            slot_index=slot,
+        )
+        for slot in (1, 3, 5, 7, 9, 11, 13, 15)
+    )
+
+    inferred = infer_bass_articulations(
+        notes,
+        tempo=120,
+        style="supportive",
+        expression_amount=1.0,
+    )
+
+    assert "dead" not in {note.articulation for note in inferred}
+
+
+def test_zero_expression_disables_inferred_articulations() -> None:
+    ghost_like = _note(
+        pitch=40,
+        start=0.25,
+        end=0.30,
+        velocity=36,
+        role="answer",
+        bar_index=0,
+        slot_index=2,
+    )
+
+    inferred = infer_bass_articulations(
+        (ghost_like,),
+        tempo=120,
+        style="rhythmic",
+        expression_amount=0.0,
+    )
+
+    assert inferred[0].articulation == "normal"

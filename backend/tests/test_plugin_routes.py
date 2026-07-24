@@ -82,16 +82,21 @@ def test_unknown_bound_session_does_not_fall_back_to_latest(client: TestClient) 
     assert res.status_code == 404
 
 
-def test_plugin_regenerate_applies_style_and_lock(client: TestClient) -> None:
+def test_plugin_regenerate_applies_style_lock_and_expression(client: TestClient) -> None:
     _create_session_with_bass(client)
     res = client.post(
         "/api/plugin/regenerate",
-        json={"bass_style": "melodic", "lock_to_groove": 0.9},
+        json={
+            "bass_style": "melodic",
+            "lock_to_groove": 0.9,
+            "bass_expression": 0.85,
+        },
     )
     assert res.status_code == 200, res.text
     part = res.json()
     assert part["bass_style"] == "melodic"
     assert part["lock_to_groove"] == pytest.approx(0.9)
+    assert part["bass_expression"] == pytest.approx(0.85)
     assert len(part["notes"]) > 0
 
 

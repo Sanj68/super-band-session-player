@@ -13,9 +13,14 @@ const juce::StringArray SessionPlayerMidiFXProcessor::styleChoices {
     "supportive", "melodic", "rhythmic", "slap", "fusion"
 };
 
-// The musical depth lives in the personas — expose them as first-class
-// (the v0.6 chassis shipped style-only and the result was "quite basic").
+// Public automation vocabulary stays neutral. The parallel internal id list
+// preserves the legacy engine routing until the trait-profile layer replaces it.
 const juce::StringArray SessionPlayerMidiFXProcessor::playerChoices {
+    "neutral", "deep_soul_anchor", "laid_back_sustain", "elastic_funk",
+    "percussive_funk", "melodic_fusion", "acoustic_walking"
+};
+
+const juce::StringArray SessionPlayerMidiFXProcessor::playerEngineIds {
     "none", "james_jamerson", "pino", "bootsy", "marcus", "jaco_pastorius", "paul_chambers"
 };
 
@@ -27,9 +32,12 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         SessionPlayerMidiFXProcessor::styleChoices, 0));
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "player", 1 }, "Player",
-        SessionPlayerMidiFXProcessor::playerChoices, 1)); // default: jamerson
+        SessionPlayerMidiFXProcessor::playerChoices, 0)); // legacy compatibility; hidden from public UI
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "lock", 1 }, "Lock to Groove",
+        juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "expression", 1 }, "Character",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
     return layout;
 }
@@ -67,13 +75,15 @@ void SessionPlayerMidiFXProcessor::run()
             auto* styleParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("style"));
             auto* playerParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("player"));
             auto lockValue = apvts.getRawParameterValue ("lock")->load();
+            auto expressionValue = apvts.getRawParameterValue ("expression")->load();
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
             const auto sessionId = boundSessionId();
             if (sessionId.isNotEmpty())
                 body->setProperty ("session_id", sessionId);
             body->setProperty ("bass_style", styleChoices[styleParam ? styleParam->getIndex() : 0]);
-            body->setProperty ("bass_player", playerChoices[playerParam ? playerParam->getIndex() : 0]);
+            body->setProperty ("bass_player", playerEngineIds[playerParam ? playerParam->getIndex() : 0]);
             body->setProperty ("lock_to_groove", (double) lockValue);
+            body->setProperty ("bass_expression", (double) expressionValue);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
 
             juce::URL url { kRegenerateUrl };
@@ -152,6 +162,7 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     fresh->barCount    = (int) parsed.getProperty ("bar_count", 0);
     fresh->beatsPerBar = (int) parsed.getProperty ("beats_per_bar", 4);
     fresh->preview     = parsed.getProperty ("preview", "").toString();
+    fresh->bassExpression = (float) parsed.getProperty ("bass_expression", 0.5);
     if (auto* arr = parsed.getProperty ("notes", juce::var()).getArray())
     {
         fresh->notes.reserve ((size_t) arr->size());

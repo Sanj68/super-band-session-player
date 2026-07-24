@@ -123,6 +123,7 @@ class StoredSession:
     bass_player: str | None = None
     bass_engine: str = "baseline"
     bass_lock_to_groove: float | None = None
+    bass_expression: float = 0.5
     bass_density_bias: float = 0.0
     bass_seed: int | None = None
     drum_player: str | None = None
@@ -275,6 +276,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
         bass_lock_to_groove=s.bass_lock_to_groove,
+        bass_expression=s.bass_expression,
         bass_seed=s.bass_seed,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
@@ -394,6 +396,7 @@ def _render_bass_performance_bytes(
     clean_bytes: bytes,
     perf_notes: tuple[BassPerformanceNote, ...],
     tempo: int,
+    expression_amount: float = 0.5,
     conditioning: UnifiedConditioning | None = None,
 ) -> bytes:
     program = _bass_program_from_clean_bytes(clean_bytes)
@@ -401,6 +404,7 @@ def _render_bass_performance_bytes(
         perf_notes,
         tempo=int(tempo),
         program=program,
+        expression_amount=expression_amount,
         source_kick_per_bar=conditioning.source_kick_weight if conditioning else None,
         source_snare_per_bar=conditioning.source_snare_weight if conditioning else None,
         source_pressure_per_bar=conditioning.source_slot_pressure if conditioning else None,
@@ -454,6 +458,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_player=src.bass_player,
         bass_engine=src.bass_engine,
         bass_lock_to_groove=src.bass_lock_to_groove,
+        bass_expression=src.bass_expression,
         bass_seed=src.bass_seed,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
@@ -568,6 +573,7 @@ def create_session(body: SessionCreate) -> SessionCreated:
         bass_player=bp_ins,
         bass_engine=be_ins,
         bass_lock_to_groove=body.bass_lock_to_groove,
+        bass_expression=body.bass_expression,
         drum_player=dp_ins,
         chord_instrument=ci_ins,
         chord_player=cp_ins,
@@ -851,6 +857,9 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if "bass_lock_to_groove" in body.model_dump(exclude_unset=True):
         s.bass_lock_to_groove = body.bass_lock_to_groove
         parts.append("Bass lock-to-groove updated")
+    if body.bass_expression is not None:
+        s.bass_expression = float(body.bass_expression)
+        parts.append("Bass expression updated")
     if "drum_player" in body.model_dump(exclude_unset=True):
         s.drum_player = body.drum_player.value if body.drum_player is not None else None
         parts.append("Drum player updated")
@@ -941,6 +950,7 @@ def _regenerate_lane_on_stored_session(
             bass_engine=s.bass_engine,
             lock_to_groove=s.bass_lock_to_groove,
             density_bias=s.bass_density_bias,
+            expression_amount=s.bass_expression,
             chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
@@ -956,6 +966,7 @@ def _regenerate_lane_on_stored_session(
             clean_bytes=b_bytes,
             perf_notes=perf_notes,
             tempo=s.tempo,
+            expression_amount=s.bass_expression,
             conditioning=cond,
         )
         s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
@@ -1196,8 +1207,9 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
-            lock_to_groove=s.bass_lock_to_groove,
-            density_bias=s.bass_density_bias,
+        lock_to_groove=s.bass_lock_to_groove,
+        density_bias=s.bass_density_bias,
+        expression_amount=s.bass_expression,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=ctx,
@@ -1266,6 +1278,7 @@ def _render_bass_take_with_seed(
         bass_engine=s.bass_engine,
         lock_to_groove=s.bass_lock_to_groove,
         density_bias=s.bass_density_bias,
+        expression_amount=s.bass_expression,
         candidate_role=candidate_role,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
@@ -2051,6 +2064,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 bass_engine=s.bass_engine,
                 lock_to_groove=s.bass_lock_to_groove,
                 density_bias=s.bass_density_bias,
+                expression_amount=s.bass_expression,
                 chord_progression=s.chord_progression,
                 session_preset=s.session_preset,
                 context=ctx,
@@ -2067,6 +2081,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
                 clean_bytes=s.bass_bytes,
                 perf_notes=perf_notes,
                 tempo=s.tempo,
+                expression_amount=s.bass_expression,
                 conditioning=cond,
             )
             s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
