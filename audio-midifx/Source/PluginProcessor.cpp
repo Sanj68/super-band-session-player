@@ -5,6 +5,21 @@ namespace
 {
 constexpr int  kPollMs = 2000;
 
+constexpr bool shouldPollEngine (bool refreshRequested,
+                                 bool handledAction,
+                                 bool transportRunning)
+{
+    return refreshRequested || handledAction || transportRunning;
+}
+
+// Keep the stopped-state contract compile-time checked: hydrate once and honour
+// direct UI actions, but never run the recurring poll merely because Logic has
+// instantiated the plug-in.
+static_assert (shouldPollEngine (true, false, false));
+static_assert (shouldPollEngine (false, true, false));
+static_assert (shouldPollEngine (false, false, true));
+static_assert (! shouldPollEngine (false, false, false));
+
 juce::String loadPluginApiBaseUrl()
 {
     auto baseUrl = juce::String();
@@ -99,8 +114,11 @@ void SessionPlayerMidiFXProcessor::run()
 {
     while (! threadShouldExit())
     {
+        bool handledAction = false;
+
         if (keepRequested_.exchange (false))
         {
+            handledAction = true;
             setStatus ("keeping idea...");
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
             const auto sessionId = boundSessionId();
@@ -124,6 +142,7 @@ void SessionPlayerMidiFXProcessor::run()
         const auto historyStep = historyStepRequested_.exchange (0);
         if (historyStep != 0)
         {
+            handledAction = true;
             const auto goingEarlier = historyStep < 0;
             setStatus (goingEarlier ? "recalling earlier idea..." : "recalling later idea...");
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
@@ -150,6 +169,7 @@ void SessionPlayerMidiFXProcessor::run()
 
         if (regenerateRequested_.exchange (false))
         {
+            handledAction = true;
             setStatus ("regenerating...");
             auto* styleParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("style"));
             auto* playerParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("player"));
@@ -185,6 +205,7 @@ void SessionPlayerMidiFXProcessor::run()
         }
         if (command.isNotEmpty())
         {
+            handledAction = true;
             setStatus ("\"" + command + "\" ...");
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
             const auto sessionId = boundSessionId();
@@ -210,11 +231,27 @@ void SessionPlayerMidiFXProcessor::run()
                 wait (100);     // let the reply read for ~3s
         }
 
-        fetchPart();
-        fetchAdvice();
-        fetchHistory();
+        const auto refreshRequested = refreshRequested_.exchange (false);
+        if (shouldPollEngine (refreshRequested, handledAction, transportRunning_.load()))
+        {
+            fetchPart();
+            // A stop can arrive while the part request is in flight. Avoid
+            // starting two more GETs unless this was an explicit refresh/action.
+            if (refreshRequested || handledAction || transportRunning_.load())
+            {
+                fetchAdvice();
+                fetchHistory();
+            }
+        }
 
-        for (int i = 0; i < kPollMs / 100 && ! threadShouldExit() && ! regenerateRequested_.load(); ++i)
+        // UI commands call notify(). Transport state is signalled lock-free
+        // from processBlock and checked here in short sleeps so the real-time
+        // audio thread never takes a condition-variable lock.
+        for (int i = 0;
+             i < kPollMs / 100
+                 && ! threadShouldExit()
+                 && ! refreshRequested_.load();
+             ++i)
             wait (100);
     }
 }
@@ -475,6 +512,12 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
     auto* playhead = getPlayHead();
     const auto pos = playhead != nullptr ? playhead->getPosition() : juce::nullopt;
     const bool playing = pos.hasValue() && pos->getIsPlaying();
+    const bool transportWasRunning = transportRunning_.exchange (playing);
+    if (playing != transportWasRunning)
+    {
+        if (playing)
+            refreshRequested_ = true;
+    }
 
     if (! playing || part == nullptr || part->notes.empty())
     {

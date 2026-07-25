@@ -107,6 +107,8 @@ private:
     std::atomic<bool> regenerateRequested_ { false };
     std::atomic<bool> keepRequested_ { false };
     std::atomic<int> historyStepRequested_ { 0 };
+    std::atomic<bool> transportRunning_ { false };
+    std::atomic<bool> refreshRequested_ { true };
     std::atomic<bool> canRecallEarlier_ { false };
     std::atomic<bool> canRecallLater_ { false };
     juce::String pendingCommand_;
