@@ -13,6 +13,9 @@ from app.main import app
 from app.models.session import SourceAnalysis
 from app.routes import midi_routes
 from app.routes import session_routes
+from app.services.audio_source_analysis import AudioAnalysisResult
+from app.services.session_context import build_session_context
+from app.services.source_analysis import build_source_analysis
 from app.services.midi_audition import FakeMidiBackend, MidiOutputInfo, RtMidiBackend
 from app.services import bass_candidate_store
 
@@ -95,6 +98,79 @@ def test_uploaded_audio_requires_confirmed_bar_level_harmony_map() -> None:
         json={"chord_progression": []},
     )
     assert cleared.json()["harmony_map_confirmation_required"] is True
+
+
+def test_reanalysis_preserves_user_confirmed_key_and_chord_map(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 88, "key": "C", "scale": "major", "bar_count": 16},
+    )
+    session_id = created.json()["session"]["id"]
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"test-audio-placeholder")
+    stored.reference_audio_path = str(audio_path)
+    stored.reference_audio_filename = "source.wav"
+    stored.harmony_confirmation_required = True
+    stored.harmony_map_confirmation_required = True
+
+    confirmed = client.patch(
+        f"/api/sessions/{session_id}",
+        json={
+            "key": "D",
+            "scale": "natural_minor",
+            "chord_progression": ["Bb", "C", "D", "Gm"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert stored.harmony_key_confirmed_by_user is True
+    # Simulate a persisted session created before this provenance flag existed.
+    # Its confirmed chord-map provenance still proves harmony was accepted.
+    stored.harmony_key_confirmed_by_user = False
+
+    low_confidence = build_source_analysis(
+        stored,
+        context=build_session_context(stored),
+    ).model_copy(
+        update={
+            "tonal_center_confidence": 0.1,
+            "scale_mode_confidence": 0.1,
+            "source_metadata": {
+                "filename_hints": {},
+                "harmony_suggestions": {
+                    "chords": ["A", "F", "C", "G"],
+                    "confidence": [0.2, 0.2, 0.2, 0.2],
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(
+        session_routes,
+        "analyze_reference_audio",
+        lambda **_kwargs: AudioAnalysisResult(
+            source_analysis=low_confidence,
+            duration_seconds=43.6,
+            head_trim_seconds=0.0,
+        ),
+    )
+
+    reanalyzed = client.post(f"/api/sessions/{session_id}/analyze-audio")
+
+    assert reanalyzed.status_code == 200, reanalyzed.text
+    state = reanalyzed.json()
+    assert state["key"] == "D"
+    assert state["scale"] == "natural_minor"
+    assert state["chord_progression"] == ["Bb", "C", "D", "Gm"]
+    assert state["harmony_confirmation_required"] is False
+    assert state["harmony_map_confirmation_required"] is False
+    assert state["harmony_map_source"] == "confirmed_user"
+    assert stored.harmony_key_confirmed_by_user is True
+    assert stored.suggested_chord_progression == ["A", "F", "C", "G"]
 
 
 def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> None:

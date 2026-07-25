@@ -158,6 +158,7 @@ class StoredSession:
     groove_reference_audio_head_trim_seconds: float = 0.0
     groove_reference_analysis_override: object | None = None
     harmony_confirmation_required: bool = False
+    harmony_key_confirmed_by_user: bool = False
     harmony_map_confirmation_required: bool = False
     suggested_chord_progression: list[str] | None = None
     suggested_chord_confidence: list[float] | None = None
@@ -496,6 +497,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         groove_reference_audio_head_trim_seconds=src.groove_reference_audio_head_trim_seconds,
         groove_reference_analysis_override=src.groove_reference_analysis_override,
         harmony_confirmation_required=src.harmony_confirmation_required,
+        harmony_key_confirmed_by_user=src.harmony_key_confirmed_by_user,
         harmony_map_confirmation_required=src.harmony_map_confirmation_required,
         suggested_chord_progression=(
             list(src.suggested_chord_progression)
@@ -626,6 +628,7 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
     s.reference_audio_head_trim_seconds = 0.0
     s.source_analysis_override = None
     s.harmony_confirmation_required = True
+    s.harmony_key_confirmed_by_user = False
     s.harmony_map_confirmation_required = True
     s.suggested_chord_progression = None
     s.suggested_chord_confidence = None
@@ -662,12 +665,31 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
             status_code=422,
             detail={"error": "audio_analysis_failed", "message": str(exc)},
         ) from exc
+    preserve_confirmed_key = bool(
+        s.harmony_key_confirmed_by_user
+        or (
+            s.chord_progression
+            and s.harmony_map_source == "confirmed_user"
+            and not s.harmony_confirmation_required
+        )
+    )
+    preserve_confirmed_map = bool(
+        s.chord_progression
+        and s.harmony_map_source == "confirmed_user"
+        and not s.harmony_map_confirmation_required
+    )
+
     s.source_analysis_override = result.source_analysis
     filename_key = result.source_analysis.source_metadata.get("filename_hints", {}).get("key")
-    s.harmony_confirmation_required = (
-        not bool(filename_key)
-        and float(result.source_analysis.tonal_center_confidence) < 0.5
-    )
+    if preserve_confirmed_key:
+        # Reanalysis refreshes evidence, not an explicit user decision.
+        s.harmony_confirmation_required = False
+        s.harmony_key_confirmed_by_user = True
+    else:
+        s.harmony_confirmation_required = (
+            not bool(filename_key)
+            and float(result.source_analysis.tonal_center_confidence) < 0.5
+        )
     suggestion = result.source_analysis.source_metadata.get("harmony_suggestions", {})
     suggested_chords = suggestion.get("chords", []) if isinstance(suggestion, dict) else []
     suggested_confidence = suggestion.get("confidence", []) if isinstance(suggestion, dict) else []
@@ -681,8 +703,12 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
         if isinstance(suggested_confidence, list)
         else None
     )
-    s.harmony_map_confirmation_required = True
-    s.harmony_map_source = "uploaded_audio_chroma_tentative"
+    if preserve_confirmed_map:
+        s.harmony_map_confirmation_required = False
+        s.harmony_map_source = "confirmed_user"
+    else:
+        s.harmony_map_confirmation_required = True
+        s.harmony_map_source = "uploaded_audio_chroma_tentative"
     s.reference_audio_duration_seconds = result.duration_seconds
     s.reference_audio_head_trim_seconds = result.head_trim_seconds
     return _to_state(s, message="Reference audio analyzed and source analysis updated.")
@@ -806,6 +832,7 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
         parts.append("Scale updated")
     if body.key is not None or body.scale is not None:
         s.harmony_confirmation_required = False
+        s.harmony_key_confirmed_by_user = True
     if body.bar_count is not None:
         s.bar_count = int(body.bar_count)
         parts.append("Bar count updated")
