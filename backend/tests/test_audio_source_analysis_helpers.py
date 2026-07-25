@@ -59,6 +59,41 @@ def test_infer_bar_count_from_beats_tolerates_missing_edge_beats(
     assert asa.infer_bar_count_from_beats(beat_count) == expected
 
 
+def test_grid_aligned_bounce_allows_two_beat_render_tail() -> None:
+    assert asa.should_anchor_bounce_to_session_grid(
+        duration_seconds=44.949,
+        session_tempo=88,
+        session_bar_count=16,
+        detected_tempo=89.838,
+        detected_bar_count=16,
+        head_trim_seconds=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"detected_tempo": 72.0},
+        {"detected_bar_count": 8},
+        {"head_trim_seconds": 1.0},
+        {"duration_seconds": 48.0},
+    ],
+)
+def test_grid_aligned_bounce_rejects_ambiguous_timeline(
+    overrides: dict[str, float | int | None],
+) -> None:
+    values: dict[str, float | int | None] = {
+        "duration_seconds": 44.949,
+        "session_tempo": 88,
+        "session_bar_count": 16,
+        "detected_tempo": 89.838,
+        "detected_bar_count": 16,
+        "head_trim_seconds": 0.0,
+    }
+    values.update(overrides)
+    assert not asa.should_anchor_bounce_to_session_grid(**values)  # type: ignore[arg-type]
+
+
 def test_tentative_chord_map_folds_repeating_four_bar_audio_profiles() -> None:
     def chord_profile(root: int, third: int, fifth: int) -> np.ndarray:
         row = np.zeros(12, dtype=float)

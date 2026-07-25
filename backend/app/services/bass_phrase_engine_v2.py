@@ -729,14 +729,29 @@ def generate_bass_phrase_v2(
                     if candidate_role is None or approach_pitch % 12 in confirmed_scale_pcs:
                         pitch = approach_pitch
             start = bar_t0 + slot * sixteenth
-            if context is not None and context.anchor_lane == "drums":
-                start += sixteenth * 0.05 * drum_kick_weight(context, bar, slot)
-            if live_kick > 0.0:
-                # timing glue scales with the lock (0.5 reproduces the
-                # previous fixed 0.035 nudge)
-                glue = (0.02 + (0.03 * lock)) if lock_state == "locked" else 0.035
-                start += sixteenth * glue * min(1.0, live_kick)
-            start += rng.uniform(0.0, 0.008) * spb
+            if lock_state == "locked":
+                # Full lock means sample-accurate sixteenth placement. The
+                # previous implementation added only-positive "glue" and
+                # humanisation here, so even lock=1 deliberately played late.
+                # As the knob approaches 1, collapse both nudges to zero.
+                timing_freedom = 1.0 - lock
+                if context is not None and context.anchor_lane == "drums":
+                    start += (
+                        sixteenth
+                        * 0.05
+                        * drum_kick_weight(context, bar, slot)
+                        * timing_freedom
+                    )
+                if live_kick > 0.0:
+                    glue = 0.02 + (0.03 * lock)
+                    start += sixteenth * glue * min(1.0, live_kick) * timing_freedom
+                start += rng.uniform(-0.004, 0.004) * spb * timing_freedom
+            else:
+                if context is not None and context.anchor_lane == "drums":
+                    start += sixteenth * 0.05 * drum_kick_weight(context, bar, slot)
+                if live_kick > 0.0:
+                    start += sixteenth * 0.035 * min(1.0, live_kick)
+                start += rng.uniform(0.0, 0.008) * spb
             dur = sixteenth * (1.2 if slot % 4 == 0 else 0.85)
             if role == "release":
                 dur *= 0.9

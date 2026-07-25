@@ -124,6 +124,7 @@ class StoredSession:
     bass_engine: str = "baseline"
     bass_lock_to_groove: float | None = None
     bass_expression: float = 0.5
+    bass_phase_offset_beats: float = 0.0
     bass_density_bias: float = 0.0
     bass_seed: int | None = None
     drum_player: str | None = None
@@ -277,6 +278,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_engine=s.bass_engine,
         bass_lock_to_groove=s.bass_lock_to_groove,
         bass_expression=s.bass_expression,
+        bass_phase_offset_beats=s.bass_phase_offset_beats,
         bass_seed=s.bass_seed,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
@@ -461,6 +463,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_engine=src.bass_engine,
         bass_lock_to_groove=src.bass_lock_to_groove,
         bass_expression=src.bass_expression,
+        bass_phase_offset_beats=src.bass_phase_offset_beats,
         bass_seed=src.bass_seed,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
@@ -576,6 +579,7 @@ def create_session(body: SessionCreate) -> SessionCreated:
         bass_engine=be_ins,
         bass_lock_to_groove=body.bass_lock_to_groove,
         bass_expression=body.bass_expression,
+        bass_phase_offset_beats=body.bass_phase_offset_beats,
         drum_player=dp_ins,
         chord_instrument=ci_ins,
         chord_player=cp_ins,
@@ -862,6 +866,9 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if body.bass_expression is not None:
         s.bass_expression = float(body.bass_expression)
         parts.append("Bass expression updated")
+    if body.bass_phase_offset_beats is not None:
+        s.bass_phase_offset_beats = float(body.bass_phase_offset_beats)
+        parts.append("Bass phase offset updated")
     if "drum_player" in body.model_dump(exclude_unset=True):
         s.drum_player = body.drum_player.value if body.drum_player is not None else None
         parts.append("Drum player updated")

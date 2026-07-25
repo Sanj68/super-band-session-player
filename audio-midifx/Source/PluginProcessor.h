@@ -34,6 +34,7 @@ struct BassPart
     juce::String bassInstrument { "finger_bass" };
     float lockToGroove = 0.5f;
     float bassExpression = 0.5f;
+    double phaseOffsetBeats = 0.0;
     std::vector<BassPartNote> notes;
 
     double loopBeats() const { return juce::jmax(1, barCount) * (double) beatsPerBar; }

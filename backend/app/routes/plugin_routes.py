@@ -72,6 +72,7 @@ class PluginBassPart(BaseModel):
     bass_style: str
     bass_instrument: str
     bass_player: str | None
+    phase_offset_beats: float = 0.0
     notes: list[PluginNote]
 
 
@@ -108,6 +109,7 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
         bass_style=s.bass_style,
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
+        phase_offset_beats=float(s.bass_phase_offset_beats),
         notes=notes,
     )
 

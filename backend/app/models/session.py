@@ -281,6 +281,12 @@ class SessionPatch(BaseModel):
             "default, 1 = bold style-aware expression."
         ),
     )
+    bass_phase_offset_beats: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=4.0,
+        description="Whole-part playback phase delay in quarter-note beats.",
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="When set, updates stored drum player profile (regenerate drums to apply). Send null to clear.",
@@ -390,6 +396,12 @@ class SessionCreate(BaseModel):
             "Performance character: 0 = clean and restrained, 0.5 = natural "
             "default, 1 = bold style-aware expression."
         ),
+    )
+    bass_phase_offset_beats: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=4.0,
+        description="Whole-part playback phase delay in quarter-note beats.",
     )
     drum_player: DrumPlayer | None = Field(
         default=None,
@@ -656,6 +668,12 @@ class SessionState(BaseModel):
             "Performance character: 0 = clean and restrained, 0.5 = natural "
             "default, 1 = bold style-aware expression."
         ),
+    )
+    bass_phase_offset_beats: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=4.0,
+        description="Whole-part playback phase delay in quarter-note beats.",
     )
     bass_seed: int | None = Field(
         default=None,

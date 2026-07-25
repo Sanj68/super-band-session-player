@@ -128,6 +128,20 @@ def test_lock_gates_snare_slots_and_changes_output() -> None:
     assert any(slot == 0 for _bar, slot in glued_slots)
 
 
+def test_full_lock_places_clean_notes_exactly_on_the_source_grid() -> None:
+    midi_bytes, _preview = _generate(1.0, _conditioning(), seed=42)
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    sixteenth = (60.0 / 100.0) / 4.0
+
+    phases = [
+        abs((float(note.start) / sixteenth) - round(float(note.start) / sixteenth))
+        for note in pm.instruments[0].notes
+    ]
+
+    assert phases
+    assert max(phases) < 1.0e-6
+
+
 def test_thin_evidence_falls_back_honestly() -> None:
     thin = dataclasses.replace(
         _conditioning(tempo_conf=0.1, phase_conf=0.1), source_groove_confidence=()

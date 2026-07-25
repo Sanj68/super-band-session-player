@@ -55,6 +55,7 @@ def test_bass_part_returns_latest_session_notes(client: TestClient) -> None:
     assert part["scale"] == "major"
     assert part["bar_count"] == 2
     assert part["beats_per_bar"] == 4
+    assert part["phase_offset_beats"] == pytest.approx(0.0)
     assert len(part["notes"]) > 0
     for n in part["notes"]:
         assert 0 <= n["start_beats"] < part["bar_count"] * 4 + 1
@@ -63,6 +64,23 @@ def test_bass_part_returns_latest_session_notes(client: TestClient) -> None:
     # sorted by start
     starts = [n["start_beats"] for n in part["notes"]]
     assert starts == sorted(starts)
+
+
+def test_bass_part_exposes_patchable_playback_phase(client: TestClient) -> None:
+    sid = _create_session_with_bass(client)
+    patched = client.patch(
+        f"/api/sessions/{sid}",
+        json={"bass_phase_offset_beats": 1.0},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["bass_phase_offset_beats"] == pytest.approx(1.0)
+
+    part = client.get(
+        "/api/plugin/bass-part",
+        params={"session_id": sid},
+    )
+    assert part.status_code == 200, part.text
+    assert part.json()["phase_offset_beats"] == pytest.approx(1.0)
 
 
 def test_bass_part_honours_explicit_session_binding(client: TestClient) -> None:

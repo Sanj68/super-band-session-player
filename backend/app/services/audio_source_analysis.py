@@ -238,6 +238,33 @@ def infer_bar_count_from_beats(beat_count: int) -> int | None:
     return nearest
 
 
+def should_anchor_bounce_to_session_grid(
+    *,
+    duration_seconds: float,
+    session_tempo: int,
+    session_bar_count: int,
+    detected_tempo: float,
+    detected_bar_count: int | None,
+    head_trim_seconds: float,
+) -> bool:
+    """Recognise a grid-aligned session bounce whose tracker missed beat zero."""
+    tempo = float(session_tempo)
+    bars = int(session_bar_count)
+    if tempo <= 0.0 or bars <= 0 or detected_bar_count != bars:
+        return False
+    if abs(float(detected_tempo) - tempo) / tempo > 0.04:
+        return False
+
+    seconds_per_beat = 60.0 / tempo
+    if float(head_trim_seconds) > seconds_per_beat * 0.25:
+        return False
+    expected_duration = bars * 4.0 * seconds_per_beat
+    musical_duration = float(duration_seconds) - float(head_trim_seconds)
+    early_tolerance = seconds_per_beat * 0.25
+    tail_tolerance = seconds_per_beat * 2.25
+    return expected_duration - early_tolerance <= musical_duration <= expected_duration + tail_tolerance
+
+
 def _moving_average(values: list[float], radius: int = 1) -> list[float]:
     out: list[float] = []
     n = len(values)
@@ -887,6 +914,8 @@ def analyze_reference_audio(
     source_filename: str | None = None,
     trust_session_bar_count: bool = True,
 ) -> AudioAnalysisResult:
+    requested_tempo = int(session_tempo)
+    requested_bar_count = int(bar_count)
     y, sr = librosa.load(str(audio_path), sr=_TARGET_SR, mono=True)
     if y.size == 0:
         raise ValueError("Reference audio is empty.")
@@ -951,6 +980,21 @@ def analyze_reference_audio(
         if auto_bar_count is not None:
             bar_count = auto_bar_count
 
+    session_grid_anchor = should_anchor_bounce_to_session_grid(
+        duration_seconds=duration_sec,
+        session_tempo=requested_tempo,
+        session_bar_count=requested_bar_count,
+        detected_tempo=float(tempo_est),
+        detected_bar_count=auto_bar_count,
+        head_trim_seconds=head_trim,
+    )
+    if session_grid_anchor:
+        # A beat tracker often omits the transient at file time zero. When the
+        # confirmed Logic tempo and whole-bar duration fit, keep zero as the
+        # timeline anchor so every extracted groove slot stays in phase.
+        tempo_est = float(requested_tempo)
+        bar_count = requested_bar_count
+
     if len(beat_times) < 4:
         beat_len = 60.0 / max(40.0, min(240.0, tempo_est))
         beat_times = [round(head_trim + (i * beat_len), 6) for i in range(max(4, bar_count * 4))]
@@ -975,7 +1019,18 @@ def analyze_reference_audio(
         sep = max(0.0, sorted_phase[0] - (sorted_phase[1] if len(sorted_phase) > 1 else 0.0)) / total_phase
         phase_conf = min(1.0, 0.25 + (1.8 * sep))
 
-    selected_downbeat = beat_times[phase_offset] if phase_offset < len(beat_times) else beat_times[0]
+    if session_grid_anchor:
+        phase_offset = 0
+        phase_scores = [1.0, 0.0, 0.0, 0.0]
+        phase_conf = max(0.8, float(phase_conf))
+        beat_len = 60.0 / float(requested_tempo)
+        selected_downbeat = float(head_trim)
+        beat_times = [
+            round(float(head_trim) + (i * beat_len), 6)
+            for i in range(max(4, requested_bar_count * 4))
+        ]
+    else:
+        selected_downbeat = beat_times[phase_offset] if phase_offset < len(beat_times) else beat_times[0]
     bar_starts = [round(beat_times[i], 6) for i in range(phase_offset, len(beat_times), 4)]
     if not bar_starts:
         bar_starts = [round(selected_downbeat, 6)]
@@ -1024,6 +1079,7 @@ def analyze_reference_audio(
             "bar_count": bar_count if filename_hints.tempo_bpm is not None else None,
         },
         "auto_bar_count": auto_bar_count,
+        "timeline_alignment": "session_grid_zero" if session_grid_anchor else "detected_downbeat",
     }
 
     chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=_HOP_LENGTH)
@@ -1099,7 +1155,7 @@ def analyze_reference_audio(
         beat_phase_confidence=round(float(phase_conf), 4),
         phase_offset_used_for_generation_beats=int(phase_offset),
         bar_start_anchor_used_seconds=round(float(selected_downbeat), 6),
-        generation_aligned_to_anchor=False,
+        generation_aligned_to_anchor=session_grid_anchor,
         downbeat_guess_bar_index=0,
         downbeat_confidence=round(float(phase_conf), 4),
         # Bar starts are only as reliable as the weaker of tempo and phase.

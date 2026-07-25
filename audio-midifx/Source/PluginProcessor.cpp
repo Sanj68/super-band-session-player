@@ -254,6 +254,9 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     const auto lockValue = parsed.getProperty ("lock_to_groove", 0.5);
     fresh->lockToGroove = lockValue.isVoid() ? 0.5f : (float) lockValue;
     fresh->bassExpression = (float) parsed.getProperty ("bass_expression", 0.5);
+    fresh->phaseOffsetBeats = juce::jlimit (
+        0.0, 4.0, (double) parsed.getProperty ("phase_offset_beats", 0.0)
+    );
     if (auto* arr = parsed.getProperty ("notes", juce::var()).getArray())
     {
         fresh->notes.reserve ((size_t) arr->size());
@@ -482,6 +485,7 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
         lastBlockBeats_ = 0.0;
         return;
     }
+    const bool startingPlayback = ! wasPlaying_;
     wasPlaying_ = true;
 
     const double bpm = pos->getBpm().orFallback (120.0);
@@ -492,12 +496,32 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
 
     // A seek, cycle jump, or host discontinuity invalidates every outstanding
     // note-off from the previous transport position.
+    const bool crossedTimelineZero = (
+        ! startingPlayback && lastPpq_ < 0.0 && ppq >= 0.0
+    );
+    bool transportDiscontinuity = startingPlayback || crossedTimelineZero;
     if (lastPpq_ >= 0.0)
     {
         const double expectedPpq = lastPpq_ + lastBlockBeats_;
         const double tolerance = juce::jmax (1.0e-4, blockBeats * 0.25);
         if (std::abs (ppq - expectedPpq) > tolerance)
+        {
             allNotesOff (midi, 0);
+            transportDiscontinuity = true;
+        }
+    }
+
+    // Logic primes MIDI FX with a negative-PPQ block before bar 1. Clamping
+    // that position to zero made the downbeat note sound during the preceding
+    // beat. Stay silent through pre-roll; the zero-crossing above lets the
+    // next block catch the bar-one note even if it begins a few samples late.
+    if (ppq < 0.0)
+    {
+        if (! active_.empty())
+            allNotesOff (midi, 0);
+        lastPpq_ = ppq;
+        lastBlockBeats_ = blockBeats;
+        return;
     }
 
     // note-offs scheduled in samples
@@ -520,9 +544,22 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const double loopPos = std::fmod (juce::jmax (0.0, ppq), loopLen);
     for (const auto& n : part->notes)
     {
-        double offsetBeats = n.startBeats - loopPos;
+        const double shiftedStartBeats = n.startBeats + part->phaseOffsetBeats;
+        if (shiftedStartBeats >= loopLen)
+            continue;
+        double offsetBeats = shiftedStartBeats - loopPos;
         if (offsetBeats < 0.0)
-            offsetBeats += loopLen; // wraps into this block only if close enough
+        {
+            // Logic can present the first render block a few samples after
+            // the requested locator. Without this catch-up, a note exactly
+            // on bar 1 is treated as belonging to the next 16-bar loop and
+            // the first audible bass note lands well after the kick.
+            const double catchUpWindow = juce::jmax (1.0e-4, blockBeats * 2.0);
+            if (transportDiscontinuity && -offsetBeats <= catchUpWindow)
+                offsetBeats = 0.0;
+            else
+                offsetBeats += loopLen; // wrap only when genuinely ahead
+        }
         if (offsetBeats < blockBeats)
         {
             const int samplePos = juce::jlimit (0, numSamples - 1,
