@@ -3,14 +3,28 @@
 
 namespace
 {
-constexpr auto kBassPartUrl   = "http://127.0.0.1:8000/api/plugin/bass-part";
-constexpr auto kRegenerateUrl = "http://127.0.0.1:8000/api/plugin/regenerate";
-constexpr auto kCommandUrl    = "http://127.0.0.1:8000/api/plugin/command";
-constexpr auto kAdviceUrl     = "http://127.0.0.1:8000/api/plugin/advice";
-constexpr auto kKeepUrl       = "http://127.0.0.1:8000/api/plugin/keep";
-constexpr auto kHistoryUrl    = "http://127.0.0.1:8000/api/plugin/history";
-constexpr auto kNavigateUrl   = "http://127.0.0.1:8000/api/plugin/history/navigate";
 constexpr int  kPollMs = 2000;
+
+juce::String loadPluginApiBaseUrl()
+{
+    auto baseUrl = juce::String();
+    const auto configFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                                .getChildFile ("Application Support")
+                                .getChildFile ("Session Player Bridge")
+                                .getChildFile ("config.json");
+    if (configFile.existsAsFile())
+    {
+        if (const auto parsed = juce::JSON::parse (configFile); parsed.isObject())
+            baseUrl = parsed.getProperty ("plugin_api_base_url", "").toString().trim();
+    }
+
+    if (const auto envUrl = juce::SystemStats::getEnvironmentVariable (
+            "SESSION_PLAYER_PLUGIN_URL", {}); envUrl.isNotEmpty())
+        baseUrl = envUrl;
+    if (baseUrl.isEmpty())
+        baseUrl = "http://127.0.0.1:8000/api/plugin";
+    return baseUrl.trim().trimCharactersAtEnd ("/");
+}
 }
 
 const juce::StringArray SessionPlayerMidiFXProcessor::styleChoices {
@@ -60,7 +74,8 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 SessionPlayerMidiFXProcessor::SessionPlayerMidiFXProcessor()
     : juce::AudioProcessor (BusesProperties()), // MIDI effect: no audio buses
       juce::Thread ("sp-midifx-poll"),
-      apvts (*this, nullptr, "PARAMS", makeLayout())
+      apvts (*this, nullptr, "PARAMS", makeLayout()),
+      apiBaseUrl_ (loadPluginApiBaseUrl())
 {
     startThread();
 }
@@ -92,7 +107,7 @@ void SessionPlayerMidiFXProcessor::run()
             if (sessionId.isNotEmpty())
                 body->setProperty ("session_id", sessionId);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
-            juce::URL url { kKeepUrl };
+            juce::URL url { apiBaseUrl_ + "/keep" };
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
                                .withConnectionTimeoutMs (4000);
@@ -117,7 +132,7 @@ void SessionPlayerMidiFXProcessor::run()
                 body->setProperty ("session_id", sessionId);
             body->setProperty ("direction", goingEarlier ? "previous" : "next");
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
-            juce::URL url { kNavigateUrl };
+            juce::URL url { apiBaseUrl_ + "/history/navigate" };
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
                                .withConnectionTimeoutMs (4000);
@@ -153,7 +168,7 @@ void SessionPlayerMidiFXProcessor::run()
             body->setProperty ("bass_expression", (double) expressionValue);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
 
-            juce::URL url { kRegenerateUrl };
+            juce::URL url { apiBaseUrl_ + "/regenerate" };
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
                                .withConnectionTimeoutMs (4000);
@@ -177,7 +192,7 @@ void SessionPlayerMidiFXProcessor::run()
                 body->setProperty ("session_id", sessionId);
             body->setProperty ("text", command);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
-            juce::URL url { kCommandUrl };
+            juce::URL url { apiBaseUrl_ + "/command" };
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
                                .withConnectionTimeoutMs (6000);
@@ -206,7 +221,7 @@ void SessionPlayerMidiFXProcessor::run()
 
 void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
 {
-    juce::URL url { kBassPartUrl };
+    juce::URL url { apiBaseUrl_ + "/bass-part" };
     const auto sessionId = boundSessionId();
     if (sessionId.isNotEmpty())
         url = url.withParameter ("session_id", sessionId);
@@ -299,7 +314,7 @@ void SessionPlayerMidiFXProcessor::fetchAdvice()
         return;
     auto* instrumentParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("instrument"));
     const auto instrumentIndex = instrumentParam ? instrumentParam->getIndex() : 0;
-    juce::URL url { kAdviceUrl };
+    juce::URL url { apiBaseUrl_ + "/advice" };
     url = url.withParameter ("session_id", sessionId)
              .withParameter ("bass_instrument", instrumentEngineIds[instrumentIndex]);
     auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
@@ -327,7 +342,7 @@ void SessionPlayerMidiFXProcessor::fetchHistory()
     const auto sessionId = boundSessionId();
     if (sessionId.isEmpty())
         return;
-    juce::URL url { kHistoryUrl };
+    juce::URL url { apiBaseUrl_ + "/history" };
     url = url.withParameter ("session_id", sessionId);
     auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
                        .withConnectionTimeoutMs (3000);

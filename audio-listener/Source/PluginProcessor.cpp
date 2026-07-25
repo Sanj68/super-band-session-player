@@ -10,8 +10,6 @@ namespace session_player
 {
 namespace
 {
-constexpr auto bridgeBaseUrl = "http://127.0.0.1:8000/api/bridge";
-constexpr auto harmonicEndpoint = "http://127.0.0.1:8000/api/bridge/harmonic";
 constexpr auto listenerVersion = "0.1.0";
 constexpr double defaultTempo = 120.0;
 constexpr double beatsPerBar = 4.0;
@@ -78,7 +76,8 @@ int strongestPitchClass(const std::array<float, 12>& chroma)
 
 HarmonicBridgeClient::HarmonicBridgeClient()
     : Thread("Session Player Harmonic Client"),
-      pluginInstanceId("logic-harmonic-au-" + juce::Uuid().toString())
+      pluginInstanceId("logic-harmonic-au-" + juce::Uuid().toString()),
+      apiBaseUrl(getApiBaseUrl())
 {
 }
 
@@ -158,7 +157,7 @@ void HarmonicBridgeClient::run()
             }
             body += "]";
 
-            connected.store(readyCount > 0 && postJson(harmonicEndpoint, body));
+            connected.store(readyCount > 0 && postJson(apiBaseUrl + "/harmonic", body));
         }
 
         wait(50);
@@ -179,6 +178,7 @@ juce::String HarmonicBridgeClient::getSessionId()
         return envSession;
 
     const auto configFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Application Support")
         .getChildFile("Session Player Bridge")
         .getChildFile("config.json");
 
@@ -189,13 +189,32 @@ juce::String HarmonicBridgeClient::getSessionId()
     return {};
 }
 
-juce::String HarmonicBridgeClient::resolveLatestSessionId(const juce::String& pluginId)
+juce::String HarmonicBridgeClient::getApiBaseUrl()
+{
+    auto baseUrl = juce::String();
+    const auto configFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Application Support")
+        .getChildFile("Session Player Bridge")
+        .getChildFile("config.json");
+
+    if (configFile.existsAsFile())
+        if (const auto parsed = juce::JSON::parse(configFile); parsed.isObject())
+            baseUrl = parsed.getDynamicObject()->getProperty("api_base_url").toString().trim();
+
+    if (const auto envUrl = getEnvironment("SESSION_PLAYER_BRIDGE_URL"); envUrl.isNotEmpty())
+        baseUrl = envUrl;
+    if (baseUrl.isEmpty())
+        baseUrl = "http://127.0.0.1:8000/api/bridge";
+    return baseUrl.trim().trimCharactersAtEnd("/");
+}
+
+juce::String HarmonicBridgeClient::resolveLatestSessionId(const juce::String& pluginId) const
 {
     const auto body = juce::String("{\"plugin_instance_id\":\"") + jsonEscape(pluginId)
         + "\",\"plugin_version\":\"" + listenerVersion
         + "\",\"source_id\":\"session-player-listener\"}";
     juce::String responseBody;
-    if (! postJson(juce::String(bridgeBaseUrl) + "/heartbeat", body, &responseBody))
+    if (! postJson(apiBaseUrl + "/heartbeat", body, &responseBody))
         return {};
 
     const auto response = juce::JSON::parse(responseBody);

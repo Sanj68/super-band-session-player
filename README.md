@@ -113,6 +113,18 @@ An explicit `SESSION_PLAYER_SESSION_ID` or
 `~/Library/Application Support/Session Player Bridge/config.json` binding still
 overrides automatic newest-session selection.
 
+When another local service owns port 8000, the Bass MIDI FX API can be moved
+without rebuilding by adding `plugin_api_base_url` to that config file:
+
+```json
+{
+  "api_base_url": "http://127.0.0.1:8001/api/bridge",
+  "plugin_api_base_url": "http://127.0.0.1:8001/api/plugin"
+}
+```
+
+`SESSION_PLAYER_PLUGIN_URL` overrides the file value for the Bass MIDI FX.
+
 ## Desktop app (Tauri)
 
 A native macOS/Windows wrapper lives in `desktop/`. It embeds the built frontend and talks to the backend over `http://127.0.0.1:8000`.

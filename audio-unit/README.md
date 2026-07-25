@@ -64,4 +64,6 @@ SESSION_PLAYER_SESSION_ID
 SESSION_PLAYER_SOURCE_ID
 ```
 
-The Session Player Listener AU uses the same optional `session_id` override.
+The Session Player Listener AU uses the same `api_base_url`, optional
+`session_id`, `SESSION_PLAYER_BRIDGE_URL`, and `SESSION_PLAYER_SESSION_ID`
+overrides.

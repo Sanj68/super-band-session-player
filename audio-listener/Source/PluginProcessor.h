@@ -47,7 +47,8 @@ private:
 
     static juce::String getEnvironment(const char* name);
     static juce::String getSessionId();
-    static juce::String resolveLatestSessionId(const juce::String& pluginInstanceId);
+    static juce::String getApiBaseUrl();
+    juce::String resolveLatestSessionId(const juce::String& pluginInstanceId) const;
     static juce::String jsonEscape(const juce::String& text);
     static juce::String frameToJson(
         const HarmonicFrame& frame,
@@ -60,6 +61,7 @@ private:
     juce::AbstractFifo fifo { 64 };
     std::array<HarmonicFrame, 64> frames {};
     juce::String pluginInstanceId;
+    juce::String apiBaseUrl;
     juce::String boundSessionId;
     std::atomic<bool> running { false };
     std::atomic<bool> connected { false };

@@ -122,6 +122,7 @@ BridgeConfig BridgeClient::loadConfig() const
     BridgeConfig config;
 
     const auto configFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Application Support")
         .getChildFile("Session Player Bridge")
         .getChildFile("config.json");
 

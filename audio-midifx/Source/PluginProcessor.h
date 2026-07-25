@@ -118,6 +118,7 @@ private:
     juce::String advice_ { "Listening to the current source..." };
     juce::String history_ { "No saved ideas yet" };
     juce::String boundSessionId_;
+    juce::String apiBaseUrl_;
 
     // playback state
     double sampleRate_ = 44100.0;
