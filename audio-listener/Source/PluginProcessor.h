@@ -39,6 +39,7 @@ public:
 
     void start();
     void stop();
+    void setTransportRunning(bool isRunning);
     bool pushFrame(const HarmonicFrame& frame);
     bool isConnected() const;
 
@@ -64,6 +65,7 @@ private:
     juce::String apiBaseUrl;
     juce::String boundSessionId;
     std::atomic<bool> running { false };
+    std::atomic<bool> transportRunning { false };
     std::atomic<bool> connected { false };
 };
 
@@ -105,6 +107,7 @@ private:
     static constexpr int fftSize = 1 << fftOrder;
 
     void resetAnalysisState(double sampleRate);
+    void resetCaptureWindow();
     void pushAnalysisSample(float sample);
     void maybeEmitBarFrame(const juce::AudioPlayHead::PositionInfo& position);
     HarmonicFrame analyseCurrentWindow(double tempo, int barIndex);
@@ -126,6 +129,7 @@ private:
     int validSamples = 0;
     int lastEmittedBar = -1;
     int fallbackBarIndex = 0;
+    bool wasTransportRunning = false;
 
     mutable juce::CriticalSection keyLock;
     juce::String currentKeyText = "No estimate yet";

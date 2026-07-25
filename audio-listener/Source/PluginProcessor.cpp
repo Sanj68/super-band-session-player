@@ -95,12 +95,21 @@ void HarmonicBridgeClient::start()
 void HarmonicBridgeClient::stop()
 {
     running.store(false);
+    transportRunning.store(false);
     signalThreadShouldExit();
     stopThread(2000);
 }
 
+void HarmonicBridgeClient::setTransportRunning(bool isRunning)
+{
+    transportRunning.store(isRunning);
+}
+
 bool HarmonicBridgeClient::pushFrame(const HarmonicFrame& frame)
 {
+    if (! transportRunning.load())
+        return false;
+
     const auto scope = fifo.write(1);
     if (scope.blockSize1 <= 0)
         return false;
@@ -132,7 +141,14 @@ void HarmonicBridgeClient::run()
 
         fifo.finishedRead(static_cast<int>(batch.size()));
 
-        if (! batch.empty())
+        // Stopping transport invalidates every queued analysis frame. The
+        // bridge thread remains the FIFO's sole consumer and drains them here,
+        // so a large Logic project cannot keep POSTing stale bars after stop.
+        if (! transportRunning.load())
+        {
+            connected.store(false);
+        }
+        else if (! batch.empty())
         {
             const auto configuredSessionId = getSessionId();
             if (configuredSessionId.isNotEmpty())
@@ -157,7 +173,10 @@ void HarmonicBridgeClient::run()
             }
             body += "]";
 
-            connected.store(readyCount > 0 && postJson(apiBaseUrl + "/harmonic", body));
+            connected.store(
+                transportRunning.load()
+                && readyCount > 0
+                && postJson(apiBaseUrl + "/harmonic", body));
         }
 
         wait(50);
@@ -343,6 +362,22 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
         if (auto pos = playHead->getPosition())
             position = *pos;
 
+    const auto transportRunning = position.getIsPlaying() || position.getIsRecording();
+    if (! transportRunning)
+    {
+        bridgeClient.setTransportRunning(false);
+        if (wasTransportRunning)
+            resetCaptureWindow();
+
+        wasTransportRunning = false;
+        return;
+    }
+
+    if (! wasTransportRunning)
+        resetCaptureWindow();
+    wasTransportRunning = true;
+    bridgeClient.setTransportRunning(true);
+
     for (int sample = 0; sample < numSamples; ++sample)
     {
         float mono = 0.0f;
@@ -442,6 +477,18 @@ float SessionPlayerListenerAudioProcessor::getCurrentKeyConfidence() const
 void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
 {
     currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    wasTransportRunning = false;
+    resetCaptureWindow();
+
+    juce::dsp::WindowingFunction<float>::fillWindowingTables(
+        fftWindow.data(),
+        static_cast<size_t>(fftSize),
+        juce::dsp::WindowingFunction<float>::hann,
+        false);
+}
+
+void SessionPlayerListenerAudioProcessor::resetCaptureWindow()
+{
     processedSamples = 0.0;
     samplesSinceLastFallbackBar = 0.0;
     writeIndex = 0;
@@ -449,12 +496,6 @@ void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
     lastEmittedBar = -1;
     fallbackBarIndex = 0;
     window.fill(0.0f);
-
-    juce::dsp::WindowingFunction<float>::fillWindowingTables(
-        fftWindow.data(),
-        static_cast<size_t>(fftSize),
-        juce::dsp::WindowingFunction<float>::hann,
-        false);
 }
 
 void SessionPlayerListenerAudioProcessor::pushAnalysisSample(float sample)

@@ -346,6 +346,52 @@ def test_listener_au_batch_contract_reaches_harmonic_conditioning(
     )
 
 
+def test_stopped_listener_frames_are_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopped transport must not grow the harmonic store or alter the session."""
+
+    _enable(monkeypatch)
+    client = TestClient(app)
+    sid = _create_phrase_session(client)
+    stored = session_routes._SESSIONS[sid]  # type: ignore[attr-defined]
+    original_key = stored.key
+    original_scale = stored.scale
+    stopped_frame = {
+        "plugin_instance_id": "listener-stopped",
+        "session_id": sid,
+        "source_id": "session-player-listener",
+        "sample_rate": 48000.0,
+        "host_tempo": 120.0,
+        "tempo_bpm": 120.0,
+        "tempo_confidence": 1.0,
+        "playing": False,
+        "ppq_position": 0.0,
+        "bar_index": 0,
+        "frame_start_seconds": 0.0,
+        "duration_seconds": 0.170667,
+        "chroma": [1.0] + [0.0] * 11,
+        "key_pc": 9,
+        "key": "A",
+        "scale": "minor",
+        "key_confidence": 0.95,
+        "scale_confidence": 0.95,
+        "cadence": "tonic",
+        "cadence_confidence": 0.8,
+    }
+
+    bridge_res = client.post("/api/bridge/harmonic", json=[stopped_frame])
+
+    assert bridge_res.status_code == 200, bridge_res.text
+    assert bridge_res.json()["accepted"] == 0
+    assert bridge_res.json()["ignored_stopped"] == 1
+    assert bridge_res.json()["harmonic_frame_count"] == 0
+    assert bridge_res.json()["live_harmonic_bar_count"] == 0
+    assert stored.key == original_key
+    assert stored.scale == original_scale
+    assert stored.source_analysis_override is None
+
+
 def test_listener_estimate_does_not_replace_confirmed_uploaded_harmony(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

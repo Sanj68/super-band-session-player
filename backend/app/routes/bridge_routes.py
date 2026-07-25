@@ -180,13 +180,18 @@ def post_session_harmonic_frames(session_id: str, frames: list[BridgeHarmonicFra
     _require_enabled()
     s = _require_session(session_id)
     accepted = 0
+    ignored_stopped = 0
     for f in frames:
         if f.session_id != session_id:
             raise HTTPException(status_code=400, detail={"error": "session_id_mismatch"})
+        if not f.playing:
+            ignored_stopped += 1
+            continue
         bridge_store.record_harmonic_frame(f)
         accepted += 1
     state = bridge_store.get_bridge_state(session_id)
     state["accepted"] = accepted
+    state["ignored_stopped"] = ignored_stopped
     state.update(_apply_live_harmonic_context(s) if accepted else {"live_harmonic_bar_count": 0})
     return state
 
