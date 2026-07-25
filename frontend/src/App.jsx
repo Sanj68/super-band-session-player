@@ -140,6 +140,7 @@ export default function App() {
   const [activeBassDraft, setActiveBassDraft] = useState("supportive");
   const [activeBassEngineDraft, setActiveBassEngineDraft] = useState("baseline");
   const [activeBassLockDraft, setActiveBassLockDraft] = useState(null);
+  const [activeBassPhaseDraft, setActiveBassPhaseDraft] = useState(0);
   const [activeChordDraft, setActiveChordDraft] = useState("simple");
   const [activeDrumDraft, setActiveDrumDraft] = useState("straight");
   const [activeLeadPlayerDraft, setActiveLeadPlayerDraft] = useState("");
@@ -298,6 +299,7 @@ export default function App() {
     setActiveBassPlayerDraft(session?.bass_player ?? "");
     setActiveBassEngineDraft(session?.bass_engine ?? "baseline");
     setActiveBassLockDraft(session?.bass_lock_to_groove ?? null);
+    setActiveBassPhaseDraft(session?.bass_phase_offset_beats ?? 0);
     setActiveDrumPlayerDraft(session?.drum_player ?? "");
     setActiveChordPlayerDraft(session?.chord_player ?? "");
     setActiveChordInstrumentDraft(session?.chord_instrument ?? "piano");
@@ -316,6 +318,8 @@ export default function App() {
     session?.bass_instrument,
     session?.bass_player,
     session?.bass_engine,
+    session?.bass_lock_to_groove,
+    session?.bass_phase_offset_beats,
     session?.drum_player,
     session?.chord_player,
     session?.chord_instrument,
@@ -712,6 +716,27 @@ export default function App() {
     },
     [session, activeBassLockDraft],
   );
+
+  const onApplyBassPhase = useCallback(async () => {
+    if (!session?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await patchSession(session.id, {
+        bass_phase_offset_beats: activeBassPhaseDraft,
+      });
+      setSession(updated);
+      setStatus(
+        activeBassPhaseDraft === 0
+          ? "Bass playback timing reset to the session grid."
+          : `Bass playback delayed by ${activeBassPhaseDraft} beat${activeBassPhaseDraft === 1 ? "" : "s"}.`,
+      );
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [session, activeBassPhaseDraft]);
 
   const onUpdateChordStyle = useCallback(async () => {
     if (!session?.id) return;
@@ -1539,6 +1564,52 @@ export default function App() {
                 >
                   Lock to reference
                 </button>
+              </div>
+            )}
+            {session && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  alignItems: "center",
+                  marginBottom: "0.75rem",
+                  padding: "0.55rem 0.75rem",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: 10,
+                }}
+              >
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Bass playback timing</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.25"
+                  value={activeBassPhaseDraft}
+                  onChange={(e) => setActiveBassPhaseDraft(Number(e.target.value))}
+                  disabled={busy}
+                  style={{ width: 150 }}
+                  aria-label="Bass playback delay in beats"
+                />
+                <span style={{ fontSize: 13, color: "#64748b", minWidth: 76 }}>
+                  {activeBassPhaseDraft === 0
+                    ? "on grid"
+                    : `+${activeBassPhaseDraft} beat${activeBassPhaseDraft === 1 ? "" : "s"}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={onApplyBassPhase}
+                  disabled={
+                    busy ||
+                    activeBassPhaseDraft === (session.bass_phase_offset_beats ?? 0)
+                  }
+                  style={{ padding: "0.3rem 0.65rem" }}
+                >
+                  Apply timing
+                </button>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                  Live playback only—no regeneration.
+                </span>
               </div>
             )}
             {session?.harmony_confirmation_required ? (
