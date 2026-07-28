@@ -349,6 +349,232 @@ def test_drums_bass_and_keys_obey_one_contract_and_confirmed_harmony() -> None:
         assert pc in set(progression[bar].tone_pcs)
 
 
+def test_fusion_drums_shape_the_pocket_without_changing_kick_law() -> None:
+    contract = build_fusion_contract(
+        seed=7591,
+        bar_count=_BARS,
+        covenant_id="open_funk_reply",
+    )
+    first, preview = generate_drums(
+        tempo=_TEMPO,
+        bar_count=_BARS,
+        drum_style="funk",
+        drum_kit="percussion",
+        fusion_contract=contract,
+    )
+    second, _ = generate_drums(
+        tempo=_TEMPO,
+        bar_count=_BARS,
+        drum_style="funk",
+        drum_kit="percussion",
+        fusion_contract=contract,
+    )
+
+    assert first == second
+    assert "semantic kick hierarchy" in preview
+    midi = pretty_midi.PrettyMIDI(io.BytesIO(first))
+    assert midi.resolution == 960
+    notes = _midi_notes(first)
+    kick_by_slot = {
+        _slot(note.start): note
+        for note in notes
+        if note.pitch == 36
+    }
+    assert set(kick_by_slot) == {
+        (bar, slot)
+        for bar in range(_BARS)
+        for slot in contract.bar(bar).kick_slots
+    }
+
+    quiet_cohits: list[int] = []
+    anchors: list[int] = []
+    for bar in range(_BARS):
+        for event in contract.bar(bar).bass_events:
+            kick = kick_by_slot.get((bar, int(event.slot)))
+            if kick is None:
+                continue
+            if event.optional or event.role == "connector":
+                quiet_cohits.append(int(kick.velocity))
+            if event.role == "anchor":
+                anchors.append(int(kick.velocity))
+    assert quiet_cohits and max(quiet_cohits) <= 80
+    assert anchors and min(anchors) >= 108
+    assert min(anchors) > max(quiet_cohits)
+
+    main_snares = {
+        _slot(note.start): int(note.velocity)
+        for note in notes
+        if note.pitch == 38
+        and _slot(note.start)[1] in (4, 12)
+    }
+    for bar in range(_BARS):
+        assert main_snares[(bar, 12)] >= main_snares[(bar, 4)] + 6
+
+    hats = [note for note in notes if note.pitch in (42, 46)]
+    assert len({int(note.velocity) for note in hats}) >= 4
+    assert sum(note.pitch == 46 for note in hats) <= _BARS // 4
+
+    ghost_slots = [
+        _slot(note.start)
+        for note in notes
+        if note.pitch == 38
+        and _slot(note.start)[1] not in (4, 12)
+    ]
+    assert len(ghost_slots) <= _BARS // 2
+    for bar, slot in ghost_slots:
+        plan = contract.bar(bar)
+        assert slot in plan.protected_melodic_rest_slots
+        assert slot not in {event.slot for event in plan.bass_events}
+        assert slot not in {event.slot for event in plan.keys_events}
+
+    for note in notes:
+        if note.pitch != 37:
+            continue
+        bar, slot = _slot(note.start)
+        if slot in contract.bar(bar).snare_slots:
+            assert note.velocity <= 42
+
+
+def test_fusion_keys_are_rootless_sparse_voice_led_gestures() -> None:
+    contract = build_fusion_contract(
+        seed=7300,
+        bar_count=_BARS,
+        covenant_id="anticipated_tumbao",
+    )
+    chord_bytes, preview = generate_chords(
+        tempo=_TEMPO,
+        bar_count=_BARS,
+        key="D",
+        scale="natural_minor",
+        chord_style="wide",
+        chord_instrument="rhodes",
+        chord_progression=_CHORDS,
+        fusion_contract=contract,
+    )
+
+    assert "rootless voice-led replies" in preview
+    notes = _midi_notes(chord_bytes)
+    assert len(notes) <= 32
+    assert min(note.pitch for note in notes) >= 60
+    assert max(note.pitch for note in notes) <= 80
+    progression = mt.progression_chords_for_bars(_CHORDS, _BARS)
+    spb = 60.0 / _TEMPO
+    bar_len = 4.0 * spb
+    role_durations: dict[str, list[float]] = {}
+    role_velocities: dict[str, list[int]] = {}
+
+    for bar in range(_BARS):
+        chord = progression[bar]
+        bar_notes = [
+            note
+            for note in notes
+            if bar * bar_len <= note.start < (bar + 1) * bar_len
+        ]
+        assert bar_notes
+        assert all(note.pitch % 12 in chord.tone_pcs for note in bar_notes)
+        assert all(note.pitch % 12 != chord.root_pc for note in bar_notes)
+
+        intervals = sorted(
+            (
+                max(bar * bar_len, float(note.start)),
+                min((bar + 1) * bar_len, float(note.end)),
+            )
+            for note in bar_notes
+        )
+        merged: list[list[float]] = []
+        for start, end in intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        duty = sum(end - start for start, end in merged) / bar_len
+        assert duty <= 0.4
+
+        plan = contract.bar(bar)
+        for event_index, event in enumerate(plan.keys_events):
+            event_notes = [
+                note
+                for note in bar_notes
+                if _slot(note.start) == (bar, int(event.slot))
+            ]
+            assert event_notes
+            role_durations.setdefault(event.role, []).append(
+                max(note.end for note in event_notes)
+                - min(note.start for note in event_notes)
+            )
+            role_velocities.setdefault(event.role, []).extend(
+                int(note.velocity) for note in event_notes
+            )
+            if event_index + 1 < len(plan.keys_events):
+                next_slot = int(plan.keys_events[event_index + 1].slot)
+                next_start = bar * bar_len + next_slot * spb / 4.0
+                assert max(note.end for note in event_notes) < next_start
+
+    assert (
+        sum(role_durations["answer"]) / len(role_durations["answer"])
+        > sum(role_durations["punctuation"])
+        / len(role_durations["punctuation"])
+    )
+    assert (
+        sum(role_velocities["punctuation"])
+        / len(role_velocities["punctuation"])
+        > sum(role_velocities["answer"]) / len(role_velocities["answer"])
+    )
+
+    first_gesture_by_bar = []
+    for bar in range(_BARS):
+        first_slot = contract.bar(bar).keys_events[0].slot
+        first_gesture_by_bar.append(
+            sorted(
+                note.pitch
+                for note in notes
+                if _slot(note.start) == (bar, int(first_slot))
+            )
+        )
+    for left, right in zip(
+        first_gesture_by_bar,
+        first_gesture_by_bar[1:],
+        strict=False,
+    ):
+        assert abs(sum(left) / len(left) - sum(right) / len(right)) <= 5
+
+
+def test_fusion_keys_whisper_when_contract_places_them_on_bass_and_kick() -> None:
+    contract = build_fusion_contract(
+        seed=7591,
+        bar_count=_BARS,
+        covenant_id="open_funk_reply",
+    )
+    chord_bytes, _ = generate_chords(
+        tempo=_TEMPO,
+        bar_count=_BARS,
+        key="D",
+        scale="natural_minor",
+        chord_style="wide",
+        chord_instrument="rhodes",
+        chord_progression=_CHORDS,
+        fusion_contract=contract,
+    )
+    notes = _midi_notes(chord_bytes)
+    collisions = []
+    for bar in range(_BARS):
+        plan = contract.bar(bar)
+        bass_slots = {event.slot for event in plan.bass_events}
+        for event in plan.keys_events:
+            if event.slot in bass_slots and event.slot in plan.kick_slots:
+                collisions.append((bar, int(event.slot)))
+
+    assert collisions
+    for bar_slot in collisions:
+        gesture = [
+            note
+            for note in notes
+            if _slot(note.start) == bar_slot
+        ]
+        assert len(gesture) == 1
+        assert gesture[0].velocity <= 47
+
+
 def _contract_bass_signature(
     contract: FusionGrooveContract,
     *,

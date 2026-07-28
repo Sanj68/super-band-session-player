@@ -10,6 +10,7 @@ import pretty_midi
 
 from app.services.fusion_contract import (
     FusionGrooveContract,
+    PPQ as FUSION_PPQ,
     slot_time_seconds,
 )
 from app.services.session_context import SessionAnchorContext, slot_pressure
@@ -633,11 +634,15 @@ def _emit_fusion_contract_bar(
     bar_off: float,
     spb: float,
 ) -> None:
-    """Render the drum/percussion jobs from one shared band contract."""
+    """Render one restrained pocket reading of the shared band contract."""
 
     plan = contract.bar(bar)
     sixteenth = spb / 4.0
     energy = max(0.0, min(1.0, float(plan.energy)))
+    bass_by_slot = {
+        int(event.slot): event
+        for event in plan.bass_events
+    }
 
     def hit_time(slot: int) -> float:
         return bar_off + slot_time_seconds(
@@ -646,26 +651,66 @@ def _emit_fusion_contract_bar(
             seconds_per_beat=spb,
         )
 
+    # A fixed eighth-note hat grid still needs a hand pattern.  These contours
+    # make the two-bar law breathe without adding density or randomising the
+    # contract.  Sixteenth-note source hats use the same slot-indexed contour.
+    hat_contours = (
+        (72, 44, 53, 47, 62, 45, 56, 49, 67, 43, 51, 46, 60, 42, 55, 48),
+        (67, 46, 56, 43, 64, 48, 52, 45, 70, 44, 58, 47, 61, 45, 54, 50),
+    )
+    hat_contour = hat_contours[int(plan.two_bar_phase)]
+    phrase_hat_delta = {
+        "statement": 0,
+        "variation": -2,
+        "contrast": -5,
+        "return": 2,
+    }[plan.phrase_role]
+    open_hat_slot = (
+        max(plan.hat_slots)
+        if bar % 4 == 3 and plan.hat_slots and max(plan.hat_slots) >= 14
+        else None
+    )
     for slot in plan.hat_slots:
         t0 = hit_time(slot)
-        accent = 1.0 if slot % 4 == 0 else 0.72
-        velocity = max(38, min(104, round((48 + 25 * energy) * accent)))
+        is_open = int(slot) == open_hat_slot
+        velocity = max(
+            34,
+            min(
+                92,
+                int(hat_contour[int(slot)]) + phrase_hat_delta + (4 if is_open else 0),
+            ),
+        )
+        gate = (
+            1.36
+            if is_open
+            else 0.42 + 0.08 * ((int(slot) // 2 + bar) % 4)
+        )
         _note(
             inst,
-            pitch=_HIHAT_CLOSED,
+            pitch=_HIHAT_OPEN if is_open else _HIHAT_CLOSED,
             vel=velocity,
             t0=t0,
-            t1=t0 + sixteenth * 0.58,
+            t1=t0 + sixteenth * gate,
         )
     for slot in plan.kick_slots:
         t0 = hit_time(slot)
-        velocity = max(
-            78,
-            min(
-                122,
-                round(91 + 22 * energy + (5 if slot in (0, 8) else 0)),
-            ),
-        )
+        bass_event = bass_by_slot.get(int(slot))
+        if bass_event is None:
+            velocity = 100 + round((energy - 0.62) * 8)
+        elif bass_event.optional or bass_event.role == "connector":
+            velocity = 73 + round((energy - 0.62) * 5)
+        else:
+            velocity = {
+                "anchor": 110,
+                "colour": 85,
+                "fifth": 91,
+                "octave": 99,
+                "anticipation": 99,
+                "answer": 88,
+                "pickup": 84,
+            }.get(str(bass_event.role), 94)
+            velocity += round((energy - 0.62) * 5)
+        velocity = max(68, min(114, int(velocity)))
         _note(
             inst,
             pitch=_KICK,
@@ -674,8 +719,19 @@ def _emit_fusion_contract_bar(
             t1=t0 + sixteenth * 0.88,
         )
     for slot in plan.snare_slots:
-        t0 = hit_time(slot)
-        velocity = max(84, min(124, round(94 + 24 * energy)))
+        # The contract carries shared placement.  A drummer-specific late
+        # backbeat sits a further 8–10 PPQ ticks behind it; kick/bass anchors
+        # remain exactly locked to the shared grid.
+        backbeat_lag_ticks = 8 + ((bar + int(slot)) % 3)
+        t0 = hit_time(slot) + backbeat_lag_ticks * spb / FUSION_PPQ
+        phrase_delta = {
+            "statement": 0,
+            "variation": 1,
+            "contrast": -4,
+            "return": 2,
+        }[plan.phrase_role]
+        velocity = 92 + phrase_delta + (8 if int(slot) == 12 else 0)
+        velocity = max(78, min(108, int(velocity)))
         _note(
             inst,
             pitch=_SNARE,
@@ -686,9 +742,11 @@ def _emit_fusion_contract_bar(
     for event in plan.percussion_events:
         t0 = hit_time(event.slot)
         velocity = max(
-            30,
-            min(112, round(int(event.velocity) * (0.72 + 0.36 * energy))),
+            28,
+            min(88, round(int(event.velocity) * (0.72 + 0.18 * energy))),
         )
+        if int(event.pitch) == _RIM and int(event.slot) in plan.snare_slots:
+            velocity = min(42, velocity)
         _note(
             inst,
             pitch=int(event.pitch),
@@ -696,6 +754,36 @@ def _emit_fusion_contract_bar(
             t0=t0,
             t1=t0 + sixteenth * 0.62,
         )
+
+    # One very quiet drummer-only grace note every two bars gives the snare a
+    # hand without turning the shared contract into a fill generator.
+    if bar % 2 == 1:
+        occupied = {
+            *plan.kick_slots,
+            *plan.snare_slots,
+            *plan.hat_slots,
+            *(int(event.slot) for event in plan.percussion_events),
+            *(int(event.slot) for event in plan.bass_events),
+            *(int(event.slot) for event in plan.keys_events),
+        }
+        ghost_candidates = [
+            int(slot)
+            for slot in plan.protected_melodic_rest_slots
+            if int(slot) % 2 == 1 and int(slot) not in occupied
+        ]
+        if ghost_candidates:
+            ghost_slot = min(
+                ghost_candidates,
+                key=lambda slot: (abs(slot - 9), slot),
+            )
+            t0 = hit_time(ghost_slot) + 4 * spb / FUSION_PPQ
+            _note(
+                inst,
+                pitch=_SNARE,
+                vel=31 + (2 if plan.phrase_role == "variation" else 0),
+                t0=t0,
+                t1=t0 + sixteenth * 0.24,
+            )
 
 
 def generate_drums(
@@ -714,7 +802,10 @@ def generate_drums(
     player_key = normalize_drum_player(drum_player)
     traits: DrumProfile | None = drum_profiles[player_key] if player_key else None
     salt = random.randint(0, 255)
-    pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
+    pm = pretty_midi.PrettyMIDI(
+        initial_tempo=float(tempo),
+        resolution=FUSION_PPQ if fusion_contract is not None else 220,
+    )
     inst = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
     spb = 60.0 / float(tempo)
     sixteenth = spb / 4.0
@@ -779,9 +870,11 @@ def generate_drums(
         drum_player=player_key,
     )
     if fusion_contract is not None:
-        preview += (
-            f" Shared Fusion DNA: {fusion_contract.covenant_id} "
-            f"({fusion_contract.contract_id}); authored Latin percussion law, "
-            "funk attack, and section-shaped dynamics."
+        preview = (
+            f"Drums [Fusion contract]: 4/4, {bar_count} bar(s), {tempo} BPM — "
+            f"Shared Fusion DNA: {fusion_contract.covenant_id} "
+            f"({fusion_contract.contract_id}); default pocket rendering with "
+            "semantic kick hierarchy, shaped backbeats, restrained percussion "
+            "accents, and host-selectable drum sound."
         )
     return buf.getvalue(), preview

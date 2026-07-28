@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from itertools import product
 import random
 from typing import Final, TypedDict, cast
 
@@ -441,8 +442,14 @@ def _enforce_explicit_chord_contract(
     bar_t0: float,
     bar_end: float,
     sixteenth: float,
+    complete_declared_pitch_set: bool = True,
 ) -> None:
-    """Keep a chart-driven bar inside, and complete, its declared pitch set."""
+    """Keep a chart-driven bar inside its declared pitch set.
+
+    Ordinary chord styles may request a complete chart voicing.  Fusion keys
+    are deliberately rootless, sparse rhythm-section gestures, so their caller
+    disables completion while retaining the strict membership guard.
+    """
 
     expected = set(chord.tone_pcs)
     bar_notes = [note for note in inst.notes if bar_t0 <= note.start < bar_end]
@@ -467,6 +474,9 @@ def _enforce_explicit_chord_contract(
     if unsupported_ids:
         inst.notes[:] = [note for note in inst.notes if id(note) not in unsupported_ids]
         bar_notes = [note for note in bar_notes if id(note) not in unsupported_ids]
+
+    if not complete_declared_pitch_set:
+        return
 
     heard = {note.pitch % 12 for note in bar_notes}
     missing = expected - heard
@@ -508,6 +518,86 @@ def _enforce_explicit_chord_contract(
             break
 
 
+def _fusion_rootless_voicing(
+    tones: list[int],
+    previous: tuple[int, ...] | None,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Choose a compact rootless voicing with bounded inter-bar movement."""
+
+    tone_pcs = tuple(dict.fromkeys(int(pitch) % 12 for pitch in tones))
+    if len(tone_pcs) >= 4:
+        role_pcs = tone_pcs[1:4]
+    elif len(tone_pcs) >= 3:
+        role_pcs = tone_pcs[1:3]
+    else:
+        role_pcs = tone_pcs
+    if not role_pcs:
+        return (), ()
+
+    pitch_options = tuple(
+        tuple(pitch for pitch in range(60, 81) if pitch % 12 == pc)
+        for pc in role_pcs
+    )
+    candidates: list[tuple[int, ...]] = []
+    for raw in product(*pitch_options):
+        voiced = tuple(sorted(int(pitch) for pitch in raw))
+        if len(set(voiced)) != len(role_pcs):
+            continue
+        if voiced[-1] - voiced[0] > 14:
+            continue
+        candidates.append(voiced)
+    if not candidates:
+        canonical = tuple(sorted(int(pitch) for pitch in tones[1:] or tones))
+        return canonical, role_pcs
+
+    def score(candidate: tuple[int, ...]) -> tuple[float, tuple[int, ...]]:
+        centre = sum(candidate) / len(candidate)
+        register_cost = abs(centre - 69.5) * 0.8 + abs(candidate[0] - 65) * 0.25
+        if previous and len(previous) == len(candidate):
+            movement = sum(
+                abs(left - right)
+                for left, right in zip(previous, candidate, strict=True)
+            )
+        else:
+            movement = 0.0
+        return movement + register_cost, candidate
+
+    selected = min(candidates, key=score)
+    return selected, role_pcs
+
+
+def _fusion_keys_pitches(
+    *,
+    voicing: tuple[int, ...],
+    role_pcs: tuple[int, ...],
+    role: str,
+    collision: bool,
+) -> tuple[int, ...]:
+    """Interpret a keys role without repeating the same block on every hit."""
+
+    if not voicing:
+        return ()
+    by_pc = {int(pitch) % 12: int(pitch) for pitch in voicing}
+    if collision:
+        return (max(voicing),)
+    if len(role_pcs) < 3:
+        return tuple(sorted(voicing))
+    third_pc, fifth_pc, seventh_pc = role_pcs[:3]
+    selected_pcs = {
+        "answer": (third_pc, seventh_pc),
+        "punctuation": (third_pc, fifth_pc),
+        "push": (third_pc, seventh_pc),
+        "lift": (third_pc, fifth_pc, seventh_pc),
+    }.get(role, (third_pc, seventh_pc))
+    return tuple(
+        sorted(
+            by_pc[pc]
+            for pc in selected_pcs
+            if pc in by_pc
+        )
+    )
+
+
 def generate_chords(
     *,
     tempo: int,
@@ -542,6 +632,7 @@ def generate_chords(
     degrees = mt.progression_degrees_for_bars(bar_count, scale)
     explicit_chords = mt.progression_chords_for_bars(chord_progression, bar_count)
     salt = random.randint(0, 127)
+    fusion_previous_voicing: tuple[int, ...] | None = None
 
     for bar, deg in enumerate(degrees):
         explicit_chord = explicit_chords[bar] if explicit_chords else None
@@ -561,9 +652,9 @@ def generate_chords(
                 sync_push *= chord_role_knobs.sync_push_mult
 
         if fusion_contract is not None:
-            # Fusion keys are a rhythm-section job, not a pad.  Keep the
-            # confirmed harmony, move above the bass, and answer only at the
-            # contract's permissioned slots.
+            # Fusion keys are a rhythm-section job, not a pad.  Voice-lead a
+            # rootless shell above the bass, then interpret each contract role
+            # as a distinct, short conversational gesture.
             tones = _bar_chord_tones_midi(
                 key=key,
                 scale=scale,
@@ -572,15 +663,22 @@ def generate_chords(
                 octave=4,
                 seventh=True,
             )
-            if len(tones) >= 4:
-                pitches = [tones[1], tones[2], tones[3]]
-            elif len(tones) >= 3:
-                pitches = [tones[1], tones[2], tones[0] + 12]
-            else:
-                pitches = list(tones)
-            pitches = sorted({max(48, min(96, int(pitch))) for pitch in pitches})
+            voicing, role_pcs = _fusion_rootless_voicing(
+                tones,
+                fusion_previous_voicing,
+            )
+            fusion_previous_voicing = voicing
             plan = fusion_contract.bar(bar)
-            for event in plan.keys_events:
+            bass_slots = {int(event.slot) for event in plan.bass_events}
+            kick_slots = {int(slot) for slot in plan.kick_slots}
+            events = tuple(plan.keys_events)
+            for event_index, event in enumerate(events):
+                role_delay_ticks = {
+                    "answer": 13,
+                    "punctuation": 7,
+                    "push": 3,
+                    "lift": 11,
+                }.get(str(event.role), 9)
                 t0 = (
                     bar_t0
                     + slot_time_seconds(
@@ -588,31 +686,76 @@ def generate_chords(
                         microtiming_ticks=plan.microtiming_ticks,
                         seconds_per_beat=spb,
                     )
-                    # Keys answer a fraction behind the shared drum/bass
-                    # grid; the delay is relational and stored in PPQ terms.
-                    + (9.0 * spb / FUSION_PPQ)
+                    + (role_delay_ticks * spb / FUSION_PPQ)
                 )
+                collision = (
+                    int(event.slot) in bass_slots
+                    and int(event.slot) in kick_slots
+                )
+                duration_slots = {
+                    "answer": max(1.65, float(event.duration_slots) * 1.5),
+                    "punctuation": max(
+                        0.68,
+                        min(1.0, float(event.duration_slots) * 0.76),
+                    ),
+                    "push": max(1.15, float(event.duration_slots) * 1.15),
+                    "lift": max(2.0, float(event.duration_slots) * 1.65),
+                }.get(str(event.role), max(1.0, float(event.duration_slots)))
+                if collision:
+                    duration_slots = min(0.72, duration_slots)
                 t1 = min(
                     bar_end - 1e-4,
-                    t0 + max(0.2, float(event.duration_slots)) * sixteenth,
+                    t0 + duration_slots * sixteenth,
                 )
+                if event_index + 1 < len(events):
+                    next_event = events[event_index + 1]
+                    next_nominal = (
+                        bar_t0
+                        + int(next_event.slot) * sixteenth
+                        - 0.12 * sixteenth
+                    )
+                    t1 = min(t1, next_nominal)
                 if t1 <= t0:
                     continue
-                base_velocity = round(
-                    48
-                    + 31 * float(event.accent)
-                    + 8 * float(plan.energy)
+                pitches = _fusion_keys_pitches(
+                    voicing=voicing,
+                    role_pcs=role_pcs,
+                    role=str(event.role),
+                    collision=collision,
                 )
+                base_velocity = {
+                    "answer": 54,
+                    "punctuation": 65,
+                    "push": 60,
+                    "lift": 52,
+                }.get(str(event.role), 56)
+                base_velocity += round(
+                    10 * float(event.accent) + 3 * float(plan.energy)
+                )
+                if collision:
+                    base_velocity = min(47, base_velocity)
+                stagger_ticks = {
+                    "answer": 12,
+                    "punctuation": 6,
+                    "push": 4,
+                    "lift": 10,
+                }.get(str(event.role), 8)
                 for note_index, pitch in enumerate(pitches):
+                    note_t0 = (
+                        t0
+                        + note_index * stagger_ticks * spb / FUSION_PPQ
+                    )
+                    if note_t0 >= t1:
+                        continue
                     velocity = max(
-                        36,
-                        min(104, base_velocity - note_index * 3),
+                        34,
+                        min(92, base_velocity - note_index * 2),
                     )
                     inst.notes.append(
                         pretty_midi.Note(
                             velocity=velocity,
                             pitch=pitch,
-                            start=t0,
+                            start=note_t0,
                             end=t1,
                         )
                     )
@@ -993,6 +1136,7 @@ def generate_chords(
                 bar_t0=bar_t0,
                 bar_end=bar_end,
                 sixteenth=sixteenth,
+                complete_declared_pitch_set=fusion_contract is None,
             )
 
     _shape_velocities(inst, player_key)
@@ -1028,9 +1172,13 @@ def generate_chords(
     role_tag = f" Role vs anchor: {chord_role_name}." if chord_role_name else ""
     preview = f"{head} — {mid} {inst_note}{chart_tag}{soul_tag}{role_tag}"
     if fusion_contract is not None:
-        preview += (
-            f" Shared Fusion DNA: {fusion_contract.covenant_id} "
-            f"({fusion_contract.contract_id}); sparse upper-register answers "
-            "inside protected rhythm-section space."
+        preview = (
+            f"Keys [Fusion contract, {ci_lbl}]: "
+            f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, "
+            f"{bar_count} bar(s), {tempo} BPM — "
+            f"Shared Fusion DNA: {fusion_contract.covenant_id} "
+            f"({fusion_contract.contract_id}); rootless voice-led replies, "
+            f"role-shaped touch, and collision-aware restraint above the bass."
+            f"{chart_tag}"
         )
     return buf.getvalue(), preview
