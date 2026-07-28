@@ -833,6 +833,42 @@ class SessionState(BaseModel):
         default=None,
         description="Seed used to render the current bass lane, when generated.",
     )
+    fusion_contract_active: bool = Field(
+        default=False,
+        description="True when drums, bass, and keys share stored Fusion DNA.",
+    )
+    fusion_contract_id: str | None = Field(
+        default=None,
+        description="Immutable identifier for the currently stored Fusion contract.",
+    )
+    fusion_covenant_id: str | None = Field(
+        default=None,
+        description="Neutral name of the current two-bar relationship grammar.",
+    )
+    fusion_dna_seed: int | None = Field(
+        default=None,
+        description="Seed from which the current Fusion contract was built.",
+    )
+    fusion_dna_revision: int = Field(
+        default=0,
+        ge=0,
+        description="Monotonic count of Fusion DNA accepted by this session.",
+    )
+    fusion_source_mode: Literal["authored", "reference"] | None = Field(
+        default=None,
+        description="Whether the current contract used captured beat evidence.",
+    )
+    fusion_contract_stale: bool = Field(
+        default=False,
+        description=(
+            "True when captured beat evidence changed or one of the rendered "
+            "core lanes predates the current Fusion session settings."
+        ),
+    )
+    fusion_contract_notice: str | None = Field(
+        default=None,
+        description="Actionable status for the shared Fusion rhythm contract.",
+    )
     drum_player: str | None = Field(
         default=None,
         description="Optional drum player profile id (stubblefield, questlove, dilla), or null when unset.",

@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Iterable, Literal
 
 import pretty_midi
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile
@@ -39,6 +39,7 @@ from app.models.session import (
     SessionCreate,
     SessionCreated,
     SessionPatch,
+    SessionPreset,
     SessionState,
     SourceAnalysis,
     lane_styles_for_session_preset,
@@ -68,6 +69,12 @@ from app.services.bass_performance_controls import (
 from app.services.bass_performance_render import render_performance_bass_midi
 from app.services.bass_instrument_profiles import resolve_bass_articulation_focus
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
+from app.services.fusion_contract import (
+    FusionGrooveContract,
+    build_fusion_contract,
+    covenant_index_for_seed,
+    fusion_source_signature,
+)
 from app.services.audio_source_analysis import analyze_reference_audio
 from app.services.bass_quality import analyze_bass_take, count_unsupported_structural_notes
 from app.services.midi_note_extract import extract_lane_notes
@@ -99,11 +106,21 @@ class AuditionBassResponse(BaseModel):
     output: str
     duration_seconds: float
 
+
+class NewFusionDnaBody(BaseModel):
+    include_lead: bool = False
+
+
 _LANE_REGENERATION_ORDER: Final[tuple[LaneName, ...]] = (
     LaneName.drums,
     LaneName.bass,
     LaneName.chords,
     LaneName.lead,
+)
+_FUSION_CORE_LANES: Final[tuple[LaneName, ...]] = (
+    LaneName.drums,
+    LaneName.bass,
+    LaneName.chords,
 )
 
 
@@ -119,7 +136,7 @@ _DEFAULT_CHORD_INSTRUMENT = "piano"
 _DEFAULT_DRUM_KIT = "standard"
 _REFERENCE_AUDIO_ROOT = Path(__file__).resolve().parents[2] / "data" / "reference_audio"
 _ALLOWED_REFERENCE_EXTS: Final[set[str]] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
-_CANDIDATE_GENERATION_CONTEXT_VERSION: Final[int] = 4
+_CANDIDATE_GENERATION_CONTEXT_VERSION: Final[int] = 5
 
 
 def _new_bass_seed() -> int:
@@ -151,6 +168,12 @@ class StoredSession:
     bass_phase_offset_beats: float = 0.0
     bass_density_bias: float = 0.0
     bass_seed: int | None = None
+    fusion_dna_seed: int | None = None
+    fusion_dna_revision: int = 0
+    fusion_contract_payload: dict[str, object] | None = None
+    fusion_drums_render_stale: bool = False
+    fusion_bass_render_stale: bool = False
+    fusion_chords_render_stale: bool = False
     drum_player: str | None = None
     chord_instrument: str = _DEFAULT_CHORD_INSTRUMENT
     chord_player: str | None = None
@@ -196,6 +219,203 @@ class StoredSession:
     bridge_live_base_source_analysis_override: object | None = None
     bridge_live_base_key: str | None = None
     bridge_live_base_scale: str | None = None
+
+
+def _fusion_mode_enabled(s: StoredSession) -> bool:
+    return str(s.session_preset or "").strip().lower() == "fusion"
+
+
+def _enforce_fusion_bass_engine(s: StoredSession) -> None:
+    """Keep every internal render path on the engine that consumes DNA."""
+
+    if _fusion_mode_enabled(s):
+        s.bass_engine = "phrase_v2"
+        # Named-player profiles do not yet have contract-aware adapters.
+        # Clearing stale metadata is honest; style/instrument/performance
+        # controls remain available and do affect the contract rendering.
+        s.bass_player = None
+
+
+def _fusion_core_rendered(s: StoredSession) -> bool:
+    return bool(s.drum_bytes and s.bass_bytes and s.chords_bytes)
+
+
+def _fusion_dirty_core_lanes(s: StoredSession) -> tuple[LaneName, ...]:
+    return tuple(
+        lane
+        for lane, stale in (
+            (LaneName.drums, s.fusion_drums_render_stale),
+            (LaneName.bass, s.fusion_bass_render_stale),
+            (LaneName.chords, s.fusion_chords_render_stale),
+        )
+        if stale
+    )
+
+
+def _mark_fusion_core_lanes_stale(
+    s: StoredSession,
+    lanes: Iterable[LaneName],
+) -> None:
+    if not _fusion_mode_enabled(s):
+        return
+    wanted = set(lanes)
+    if LaneName.drums in wanted:
+        s.fusion_drums_render_stale = True
+    if LaneName.bass in wanted:
+        s.fusion_bass_render_stale = True
+        s.current_bass_candidate_run_id = None
+        s.current_bass_candidate_take_id = None
+    if LaneName.chords in wanted:
+        s.fusion_chords_render_stale = True
+
+
+def _mark_fusion_core_lanes_fresh(
+    s: StoredSession,
+    lanes: Iterable[LaneName],
+) -> None:
+    if not _fusion_mode_enabled(s):
+        return
+    wanted = set(lanes)
+    if LaneName.drums in wanted:
+        s.fusion_drums_render_stale = False
+    if LaneName.bass in wanted:
+        s.fusion_bass_render_stale = False
+    if LaneName.chords in wanted:
+        s.fusion_chords_render_stale = False
+
+
+def _stored_fusion_contract(s: StoredSession) -> FusionGrooveContract | None:
+    payload = s.fusion_contract_payload
+    if payload is None:
+        return None
+    try:
+        return FusionGrooveContract.from_payload(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_contract_invalid",
+                "message": (
+                    "The stored Fusion DNA is invalid. Start NEW DNA to "
+                    "rebuild the rhythm-section contract."
+                ),
+            },
+        ) from exc
+
+
+def _new_fusion_dna_seed(previous: int | None = None) -> int:
+    """Return a seed whose two-bar covenant differs from the prior one."""
+
+    prior_index = (
+        covenant_index_for_seed(previous)
+        if previous is not None
+        else None
+    )
+    for _attempt in range(32):
+        candidate = random.randint(1, 2_000_000_000)
+        if (
+            candidate != previous
+            and (
+                prior_index is None
+                or covenant_index_for_seed(candidate) != prior_index
+            )
+        ):
+            return candidate
+    # The random loop is defensive; this arithmetic fallback guarantees the
+    # producer hears a different relationship grammar.
+    base = int(previous or 0)
+    return base + 1
+
+
+def _ensure_fusion_contract(
+    s: StoredSession,
+    *,
+    conditioning: UnifiedConditioning | None,
+    force_new: bool = False,
+) -> FusionGrooveContract | None:
+    if not _fusion_mode_enabled(s):
+        return None
+
+    stored = _stored_fusion_contract(s)
+    rebuild_for_length = (
+        stored is not None
+        and int(stored.bar_count) != int(s.bar_count)
+    )
+    rebuild_for_source = bool(
+        stored is not None
+        and stored.source_signature
+        != fusion_source_signature(
+            conditioning,
+            bar_count=s.bar_count,
+        )
+    )
+    if (
+        stored is not None
+        and not force_new
+        and not rebuild_for_length
+        and not rebuild_for_source
+    ):
+        return stored
+
+    if force_new:
+        seed = _new_fusion_dna_seed(s.fusion_dna_seed)
+    elif stored is not None:
+        seed = int(stored.seed)
+    elif s.fusion_dna_seed is not None:
+        seed = int(s.fusion_dna_seed)
+    else:
+        seed = _new_fusion_dna_seed()
+    contract = build_fusion_contract(
+        seed=seed,
+        bar_count=s.bar_count,
+        conditioning=conditioning,
+    )
+    s.fusion_dna_seed = int(seed)
+    s.fusion_dna_revision = max(1, int(s.fusion_dna_revision) + 1)
+    s.fusion_contract_payload = contract.to_payload()
+    _mark_fusion_core_lanes_stale(s, _FUSION_CORE_LANES)
+    return contract
+
+
+def _fusion_contract_source_is_stale(
+    s: StoredSession,
+    contract: FusionGrooveContract,
+    conditioning: UnifiedConditioning | None,
+) -> bool:
+    return bool(
+        contract.source_signature
+        != fusion_source_signature(
+            conditioning,
+            bar_count=s.bar_count,
+        )
+    )
+
+
+def _reject_stale_fusion_source(
+    s: StoredSession,
+    contract: FusionGrooveContract | None,
+    conditioning: UnifiedConditioning | None,
+) -> None:
+    if (
+        contract is None
+        or not _fusion_contract_source_is_stale(
+            s,
+            contract,
+            conditioning,
+        )
+    ):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "fusion_source_changed",
+            "message": (
+                "The captured beat changed after this Fusion DNA was written. "
+                "Generate the full session to adapt the current law, or start "
+                "NEW DNA for a different law."
+            ),
+        },
+    )
 
 
 def _durable_source_analysis(s: StoredSession) -> object | None:
@@ -302,6 +522,11 @@ def _candidate_generation_context_fingerprint(s: StoredSession) -> str:
             "bass_performance_controls": (
                 dict(s.bass_performance_controls)
                 if s.bass_performance_controls is not None
+                else None
+            ),
+            "fusion_contract_id": (
+                str(s.fusion_contract_payload.get("contract_id"))
+                if s.fusion_contract_payload is not None
                 else None
             ),
             "anchor_lane": anchor_lane,
@@ -523,6 +748,63 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         groove_source_frame_count,
         groove_source_notice,
     ) = _groove_source_status(s.id)
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
+    current_fusion_source_signature = fusion_source_signature(
+        _conditioning,
+        bar_count=s.bar_count,
+    )
+    fusion_source_stale = bool(
+        fusion_contract is not None
+        and fusion_contract.source_signature
+        != current_fusion_source_signature
+    )
+    fusion_dirty_lanes = _fusion_dirty_core_lanes(s)
+    fusion_contract_stale = bool(
+        fusion_source_stale or fusion_dirty_lanes
+    )
+    fusion_contract_active = bool(
+        fusion_contract is not None
+        and s.bass_engine == "phrase_v2"
+        and _fusion_core_rendered(s)
+        and not fusion_contract_stale
+    )
+    if not _fusion_mode_enabled(s):
+        fusion_contract_notice = None
+    elif fusion_contract is None:
+        fusion_contract_notice = (
+            "Fusion DNA has not been written yet. Generate the session or "
+            "start NEW DNA."
+        )
+    elif s.bass_engine != "phrase_v2":
+        fusion_contract_notice = (
+            "The shared contract is stored, but Bass must use Phrase v2 for "
+            "the rhythm section to follow one law."
+        )
+    elif not _fusion_core_rendered(s):
+        fusion_contract_notice = (
+            "Fusion DNA is stored, but the complete drums, bass, and keys "
+            "core has not been rendered. Generate the full session."
+        )
+    elif fusion_source_stale:
+        fusion_contract_notice = (
+            "The captured beat changed. Start NEW DNA to rebuild drums, bass, "
+            "and keys from the new evidence."
+        )
+    elif fusion_dirty_lanes:
+        fusion_contract_notice = (
+            "Fusion DNA is stored, but "
+            + ", ".join(lane.value for lane in fusion_dirty_lanes)
+            + " MIDI predates the current session settings. Regenerate the "
+            "affected core lane(s), or Generate the full band."
+        )
+    else:
+        fusion_contract_notice = (
+            "Drums, bass, and keys share the current two-bar Fusion law."
+        )
     return SessionState(
         id=s.id,
         tempo=s.tempo,
@@ -559,6 +841,26 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_phase_offset_beats=s.bass_phase_offset_beats,
         bass_performance_available=s.bass_performance_bytes is not None,
         bass_seed=s.bass_seed,
+        fusion_contract_active=fusion_contract_active,
+        fusion_contract_id=(
+            fusion_contract.contract_id
+            if fusion_contract is not None
+            else None
+        ),
+        fusion_covenant_id=(
+            fusion_contract.covenant_id
+            if fusion_contract is not None
+            else None
+        ),
+        fusion_dna_seed=s.fusion_dna_seed,
+        fusion_dna_revision=s.fusion_dna_revision,
+        fusion_source_mode=(
+            fusion_contract.source_mode
+            if fusion_contract is not None
+            else None
+        ),
+        fusion_contract_stale=fusion_contract_stale,
+        fusion_contract_notice=fusion_contract_notice,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
         chord_player=s.chord_player,
@@ -799,6 +1101,16 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_phase_offset_beats=src.bass_phase_offset_beats,
         bass_density_bias=src.bass_density_bias,
         bass_seed=src.bass_seed,
+        fusion_dna_seed=src.fusion_dna_seed,
+        fusion_dna_revision=src.fusion_dna_revision,
+        fusion_contract_payload=(
+            deepcopy(src.fusion_contract_payload)
+            if src.fusion_contract_payload is not None
+            else None
+        ),
+        fusion_drums_render_stale=src.fusion_drums_render_stale,
+        fusion_bass_render_stale=src.fusion_bass_render_stale,
+        fusion_chords_render_stale=src.fusion_chords_render_stale,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
         chord_player=src.chord_player,
@@ -867,6 +1179,62 @@ def create_session(body: SessionCreate) -> SessionCreated:
         mt.key_root_pc(body.key)
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"error": "invalid_key", "message": str(e)}) from e
+    if (
+        body.session_preset == SessionPreset.fusion
+        and body.bass_player is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_named_bass_player_unsupported",
+                "message": (
+                    "Named Bass Player profiles do not yet have honest "
+                    "contract-aware Fusion adapters. Use Bass style, "
+                    "instrument, touch, and performance controls for now."
+                ),
+            },
+        )
+    if body.session_preset == SessionPreset.fusion:
+        fusion_drum_style, _fusion_bass_style, fusion_chord_style, _fusion_lead_style = (
+            lane_styles_for_session_preset(SessionPreset.fusion)
+        )
+        unsupported_style = (
+            (
+                "drums",
+                body.drum_style.value,
+                fusion_drum_style,
+            )
+            if (
+                body.drum_style is not None
+                and body.drum_style.value != fusion_drum_style
+            )
+            else (
+                "keys",
+                body.chord_style.value,
+                fusion_chord_style,
+            )
+            if (
+                body.chord_style is not None
+                and body.chord_style.value != fusion_chord_style
+            )
+            else None
+        )
+        if unsupported_style is not None:
+            lane_name, requested, fixed = unsupported_style
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "fusion_lane_style_adapter_unavailable",
+                    "lane": lane_name,
+                    "requested_style": requested,
+                    "current_contract_style": fixed,
+                    "message": (
+                        f"Fusion {lane_name} style is currently owned by the "
+                        "shared DNA. Style adapters arrive in the next "
+                        "drums-and-keys phase."
+                    ),
+                },
+            )
 
     sid = str(uuid.uuid4())
     if body.session_preset is not None:
@@ -888,8 +1256,20 @@ def create_session(body: SessionCreate) -> SessionCreated:
     li_ins = body.lead_instrument.value if body.lead_instrument is not None else _DEFAULT_LEAD_INSTRUMENT
     lp_ins = body.lead_player.value if body.lead_player is not None else None
     bi_ins = body.bass_instrument.value if body.bass_instrument is not None else _DEFAULT_BASS_INSTRUMENT
-    bp_ins = body.bass_player.value if body.bass_player is not None else None
-    be_ins = body.bass_engine.value if body.bass_engine is not None else "baseline"
+    bp_ins = (
+        None
+        if preset_stored == "fusion"
+        else body.bass_player.value
+        if body.bass_player is not None
+        else None
+    )
+    be_ins = (
+        "phrase_v2"
+        if preset_stored == "fusion"
+        else body.bass_engine.value
+        if body.bass_engine is not None
+        else "baseline"
+    )
     dp_ins = body.drum_player.value if body.drum_player is not None else None
     cp_ins = body.chord_player.value if body.chord_player is not None else None
     ci_ins = body.chord_instrument.value if body.chord_instrument is not None else _DEFAULT_CHORD_INSTRUMENT
@@ -1172,10 +1552,120 @@ def duplicate_session(session_id: str) -> SessionState:
     return _to_state(dup, message="Session duplicated. You are now working on a variation.")
 
 
+def _mark_changed_fusion_renders_stale(
+    current: StoredSession,
+    staged: StoredSession,
+) -> tuple[LaneName, ...]:
+    """Mark only renders whose normalized musical inputs actually changed."""
+
+    if not _fusion_mode_enabled(staged):
+        return ()
+    affected: set[LaneName] = set()
+    if (
+        current.session_preset != staged.session_preset
+        or int(current.tempo) != int(staged.tempo)
+        or int(current.bar_count) != int(staged.bar_count)
+        or current.anchor_lane != staged.anchor_lane
+    ):
+        affected.update(_FUSION_CORE_LANES)
+    if (
+        current.key != staged.key
+        or current.scale != staged.scale
+        or list(current.chord_progression or [])
+        != list(staged.chord_progression or [])
+    ):
+        affected.update((LaneName.bass, LaneName.chords))
+    if any(
+        getattr(current, name) != getattr(staged, name)
+        for name in ("drum_style", "drum_player", "drum_kit")
+    ):
+        affected.add(LaneName.drums)
+    if any(
+        getattr(current, name) != getattr(staged, name)
+        for name in (
+            "bass_style",
+            "bass_instrument",
+            "bass_player",
+            "bass_engine",
+            "bass_lock_to_groove",
+            "bass_density_bias",
+        )
+    ):
+        affected.add(LaneName.bass)
+    if any(
+        getattr(current, name) != getattr(staged, name)
+        for name in ("chord_style", "chord_instrument", "chord_player")
+    ):
+        affected.add(LaneName.chords)
+    ordered = tuple(lane for lane in _FUSION_CORE_LANES if lane in affected)
+    _mark_fusion_core_lanes_stale(staged, ordered)
+    return ordered
+
+
+def _harmonic_progression_signature(
+    progression: list[str] | None,
+) -> tuple[tuple[int, str, tuple[int, ...]], ...]:
+    return tuple(
+        (
+            int(chord.root_pc),
+            str(chord.quality),
+            tuple(int(interval) for interval in chord.intervals),
+        )
+        for chord in (
+            mt.parse_chord_symbol(symbol)
+            for symbol in list(progression or [])
+        )
+    )
+
+
 @router.patch("/{session_id}", response_model=SessionState)
 def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     """Update session fields (no automatic lane regeneration)."""
     s = _get_session_or_404(session_id)
+    was_fusion = _fusion_mode_enabled(s)
+    target_fusion = (
+        body.session_preset == SessionPreset.fusion
+        if body.session_preset is not None
+        else was_fusion
+    )
+    if target_fusion:
+        fusion_drum_style, _fusion_bass_style, fusion_chord_style, _fusion_lead_style = (
+            lane_styles_for_session_preset(SessionPreset.fusion)
+        )
+        expected_drum_style = (
+            s.drum_style if was_fusion else fusion_drum_style
+        )
+        expected_chord_style = (
+            s.chord_style if was_fusion else fusion_chord_style
+        )
+        unsupported_style = (
+            ("drums", body.drum_style.value)
+            if (
+                body.drum_style is not None
+                and body.drum_style.value != expected_drum_style
+            )
+            else ("keys", body.chord_style.value)
+            if (
+                body.chord_style is not None
+                and body.chord_style.value != expected_chord_style
+            )
+            else None
+        )
+        if unsupported_style is not None:
+            lane_name, requested = unsupported_style
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "fusion_lane_style_adapter_unavailable",
+                    "lane": lane_name,
+                    "requested_style": requested,
+                    "message": (
+                        f"Fusion {lane_name} style is currently owned by the "
+                        "shared DNA. Style adapters arrive in the next "
+                        "drums-and-keys phase."
+                    ),
+                },
+            )
     staged = replace(s)
     if any(
         value is not None
@@ -1199,12 +1689,46 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
         staged.harmony_confirmation_required = False
         staged.harmony_key_confirmed_by_user = True
     if body.bar_count is not None:
-        staged.bar_count = int(body.bar_count)
+        new_bar_count = int(body.bar_count)
+        bar_count_changed = new_bar_count != int(staged.bar_count)
+        staged.bar_count = new_bar_count
         parts.append("Bar count updated")
+        if bar_count_changed and staged.fusion_contract_payload is not None:
+            # A contract owns one symbolic plan per bar. Keeping the old
+            # payload after a form-length edit would pair new session metadata
+            # with an incompatible plan and make persistence invalid. The
+            # musical seed/revision remain available; the next Generate writes
+            # the correctly sized contract and rebuilds its dependent lanes.
+            staged.fusion_contract_payload = None
+            parts.append("Fusion DNA cleared for the new form length")
     if body.session_preset is not None:
         staged.session_preset = body.session_preset.value
+        entering_fusion = body.session_preset.value == "fusion" and not was_fusion
+        leaving_fusion = body.session_preset.value != "fusion" and was_fusion
+        if (entering_fusion or leaving_fusion) and staged.fusion_contract_payload is not None:
+            # The core lanes can now be rebuilt under a different musical law.
+            # Detach on both sides of the boundary so legacy hidden payloads
+            # cannot spring back to life when Fusion is selected again.
+            staged.fusion_contract_payload = None
+            staged.current_bass_candidate_run_id = None
+            staged.current_bass_candidate_take_id = None
+            parts.append("Fusion DNA detached because the session preset changed")
+        if entering_fusion:
+            staged.current_bass_candidate_run_id = None
+            staged.current_bass_candidate_take_id = None
+            if staged.bass_player is not None:
+                staged.bass_player = None
+                parts.append(
+                    "Named Bass Player cleared until Fusion DNA adapters are available"
+                )
         ds, bs, cs, ls = lane_styles_for_session_preset(body.session_preset)
         staged.drum_style, staged.bass_style, staged.chord_style, staged.lead_style = ds, bs, cs, normalize_lead_style(ls)
+        if (
+            body.session_preset.value == "fusion"
+            and "bass_engine" not in body.model_fields_set
+            and staged.bass_engine == "baseline"
+        ):
+            staged.bass_engine = "phrase_v2"
         parts.append(
             f"Session preset updated to {body.session_preset.value}; lane styles set to preset defaults"
         )
@@ -1221,7 +1745,21 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
         staged.chord_style = body.chord_style.value
         parts.append("Chord style updated")
     if "chord_progression" in body.model_dump(exclude_unset=True):
-        staged.chord_progression = list(body.chord_progression) if body.chord_progression else None
+        requested_progression = (
+            list(body.chord_progression)
+            if body.chord_progression
+            else None
+        )
+        staged.chord_progression = (
+            list(s.chord_progression)
+            if (
+                s.chord_progression is not None
+                and requested_progression is not None
+                and _harmonic_progression_signature(s.chord_progression)
+                == _harmonic_progression_signature(requested_progression)
+            )
+            else requested_progression
+        )
         if staged.chord_progression:
             staged.harmony_map_confirmation_required = False
             staged.harmony_map_source = "confirmed_user"
@@ -1247,7 +1785,24 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
         staged.bass_instrument = body.bass_instrument.value
         parts.append("Bass instrument updated")
     if "bass_player" in body.model_dump(exclude_unset=True):
-        staged.bass_player = body.bass_player.value if body.bass_player is not None else None
+        requested_bass_player = (
+            body.bass_player.value
+            if body.bass_player is not None
+            else None
+        )
+        if _fusion_mode_enabled(staged) and requested_bass_player is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "fusion_named_bass_player_unsupported",
+                    "message": (
+                        "Named Bass Player profiles do not yet have honest "
+                        "contract-aware Fusion adapters. Use Bass style, "
+                        "instrument, touch, and performance controls for now."
+                    ),
+                },
+            )
+        staged.bass_player = requested_bass_player
         parts.append("Bass player updated")
     if body.bass_engine is not None:
         staged.bass_engine = body.bass_engine.value
@@ -1286,6 +1841,20 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if "anchor_lane" in body.model_dump(exclude_unset=True):
         staged.anchor_lane = body.anchor_lane.value if body.anchor_lane is not None else None
         parts.append("Anchor lane updated")
+    if _fusion_mode_enabled(staged) and staged.bass_engine != "phrase_v2":
+        staged.bass_engine = "phrase_v2"
+        parts.append("Bass engine kept on Phrase v2 for shared Fusion DNA")
+    if _fusion_mode_enabled(staged) and staged.bass_player is not None:
+        staged.bass_player = None
+        parts.append(
+            "Named Bass Player cleared until Fusion DNA adapters are available"
+        )
+    stale_lanes = _mark_changed_fusion_renders_stale(s, staged)
+    if stale_lanes:
+        parts.append(
+            "Fusion render marked stale for "
+            + ", ".join(lane.value for lane in stale_lanes)
+        )
     msg = ". ".join(parts) + ". Regenerate affected lane(s) to rebuild MIDI."
     s = _publish_staged_session(s, staged)
     return _to_state(s, message=msg)
@@ -1322,8 +1891,147 @@ def generate_session(session_id: str) -> GenerateResult:
     return GenerateResult(session=_to_state(s, message="All lanes generated."))
 
 
+@router.post("/{session_id}/fusion-dna/new", response_model=SessionState)
+def new_fusion_dna(
+    session_id: str,
+    body: NewFusionDnaBody = NewFusionDnaBody(),
+) -> SessionState:
+    """Write a genuinely new shared law and atomically rebuild the rhythm section."""
+
+    s = _get_session_or_404(session_id)
+    if body.include_lead and s.lead_locked:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_full_band_lead_locked",
+                "message": (
+                    "Apply Analysis + Generate must rebuild Lead in the same "
+                    "transaction. Unlock Lead first."
+                ),
+            },
+        )
+    staged = replace(s)
+    contract = _replace_fusion_dna_on_stored_session(staged)
+    regenerated_lanes = list(_FUSION_CORE_LANES)
+    if body.include_lead:
+        _regenerate_lane_on_stored_session(
+            staged,
+            LaneName.lead,
+            context=_context_for_lane_regeneration(
+                staged,
+                LaneName.lead,
+            ),
+        )
+        regenerated_lanes.append(LaneName.lead)
+    s = _commit_regenerated_lanes(
+        s,
+        staged,
+        regenerated_lanes,
+    )
+    return _to_state(
+        s,
+        message=(
+            f"NEW DNA {contract.covenant_id}: "
+            + (
+                "drums, bass, keys, and lead rebuilt together."
+                if body.include_lead
+                else (
+                    "drums, bass, and keys rebuilt together. "
+                    "Lead was left unchanged."
+                )
+            )
+        ),
+    )
+
+
+def _require_unlocked_fusion_core(s: StoredSession) -> None:
+    locked = [
+        lane.value
+        for lane in _FUSION_CORE_LANES
+        if _lane_locked(s, lane)
+    ]
+    if locked:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_core_locked",
+                "locked_lanes": locked,
+                "message": (
+                    "NEW DNA must keep drums, bass, and keys coherent. Unlock "
+                    + ", ".join(locked)
+                    + " before replacing the shared law."
+                ),
+            },
+        )
+
+
+def _replace_fusion_dna_on_stored_session(
+    s: StoredSession,
+) -> FusionGrooveContract:
+    """Replace Fusion DNA and all dependent core lanes on one staged object."""
+
+    if not _fusion_mode_enabled(s):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_preset_required",
+                "message": "Choose the Fusion session preset before starting new Fusion DNA.",
+            },
+        )
+    _require_unlocked_fusion_core(s)
+    _enforce_fusion_bass_engine(s)
+    _require_confirmed_harmony(s)
+    conditioning = _conditioning_for_generation(s, context=None)
+    try:
+        previous = _stored_fusion_contract(s)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("error") != "fusion_contract_invalid":
+            raise
+        # NEW DNA is also the repair path promised by the invalid-contract
+        # error. Drop only the unusable payload; seed/revision history remains.
+        previous = None
+        s.fusion_contract_payload = None
+    if previous is not None:
+        # The stored contract is the authoritative prior seed, including
+        # migration cases where redundant session metadata was incomplete.
+        s.fusion_dna_seed = int(previous.seed)
+    contract = _ensure_fusion_contract(
+        s,
+        conditioning=conditioning,
+        force_new=True,
+    )
+    if contract is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_contract_unavailable",
+                "message": "Could not build Fusion DNA for this session.",
+            },
+        )
+    if previous is not None and contract.covenant_id == previous.covenant_id:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "fusion_dna_not_new",
+                "message": "The new Fusion law did not differ from the previous law.",
+            },
+        )
+
+    for lane in _FUSION_CORE_LANES:
+        _regenerate_lane_on_stored_session(s, lane, context=None)
+    _mark_fusion_core_lanes_fresh(s, _FUSION_CORE_LANES)
+    return contract
+
+
 def _generate_all_lanes(s: StoredSession) -> None:
     """Fill all four lanes; anchor lane first without context, then others with anchor context when configured."""
+    if _fusion_mode_enabled(s):
+        s.bass_engine = "phrase_v2"
+        _ensure_fusion_contract(
+            s,
+            conditioning=_conditioning_for_generation(s, context=None),
+        )
     anchor_v = normalize_anchor_lane(s.anchor_lane)
     if anchor_v:
         anchor_lane = LaneName(anchor_v)
@@ -1345,9 +2053,28 @@ def _regenerate_lane_on_stored_session(
     context: object | None = None,
 ) -> None:
     """Regenerate one lane in-place using current stored session settings."""
+    _enforce_fusion_bass_engine(s)
     if lane != LaneName.drums:
         _require_confirmed_harmony(s)
     cond = _conditioning_for_generation(s, context=context)
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
+    if _fusion_mode_enabled(s) and fusion_contract is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_dna_required",
+                "message": (
+                    "Generate the Fusion rhythm section or start NEW DNA "
+                    "before regenerating one dependent lane."
+                ),
+            },
+        )
+    if fusion_contract is not None:
+        _reject_stale_fusion_source(s, fusion_contract, cond)
     if lane == LaneName.drums:
         d_bytes, d_prev = generator.generate_drums(
             tempo=s.tempo,
@@ -1357,11 +2084,16 @@ def _regenerate_lane_on_stored_session(
             drum_player=s.drum_player,
             session_preset=s.session_preset,
             context=context,
+            fusion_contract=fusion_contract,
         )
         s.drum_bytes = d_bytes
         s.drum_preview = d_prev
     elif lane == LaneName.bass:
-        base_seed = _new_bass_seed()
+        base_seed = (
+            int(fusion_contract.seed)
+            if fusion_contract is not None
+            else _new_bass_seed()
+        )
         performance_controls = _explicit_bass_performance_controls(s)
         strict_harmonic_guard = bool(
             s.bass_engine == "phrase_v2"
@@ -1395,6 +2127,7 @@ def _regenerate_lane_on_stored_session(
                 conditioning=cond,
                 seed=seed,
                 return_performance_notes=True,
+                fusion_contract=fusion_contract,
             )
             b_bytes = _normalize_bass_bytes_for_session(b_bytes, s)
             unsupported = count_unsupported_structural_notes(
@@ -1447,6 +2180,7 @@ def _regenerate_lane_on_stored_session(
             chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
+            fusion_contract=fusion_contract,
         )
         s.chords_bytes = c_bytes
         s.chords_preview = c_prev
@@ -1511,6 +2245,7 @@ def _rerender_current_bass_performance(
 ) -> None:
     """Rebuild expression directly from clean MIDI, freezing written notes."""
 
+    _enforce_fusion_bass_engine(s)
     if not s.bass_bytes:
         raise HTTPException(
             status_code=409,
@@ -1537,6 +2272,11 @@ def _rerender_current_bass_performance(
     bar_seconds = seconds_per_beat * 4.0
     sixteenth = seconds_per_beat / 4.0
     phrase_roles = ("anchor", "answer", "push", "release")
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
     source = "phrase_v2" if s.bass_engine == "phrase_v2" else "baseline"
     clean_notes: list[BassPerformanceNote] = []
     for instrument in clean_midi.instruments:
@@ -1549,13 +2289,31 @@ def _rerender_current_bass_performance(
             if slot_index >= 16:
                 bar_index += slot_index // 16
                 slot_index %= 16
+            contract_role = None
+            if fusion_contract is not None:
+                contract_event = next(
+                    (
+                        event
+                        for event in fusion_contract.bar(bar_index).bass_events
+                        if int(event.slot) == int(slot_index)
+                    ),
+                    None,
+                )
+                contract_role = (
+                    contract_event.role
+                    if contract_event is not None
+                    else None
+                )
             clean_notes.append(
                 BassPerformanceNote(
                     pitch=int(note.pitch),
                     start=float(note.start),
                     end=float(note.end),
                     velocity=int(note.velocity),
-                    role=phrase_roles[bar_index % len(phrase_roles)],
+                    role=(
+                        contract_role
+                        or phrase_roles[bar_index % len(phrase_roles)]
+                    ),
                     bar_index=bar_index,
                     slot_index=max(0, min(15, slot_index)),
                     source=source,
@@ -1605,11 +2363,17 @@ def _commit_regenerated_lanes(
     destination: StoredSession,
     staged: StoredSession,
     lanes: list[LaneName],
+    *,
+    fresh_lanes: Iterable[LaneName] | None = None,
 ) -> StoredSession:
     """Publish one coherent staged revision after all requested work succeeds."""
 
     if staged.id != destination.id:
         raise ValueError("Cannot commit a staged session under a different id")
+    _mark_fusion_core_lanes_fresh(
+        staged,
+        lanes if fresh_lanes is None else fresh_lanes,
+    )
     if (
         any(lane != LaneName.drums for lane in lanes)
         and staged.bridge_live_overlay_active
@@ -1704,6 +2468,10 @@ def regenerate_selected(session_id: str, body: RegenerateSelectedBody) -> Sessio
     done: set[LaneName] = set()
     preserved_bass_phrase = (
         body.preserve_bass_phrase and to_run == [LaneName.bass]
+        and not (
+            _fusion_mode_enabled(staged)
+            and staged.fusion_bass_render_stale
+        )
     )
     if preserved_bass_phrase:
         raw_context = _context_for_lane_regeneration(staged, LaneName.bass)
@@ -1844,6 +2612,7 @@ def _regenerate_bass_bars_on_stored_session(
 ) -> None:
     """Regenerate a bass range on the provided session object."""
 
+    _enforce_fusion_bass_engine(s)
     _require_confirmed_harmony(s)
     if body.bar_start < 0:
         raise HTTPException(
@@ -1874,6 +2643,35 @@ def _regenerate_bass_bars_on_stored_session(
     seed = int(body.seed) if body.seed is not None else _new_bass_seed()
     ctx = _context_for_lane_regeneration(s, LaneName.bass)
     cond = _conditioning_for_generation(s, context=ctx)
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
+    if _fusion_mode_enabled(s) and fusion_contract is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_dna_required",
+                "message": (
+                    "Generate the Fusion rhythm section or start NEW DNA "
+                    "before regenerating Bass bars inside its shared law."
+                ),
+            },
+        )
+    if fusion_contract is not None:
+        _reject_stale_fusion_source(s, fusion_contract, cond)
+    if fusion_contract is not None and body.operation == "turnaround":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_turnaround_not_permissioned",
+                "message": (
+                    "Fusion turnaround vocabulary is not contract-aware yet. "
+                    "Use a seeded selected-bar variation or start NEW DNA."
+                ),
+            },
+        )
     performance_controls = _explicit_bass_performance_controls(s)
     replacement_bytes, replacement_preview, replacement_performance_notes = generator.generate_bass(
         tempo=s.tempo,
@@ -1892,12 +2690,18 @@ def _regenerate_bass_bars_on_stored_session(
         mute_amount=performance_controls["mute"],
         slide_amount=performance_controls["slide"],
         legato_amount=performance_controls["legato"],
+        candidate_role=(
+            "rhythmic_alternative"
+            if fusion_contract is not None and body.operation == "variation"
+            else None
+        ),
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=ctx,
         conditioning=cond,
         seed=seed,
         return_performance_notes=True,
+        fusion_contract=fusion_contract,
     )
     replacement_bytes = _normalize_bass_bytes_for_session(replacement_bytes, s)
     replacement_performance = _render_bass_performance_bytes(
@@ -1977,7 +2781,12 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
     s = _get_session_or_404(session_id)
     staged = replace(s)
     _regenerate_bass_bars_on_stored_session(staged, body)
-    s = _commit_regenerated_lanes(s, staged, [LaneName.bass])
+    s = _commit_regenerated_lanes(
+        s,
+        staged,
+        [LaneName.bass],
+        fresh_lanes=(),
+    )
     return _to_state(
         s,
         message=f"Regenerated bass bars {body.bar_start}-{body.bar_end - 1}.",
@@ -1993,6 +2802,11 @@ def _render_bass_take_with_seed(
     candidate_role: str | None = None,
 ) -> tuple[bytes, bytes, str]:
     performance_controls = _explicit_bass_performance_controls(s)
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
     raw_bytes, preview, performance_notes = generator.generate_bass(
         tempo=s.tempo,
         bar_count=s.bar_count,
@@ -2017,6 +2831,7 @@ def _render_bass_take_with_seed(
         conditioning=conditioning,
         seed=int(seed),
         return_performance_notes=True,
+        fusion_contract=fusion_contract,
     )
     clean = _normalize_bass_bytes_for_session(raw_bytes, s)
     performance = _render_bass_performance_bytes(
@@ -2247,6 +3062,78 @@ def _require_current_candidate_context(
             "run_context_version": run_version,
             "current_context_version": _CANDIDATE_GENERATION_CONTEXT_VERSION,
         },
+    )
+
+
+def _require_fusion_candidate_role_policy(
+    s: StoredSession,
+    raw_run: dict[str, object],
+    raw_take: dict[str, object],
+) -> None:
+    if not _fusion_mode_enabled(s):
+        return
+    variation_mode = str(raw_run.get("variation_mode", "") or "")
+    candidate_role = str(raw_take.get("candidate_role", "") or "")
+    if variation_mode == "controlled_roles" and candidate_role in ROLE_ORDER:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "fusion_candidate_outside_contract_policy",
+            "message": (
+                "This take is not one of the four permissioned readings of "
+                "the current Fusion DNA. Generate a fresh four-role run."
+            ),
+        },
+    )
+
+
+def _require_current_fusion_core(
+    s: StoredSession,
+    *,
+    allow_stale_lanes: Iterable[LaneName] = (),
+) -> None:
+    """Fail closed when a consumer would target an inactive Fusion core."""
+
+    if not _fusion_mode_enabled(s):
+        return
+    contract = _stored_fusion_contract(s)
+    if contract is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_dna_required",
+                "message": (
+                    "Generate the Fusion rhythm section or start NEW DNA "
+                    "before using Bass candidates."
+                ),
+            },
+        )
+    allowed = set(allow_stale_lanes)
+    dirty = tuple(
+        lane
+        for lane in _fusion_dirty_core_lanes(s)
+        if lane not in allowed
+    )
+    if not _fusion_core_rendered(s) or dirty:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": (
+                    "fusion_core_stale"
+                    if dirty
+                    else "fusion_core_incomplete"
+                ),
+                "message": (
+                    "Regenerate the current drums, bass, and keys Fusion core "
+                    "before using the Fusion part."
+                ),
+            },
+        )
+    _reject_stale_fusion_source(
+        s,
+        contract,
+        _conditioning_for_generation(s, context=None),
     )
 
 
@@ -2743,6 +3630,73 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     """
     s = _get_session_or_404(session_id)
     _require_confirmed_harmony(s)
+    _require_current_fusion_core(s)
+    fusion_contract = (
+        _stored_fusion_contract(s)
+        if _fusion_mode_enabled(s)
+        else None
+    )
+    if _fusion_mode_enabled(s) and fusion_contract is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_dna_required",
+                "message": (
+                    "Generate the Fusion rhythm section or start NEW DNA "
+                    "before developing Bass candidates inside its shared law."
+                ),
+            },
+        )
+    if _fusion_mode_enabled(s) and (
+        not _fusion_core_rendered(s)
+        or _fusion_dirty_core_lanes(s)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": (
+                    "fusion_core_stale"
+                    if _fusion_dirty_core_lanes(s)
+                    else "fusion_core_incomplete"
+                ),
+                "message": (
+                    "Regenerate the current drums, bass, and keys Fusion core "
+                    "before developing Bass candidates."
+                ),
+            },
+        )
+    if fusion_contract is not None:
+        source_conditioning = _conditioning_for_generation(
+            s,
+            context=None,
+        )
+        _reject_stale_fusion_source(
+            s,
+            fusion_contract,
+            source_conditioning,
+        )
+    if _fusion_mode_enabled(s) and body.variation_mode != "controlled_roles":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_controlled_roles_required",
+                "message": (
+                    "Fusion comparisons use the four purposeful readings of "
+                    "the current DNA: pocket, rhythm, harmony, and performance."
+                ),
+            },
+        )
+    if _fusion_mode_enabled(s) and int(body.take_count) != len(ROLE_ORDER):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_four_roles_required",
+                "message": (
+                    "Fusion comparison is one complete four-role set: pocket, "
+                    "rhythm, harmony, and performance."
+                ),
+            },
+        )
     generation_context_fingerprint = _candidate_generation_context_fingerprint(s)
     generation_evidence = _candidate_generation_evidence_payload(s)
     generation_evidence_fingerprint = (
@@ -2844,7 +3798,10 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             context=ctx,
             seed=base_seed,
         )
-        if s.bass_articulation_focus == "natural"
+        if (
+            s.bass_articulation_focus == "natural"
+            and not _fusion_mode_enabled(s)
+        )
         else ()
     )
     for vocab in vocabulary_candidates:
@@ -3099,9 +4056,34 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
 
 @router.get("/{session_id}/bass-candidates", response_model=list[BassCandidateRun])
 def list_bass_candidates(session_id: str) -> list[BassCandidateRun]:
-    _ = _get_session_or_404(session_id)
+    s = _get_session_or_404(session_id)
     rows = _candidate_runs_for_session_or_503(session_id)
-    return [_public_candidate_run(r) for r in rows]
+    public_rows = [_public_candidate_run(row) for row in rows]
+    if _fusion_mode_enabled(s):
+        try:
+            _require_current_fusion_core(s)
+        except HTTPException:
+            return []
+        # Candidate history remains durably stored, but a new DNA revision
+        # makes the old readings musically inapplicable. Do not put those
+        # stale takes back into the actionable Fusion UI on refresh/reload.
+        current_fingerprint = _candidate_generation_context_fingerprint(s)
+        public_rows = [
+            row
+            for row in public_rows
+            if (
+                row.generation_context_version
+                == _CANDIDATE_GENERATION_CONTEXT_VERSION
+                and row.generation_context_fingerprint
+                == current_fingerprint
+                and row.variation_mode == "controlled_roles"
+                and all(
+                    take.candidate_role in ROLE_ORDER
+                    for take in row.takes
+                )
+            )
+        ]
+    return public_rows
 
 
 @router.get("/{session_id}/bass-candidates/{run_id}/{take_id}")
@@ -3111,13 +4093,16 @@ def download_bass_candidate_take(
     take_id: str,
     mode: Literal["clean", "performance"] = "clean",
 ):
-    _ = _get_session_or_404(session_id)
+    s = _get_session_or_404(session_id)
     run = _candidate_run_for_session_or_503(session_id, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_run_not_found", "run_id": run_id})
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
+    _require_current_fusion_core(s)
+    _require_fusion_candidate_role_policy(s, run, take)
+    _require_current_candidate_context(s, run)
     data, served_mode = _candidate_take_bytes_for_mode(take, mode)
     suffix = "_bass_performance.mid" if served_mode == "performance" else "_bass.mid"
     response = lane_midi_response(data, f"{session_id}_{run_id}_{take_id}{suffix}")
@@ -3134,13 +4119,16 @@ def get_bass_candidate_take_notes(
     response: Response,
     mode: Literal["clean", "performance"] = "clean",
 ) -> list[LaneNote]:
-    _ = _get_session_or_404(session_id)
+    s = _get_session_or_404(session_id)
     run = _candidate_run_for_session_or_503(session_id, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_run_not_found", "run_id": run_id})
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
+    _require_current_fusion_core(s)
+    _require_fusion_candidate_role_policy(s, run, take)
+    _require_current_candidate_context(s, run)
     data, served_mode = _candidate_take_bytes_for_mode(take, mode)
     response.headers["X-Bass-Candidate-Requested-Mode"] = mode
     response.headers["X-Bass-Candidate-Mode"] = served_mode
@@ -3156,6 +4144,8 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
+    _require_current_fusion_core(s)
+    _require_fusion_candidate_role_policy(s, run, take)
     _require_current_candidate_context(s, run)
     evidence_key, evidence_scale, evidence_source, evidence_groove = (
         _validated_candidate_generation_evidence(run)
@@ -3186,7 +4176,7 @@ def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> S
         bytes(performance_data),
         s,
     )
-    if s.bass_bytes:
+    if s.bass_bytes and not _fusion_mode_enabled(s):
         try:
             bass_history_store.capture(_durable_session_view(s))
         except bass_history_store.BassHistoryStoreError as exc:

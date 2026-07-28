@@ -64,7 +64,8 @@ def _decode_bytes(value: object) -> bytes | None:
 
 
 def _context_payload(session: object) -> dict[str, Any]:
-    return {
+    fusion_payload = getattr(session, "fusion_contract_payload", None)
+    payload = {
         "tempo": int(getattr(session, "tempo")),
         "key": str(getattr(session, "key")),
         "scale": str(getattr(session, "scale")),
@@ -75,6 +76,12 @@ def _context_payload(session: object) -> dict[str, Any]:
             session, "groove_reference_audio_path"
         ),
     }
+    if (
+        isinstance(fusion_payload, dict)
+        and fusion_payload.get("contract_id") is not None
+    ):
+        payload["fusion_contract_id"] = str(fusion_payload["contract_id"])
+    return payload
 
 
 def _stable_hash(payload: object) -> str:
@@ -447,6 +454,10 @@ def capture(session: object, *, kept: bool = False) -> dict[str, Any]:
 def _compatible_rows(session: object) -> list[dict[str, Any]]:
     session_id = str(getattr(session, "id"))
     context_id = context_fingerprint(session)
+    fusion_context = isinstance(
+        getattr(session, "fusion_contract_payload", None),
+        dict,
+    )
     document = _load_unlocked()
     return [
         row
@@ -454,6 +465,14 @@ def _compatible_rows(session: object) -> list[dict[str, Any]]:
         if isinstance(row, dict)
         and str(row.get("session_id", "")) == session_id
         and str(row.get("context_fingerprint", "")) == context_id
+        and (
+            not fusion_context
+            or (
+                isinstance(row.get("controls"), dict)
+                and str(row["controls"].get("bass_engine", ""))
+                == "phrase_v2"
+            )
+        )
     ]
 
 

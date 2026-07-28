@@ -103,14 +103,14 @@ def parse_command(text: str, *, bar_count: int) -> CommandPlan:
 
     for phrase in _BUSIER:
         if phrase in t:
-            plan.density_delta = +0.35
-            plan.applied.append("busier (density +0.35)")
+            plan.density_delta = +0.5
+            plan.applied.append("busier (one activity gear)")
             matched_any = True
             break
     for phrase in _SPARSER:
         if phrase in t:
-            plan.density_delta = -0.35
-            plan.applied.append("sparser (density -0.35)")
+            plan.density_delta = -0.5
+            plan.applied.append("sparser (one activity gear)")
             matched_any = True
             break
 

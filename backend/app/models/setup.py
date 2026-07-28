@@ -22,12 +22,14 @@ from app.models.session import (
     LeadStyle,
     SessionPatch,
     SessionPreset,
+    lane_styles_for_session_preset,
 )
 
 
-def _coerce_instrument_defaults(data: object) -> object:
+def _coerce_setup_defaults(data: object) -> object:
     if not isinstance(data, dict):
         return data
+    normalized = dict(data)
     defaults = {
         "lead_instrument": "flute",
         "bass_instrument": "finger_bass",
@@ -35,9 +37,20 @@ def _coerce_instrument_defaults(data: object) -> object:
         "drum_kit": "standard",
     }
     for k, v in defaults.items():
-        if data.get(k) is None:
-            data[k] = v
-    return data
+        if normalized.get(k) is None:
+            normalized[k] = v
+    if normalized.get("session_preset") in {
+        SessionPreset.fusion,
+        SessionPreset.fusion.value,
+    }:
+        drum_style, _bass_style, chord_style, _lead_style = (
+            lane_styles_for_session_preset(SessionPreset.fusion)
+        )
+        normalized["drum_style"] = drum_style
+        normalized["chord_style"] = chord_style
+        normalized["bass_engine"] = BassEngine.phrase_v2.value
+        normalized["bass_player"] = None
+    return normalized
 
 
 class BandSetup(BaseModel):
@@ -83,7 +96,7 @@ class BandSetup(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _instruments_before_band(cls, data: object) -> object:
-        return _coerce_instrument_defaults(data)
+        return _coerce_setup_defaults(data)
 
     @field_validator("name")
     @classmethod
@@ -110,7 +123,7 @@ class BandSetupCreate(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _instruments_before_create(cls, data: object) -> object:
-        return _coerce_instrument_defaults(data)
+        return _coerce_setup_defaults(data)
 
     name: str = Field(min_length=1, max_length=120)
     session_preset: SessionPreset | None = None

@@ -13,6 +13,11 @@ from app.services.anchor_lane_roles import (
     chord_role_for_anchor,
     merge_chord_profile,
 )
+from app.services.fusion_contract import (
+    FusionGrooveContract,
+    PPQ as FUSION_PPQ,
+    slot_time_seconds,
+)
 from app.services.session_context import SessionAnchorContext, density_for_bar, slot_pressure
 from app.utils import music_theory as mt
 
@@ -515,6 +520,7 @@ def generate_chords(
     session_preset: str | None = None,
     chord_player: str | None = None,
     context: SessionAnchorContext | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str]:
     style = normalize_chord_style(chord_style)
     ci = normalize_chord_instrument(chord_instrument)
@@ -554,7 +560,64 @@ def generate_chords(
                 gap_pull *= chord_role_knobs.gap_pull_mult
                 sync_push *= chord_role_knobs.sync_push_mult
 
-        if style == "simple":
+        if fusion_contract is not None:
+            # Fusion keys are a rhythm-section job, not a pad.  Keep the
+            # confirmed harmony, move above the bass, and answer only at the
+            # contract's permissioned slots.
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=4,
+                seventh=True,
+            )
+            if len(tones) >= 4:
+                pitches = [tones[1], tones[2], tones[3]]
+            elif len(tones) >= 3:
+                pitches = [tones[1], tones[2], tones[0] + 12]
+            else:
+                pitches = list(tones)
+            pitches = sorted({max(48, min(96, int(pitch))) for pitch in pitches})
+            plan = fusion_contract.bar(bar)
+            for event in plan.keys_events:
+                t0 = (
+                    bar_t0
+                    + slot_time_seconds(
+                        slot=event.slot,
+                        microtiming_ticks=plan.microtiming_ticks,
+                        seconds_per_beat=spb,
+                    )
+                    # Keys answer a fraction behind the shared drum/bass
+                    # grid; the delay is relational and stored in PPQ terms.
+                    + (9.0 * spb / FUSION_PPQ)
+                )
+                t1 = min(
+                    bar_end - 1e-4,
+                    t0 + max(0.2, float(event.duration_slots)) * sixteenth,
+                )
+                if t1 <= t0:
+                    continue
+                base_velocity = round(
+                    48
+                    + 31 * float(event.accent)
+                    + 8 * float(plan.energy)
+                )
+                for note_index, pitch in enumerate(pitches):
+                    velocity = max(
+                        36,
+                        min(104, base_velocity - note_index * 3),
+                    )
+                    inst.notes.append(
+                        pretty_midi.Note(
+                            velocity=velocity,
+                            pitch=pitch,
+                            start=t0,
+                            end=t1,
+                        )
+                    )
+
+        elif style == "simple":
             seventh = (
                 explicit_chord is not None
                 or _seventh_simple(traits, bar, salt, deg)
@@ -964,4 +1027,10 @@ def generate_chords(
     mid = f"{pb} {_preview_blurb(style)}".strip() if pb else _preview_blurb(style)
     role_tag = f" Role vs anchor: {chord_role_name}." if chord_role_name else ""
     preview = f"{head} — {mid} {inst_note}{chart_tag}{soul_tag}{role_tag}"
+    if fusion_contract is not None:
+        preview += (
+            f" Shared Fusion DNA: {fusion_contract.covenant_id} "
+            f"({fusion_contract.contract_id}); sparse upper-register answers "
+            "inside protected rhythm-section space."
+        )
     return buf.getvalue(), preview

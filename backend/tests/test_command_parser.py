@@ -106,7 +106,7 @@ def test_command_endpoint_applies_and_regenerates(client: TestClient) -> None:
     assert out["ok"] is True
     assert out["part"]["bass_player"] == "james_jamerson"
     s = session_routes._SESSIONS[sid]
-    assert s.bass_density_bias == pytest.approx(0.35)
+    assert s.bass_density_bias == pytest.approx(0.5)
     assert s.bass_engine == "baseline"  # persona routing applies here too
 
 
@@ -142,5 +142,5 @@ def test_command_endpoint_only_mutates_bound_session(client: TestClient) -> None
 
     assert res.status_code == 200, res.text
     assert res.json()["part"]["session_id"] == first
-    assert session_routes._SESSIONS[first].bass_density_bias == pytest.approx(0.35)
+    assert session_routes._SESSIONS[first].bass_density_bias == pytest.approx(0.5)
     assert session_routes._SESSIONS[second].bass_density_bias == pytest.approx(0.0)

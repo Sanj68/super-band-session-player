@@ -134,6 +134,25 @@ def count_unsupported_structural_notes(
             continue
 
         beat_position = float(note.start) / spb
+        next_bar_harmonic = conditioning.harmonic_bar(
+            (bar + 1) % conditioning.bar_count
+        )
+        next_bar_target = (
+            {
+                int(pc) % 12
+                for pc in next_bar_harmonic.target_pcs
+            }
+            if next_bar_harmonic is not None
+            else set()
+        )
+        # A late 4&/last-eighth attack may state the next chord early and
+        # sustain across the bar line. This is a structural anticipation, not
+        # an unsupported chromatic note.
+        if (
+            (beat_position % 4.0) >= 3.45
+            and pitch_pc in next_bar_target
+        ):
+            continue
         sixteenth_slot = int(round((beat_position % 1.0) * 4.0)) % 4
         next_note = ordered[index + 1] if index + 1 < len(ordered) else ordered[0]
         next_note_start = (

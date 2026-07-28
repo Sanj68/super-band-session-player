@@ -111,7 +111,19 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const activeNodesRef = useRef([]);
   const sequenceIdRef = useRef(0);
   const sequenceTimersRef = useRef(new Set());
-  const prevSessionIdRef = useRef(null);
+  const isFusionSession = session?.session_preset === "fusion";
+  const supportsControlledRoles =
+    session?.bass_engine === "phrase_v2" && !session?.bass_player;
+  const fusionCandidatesNeedNeutralPlayer =
+    isFusionSession && !supportsControlledRoles;
+  const candidateContextKey = [
+    session?.id ?? "",
+    session?.fusion_contract_id ?? "",
+    session?.fusion_dna_revision ?? 0,
+  ].join("::");
+  const activeCandidateContextKeyRef = useRef(candidateContextKey);
+  const prevCandidateContextKeyRef = useRef(null);
+  activeCandidateContextKeyRef.current = candidateContextKey;
 
   useEffect(() => {
     if (!session?.id) return;
@@ -119,11 +131,24 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   }, [session?.id]);
 
   useEffect(() => {
-    const supportsControlledRoles = session?.bass_engine === "phrase_v2" && !session?.bass_player;
+    if (isFusionSession) {
+      if (candidateVariationMode !== "controlled_roles") {
+        setCandidateVariationMode("controlled_roles");
+      }
+      if (candidateTakeCount !== 4) {
+        setCandidateTakeCount(4);
+      }
+      return;
+    }
     if (!supportsControlledRoles && candidateVariationMode === "controlled_roles") {
       setCandidateVariationMode("ranked");
     }
-  }, [session?.bass_engine, session?.bass_player, candidateVariationMode]);
+  }, [
+    isFusionSession,
+    supportsControlledRoles,
+    candidateVariationMode,
+    candidateTakeCount,
+  ]);
 
   const refreshMidiAudition = useCallback(async () => {
     try {
@@ -151,7 +176,9 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
 
   const refreshBassCandidates = useCallback(async () => {
     if (!session?.id) return;
+    const requestedContextKey = activeCandidateContextKeyRef.current;
     const rows = await listBassCandidates(session.id);
+    if (activeCandidateContextKeyRef.current !== requestedContextKey) return;
     setBassCandidateRuns(Array.isArray(rows) ? rows : []);
   }, [session?.id]);
 
@@ -237,15 +264,24 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   }, []);
 
   useEffect(() => {
-    if (
-      prevSessionIdRef.current &&
-      session?.id &&
-      prevSessionIdRef.current !== session.id
-    ) {
+    const previousContextKey = prevCandidateContextKeyRef.current;
+    if (previousContextKey && previousContextKey !== candidateContextKey) {
       stopPlayback();
+      stopMidiAudition().catch(() => {});
+      setBassCandidateRuns([]);
+      setOpenTakeRolls({});
+      setTakeNotesByKey({});
+      setLoadingTakeNotes({});
+      setPlayingTakeKey("");
+      setTakeAKey("");
+      setTakeBKey("");
+      setAbAuditioning(false);
+      setDownloadingTakeKey("");
+      setAuditionState({ playing: false });
+      setAuditionMessage("");
     }
-    prevSessionIdRef.current = session?.id ?? null;
-  }, [session?.id, stopPlayback]);
+    prevCandidateContextKeyRef.current = candidateContextKey || null;
+  }, [candidateContextKey, stopPlayback]);
 
   useEffect(() => {
     return () => {
@@ -259,6 +295,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const loadTakeNotes = useCallback(
     async (runId, takeId) => {
       if (!session?.id) return;
+      const requestedContextKey = activeCandidateContextKeyRef.current;
       const key = candidateNoteCacheKey(runId, takeId, auditionMode);
       if (takeNotesByKey[key]) return takeNotesByKey[key];
       if (loadingTakeNotes[key]) return null;
@@ -271,13 +308,21 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
           auditionMode,
         );
         const nextNotes = Array.isArray(notes) ? notes : [];
+        if (activeCandidateContextKeyRef.current !== requestedContextKey) {
+          return null;
+        }
         setTakeNotesByKey((prev) => ({ ...prev, [key]: nextNotes }));
         return nextNotes;
       } catch (e) {
+        if (activeCandidateContextKeyRef.current !== requestedContextKey) {
+          return null;
+        }
         setError(e.message || String(e));
         return null;
       } finally {
-        setLoadingTakeNotes((prev) => ({ ...prev, [key]: false }));
+        if (activeCandidateContextKeyRef.current === requestedContextKey) {
+          setLoadingTakeNotes((prev) => ({ ...prev, [key]: false }));
+        }
       }
     },
     [session?.id, auditionMode, takeNotesByKey, loadingTakeNotes, setError],
@@ -685,10 +730,12 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     setError(null);
     try {
       const created = await generateBassCandidates(session.id, {
-        take_count: Math.max(2, Math.min(12, Number(candidateTakeCount) || 4)),
+        take_count: isFusionSession
+          ? 4
+          : Math.max(2, Math.min(12, Number(candidateTakeCount) || 4)),
         seed: candidateSeed.trim() ? Number(candidateSeed.trim()) : null,
         clip_id: candidateClipId.trim() || null,
-        variation_mode: candidateVariationMode,
+        variation_mode: isFusionSession ? "controlled_roles" : candidateVariationMode,
       });
       await refreshBassCandidates();
       setStatus(`Generated ${created.take_count} bass candidates (${created.run_id}).`);
@@ -703,6 +750,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     candidateSeed,
     candidateClipId,
     candidateVariationMode,
+    isFusionSession,
     refreshBassCandidates,
     setBusy,
     setError,
@@ -817,8 +865,15 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       <div style={{ marginTop: 10, display: "grid", gap: "0.6rem", maxWidth: 900 }}>
         <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>{getSourceAwareBassStatusLine(session)}</p>
         <p style={{ margin: 0, fontSize: 12, color: "#475569" }}>
-          Purposeful roles keep the confirmed harmony and groove lock fixed, then change one musical dimension per take.
+          {isFusionSession
+            ? "Fusion compares four purposeful roles inside the current shared DNA; ranked phrases would escape that law."
+            : "Purposeful roles keep the confirmed harmony and groove lock fixed, then change one musical dimension per take."}
         </p>
+        {fusionCandidatesNeedNeutralPlayer ? (
+          <p style={{ margin: 0, fontSize: 12, color: "#92400e" }}>
+            Turn off the named Bass Player profile to compare the four purposeful DNA roles.
+          </p>
+        ) : null}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
           <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
             Comparison
@@ -832,11 +887,13 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
             >
               <option
                 value="controlled_roles"
-                disabled={session?.bass_engine !== "phrase_v2" || !!session?.bass_player}
+                disabled={!isFusionSession && !supportsControlledRoles}
               >
                 Four purposeful roles
               </option>
-              <option value="ranked">Ranked variations</option>
+              <option value="ranked" disabled={isFusionSession}>
+                Ranked variations
+              </option>
             </select>
           </label>
           <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
@@ -860,7 +917,11 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
           </label>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button type="button" onClick={onGenerateBassCandidates} disabled={busy || !session?.id}>
+          <button
+            type="button"
+            onClick={onGenerateBassCandidates}
+            disabled={busy || !session?.id || fusionCandidatesNeedNeutralPlayer}
+          >
             Generate Bass Candidates
           </button>
           <button type="button" onClick={refreshBassCandidates} disabled={busy || !session?.id}>

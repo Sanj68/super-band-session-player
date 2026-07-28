@@ -222,7 +222,13 @@ export default function BassPreferencesPanel({
   )
     ? Math.max(0, Number(session.groove_source_frame_count))
     : null;
-  const newBeatStatus = grooveSourceReadinessAvailable
+  const fusionDnaMode = session?.session_preset === "fusion";
+  const dnaLabel = session?.fusion_covenant_id
+    ? `${session.fusion_covenant_id.replaceAll("_", " ")} · rev ${session.fusion_dna_revision ?? 0}`
+    : "not written";
+  const newBeatStatus = fusionDnaMode
+    ? `${session?.fusion_contract_notice ?? "Start NEW DNA to write the shared law."} DNA: ${dnaLabel}.`
+    : grooveSourceReadinessAvailable
     ? grooveSourceReady
       ? `Captured beat source ready${
           grooveSourceFrameCount === null
@@ -477,8 +483,9 @@ export default function BassPreferencesPanel({
               : `Next idea: ${styleLabel} · ${touchOption.label} · ${activityLabel(activity)} · ${characterLabel(character)}`}
           </span>
           <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
-            Generate can keep the phrase when only touch or performance changes. NEW BEAT
-            always replaces its note pattern.
+            {fusionDnaMode
+              ? "Generate develops/reperforms Bass inside the current law. NEW DNA replaces the drums, bass, and keys relationship together."
+              : "Generate can keep the phrase when only touch or performance changes. NEW BEAT always replaces its note pattern."}
           </span>
           <span
             role="status"
@@ -515,9 +522,13 @@ export default function BassPreferencesPanel({
             className="btn-ghost"
             onClick={onResetForNewBeat}
             disabled={busy || !session?.id}
-            title="Persist these preferences and discard the current bass phrase before regenerating"
+            title={
+              fusionDnaMode
+                ? "Discard the current rhythm-section law and rebuild drums, bass, and keys atomically"
+                : "Persist these preferences and discard the current bass phrase before regenerating"
+            }
           >
-            NEW BEAT / RESET
+            {fusionDnaMode ? "NEW DNA — DRUMS + BASS + KEYS" : "NEW BEAT / RESET"}
           </button>
         </div>
       </div>

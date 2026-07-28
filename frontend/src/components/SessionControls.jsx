@@ -190,6 +190,10 @@ export default function SessionControls({
       setChordStyle(d.chord);
       setLeadStyle(d.lead);
     }
+    if (value === "fusion") {
+      setBassEngine("phrase_v2");
+      setBassPlayer("");
+    }
   };
 
   return (
@@ -307,7 +311,11 @@ export default function SessionControls({
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
           Bass engine
-          <select value={bassEngine} onChange={(e) => setBassEngine(e.target.value)}>
+          <select
+            value={bassEngine}
+            onChange={(e) => setBassEngine(e.target.value)}
+            disabled={sessionPreset === "fusion"}
+          >
             {BASS_ENGINES.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
@@ -326,8 +334,14 @@ export default function SessionControls({
           </select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
-          Bass player
-          <select value={bassPlayer} onChange={(e) => setBassPlayer(e.target.value)}>
+          {sessionPreset === "fusion"
+            ? "Bass player (contract adapters later)"
+            : "Bass player"}
+          <select
+            value={bassPlayer}
+            onChange={(e) => setBassPlayer(e.target.value)}
+            disabled={sessionPreset === "fusion"}
+          >
             {BASS_PLAYERS.map((s) => (
               <option key={s.value || "none"} value={s.value}>
                 {s.label}
@@ -336,8 +350,17 @@ export default function SessionControls({
           </select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
-          Chord style
-          <select value={chordStyle} onChange={(e) => setChordStyle(e.target.value)}>
+          {sessionPreset === "fusion" ? "Keys rhythm (set by Fusion DNA)" : "Chord style"}
+          <select
+            value={chordStyle}
+            onChange={(e) => setChordStyle(e.target.value)}
+            disabled={sessionPreset === "fusion"}
+            title={
+              sessionPreset === "fusion"
+                ? "Contract-aware keys style adapters arrive in the next phase."
+                : undefined
+            }
+          >
             {CHORD_STYLES.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
@@ -375,8 +398,17 @@ export default function SessionControls({
           </select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
-          Drum style
-          <select value={drumStyle} onChange={(e) => setDrumStyle(e.target.value)}>
+          {sessionPreset === "fusion" ? "Drum rhythm (set by Fusion DNA)" : "Drum style"}
+          <select
+            value={drumStyle}
+            onChange={(e) => setDrumStyle(e.target.value)}
+            disabled={sessionPreset === "fusion"}
+            title={
+              sessionPreset === "fusion"
+                ? "Contract-aware drum style adapters arrive in the next phase."
+                : undefined
+            }
+          >
             {DRUM_STYLES.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}

@@ -14,6 +14,7 @@ from uuid import uuid4
 from pydantic import BaseModel, TypeAdapter
 
 from app.models.session import SourceAnalysis
+from app.services.fusion_contract import FusionGrooveContract
 from app.utils import music_theory as mt
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -121,6 +122,15 @@ def _payload_to_session(payload: object, session_type: type[SessionT]) -> Sessio
 
     allowed = {item.name for item in fields(session_type)}
     values = {key: value for key, value in payload.items() if key in allowed}
+    fusion_render_provenance_fields = {
+        "fusion_drums_render_stale",
+        "fusion_bass_render_stale",
+        "fusion_chords_render_stale",
+    }
+    legacy_fusion_render_provenance = bool(
+        payload.get("fusion_contract_payload") is not None
+        and not fusion_render_provenance_fields.issubset(payload)
+    )
     for field_name in _MIDI_FIELDS:
         if field_name in values:
             values[field_name] = _decode_bytes(values[field_name])
@@ -200,6 +210,64 @@ def _payload_to_session(payload: object, session_type: type[SessionT]) -> Sessio
                 raise ValueError(
                     f"Invalid persisted bass_performance_controls.{key}"
                 )
+    fusion_seed = getattr(session, "fusion_dna_seed", None)
+    if fusion_seed is not None and (
+        isinstance(fusion_seed, bool)
+        or not isinstance(fusion_seed, int)
+        or fusion_seed < 0
+    ):
+        raise ValueError("Invalid persisted fusion_dna_seed")
+    fusion_revision = getattr(session, "fusion_dna_revision", 0)
+    if (
+        isinstance(fusion_revision, bool)
+        or not isinstance(fusion_revision, int)
+        or fusion_revision < 0
+    ):
+        raise ValueError("Invalid persisted fusion_dna_revision")
+    fusion_payload = getattr(session, "fusion_contract_payload", None)
+    if fusion_payload is not None:
+        if not isinstance(fusion_payload, dict):
+            raise ValueError("Invalid persisted fusion_contract_payload")
+        fusion_contract = FusionGrooveContract.from_payload(fusion_payload)
+        if fusion_contract.bar_count != int(bar_count):
+            raise ValueError("Persisted Fusion contract does not match bar_count")
+        if fusion_seed is None:
+            raise ValueError("Persisted Fusion contract requires a DNA seed")
+        if fusion_contract.seed != fusion_seed:
+            raise ValueError("Persisted Fusion contract does not match DNA seed")
+        if fusion_revision < 1:
+            raise ValueError("Persisted Fusion contract requires a positive revision")
+        if (
+            str(getattr(session, "session_preset", "") or "").strip().lower()
+            != "fusion"
+            or str(getattr(session, "bass_engine", "") or "").strip().lower()
+            != "phrase_v2"
+        ):
+            # Migrate pre-invariant snapshots safely: retain the musical seed
+            # and revision, but detach a contract whose lanes may have been
+            # overwritten under another preset/engine.
+            setattr(session, "fusion_contract_payload", None)
+    if (
+        str(getattr(session, "session_preset", "") or "").strip().lower()
+        == "fusion"
+    ):
+        # Normalize pre-invariant Fusion sessions even when they do not have
+        # a contract yet; the UI intentionally cannot select baseline here.
+        setattr(session, "bass_engine", "phrase_v2")
+        if getattr(session, "bass_player", None) is not None:
+            # Contract-aware named-player adapters are not implemented yet.
+            # Clearing stale metadata is safer than claiming an inaudible persona.
+            setattr(session, "bass_player", None)
+        if (
+            getattr(session, "fusion_contract_payload", None) is not None
+            and legacy_fusion_render_provenance
+        ):
+            # Old snapshots cannot prove that their three MIDI lanes were
+            # rendered after the current settings. Keep the recoverable MIDI,
+            # but require a coherent regeneration before calling it active.
+            setattr(session, "fusion_drums_render_stale", True)
+            setattr(session, "fusion_bass_render_stale", True)
+            setattr(session, "fusion_chords_render_stale", True)
     return session
 
 
@@ -293,7 +361,7 @@ def load_sessions(session_type: type[SessionT]) -> dict[str, SessionT]:
             try:
                 session = _payload_to_session(row, session_type)
                 session_id = str(getattr(session, "id")).strip()
-            except (TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 raise SessionStoreError(
                     f"Invalid session at index {index}: {exc}"
                 ) from exc

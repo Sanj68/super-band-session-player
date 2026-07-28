@@ -12,6 +12,10 @@ from app.main import app
 from app import main as main_module
 from app.routes import session_routes
 from app.services import session_mutation_gate, session_store
+from app.services.fusion_contract import (
+    FusionGrooveContract,
+    build_fusion_contract,
+)
 from app.services.source_analysis import build_source_analysis
 
 
@@ -71,6 +75,94 @@ def test_full_session_round_trip_preserves_order_midi_and_analysis(
         == first.groove_reference_analysis_override
     )
     assert restored["session-a"].current_bass_candidate_take_id == "take-2"
+
+
+def test_fusion_contract_round_trip_and_legacy_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=73, bar_count=8)
+    fusion = session_routes.StoredSession(
+        id="fusion-session",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        session_preset="fusion",
+        bass_style="fusion",
+        bass_engine="phrase_v2",
+        fusion_dna_seed=contract.seed,
+        fusion_dna_revision=2,
+        fusion_contract_payload=contract.to_payload(),
+    )
+    legacy = session_routes.StoredSession(
+        id="legacy-session",
+        tempo=100,
+        key="C",
+        scale="major",
+        bar_count=4,
+    )
+
+    session_store.save_sessions({fusion.id: fusion, legacy.id: legacy})
+    restored = session_store.load_sessions(session_routes.StoredSession)
+
+    restored_contract = FusionGrooveContract.from_payload(
+        restored[fusion.id].fusion_contract_payload or {}
+    )
+    assert restored_contract == contract
+    assert restored[fusion.id].fusion_dna_seed == 73
+    assert restored[fusion.id].fusion_dna_revision == 2
+    assert restored[legacy.id].fusion_contract_payload is None
+    assert restored[legacy.id].fusion_dna_revision == 0
+
+
+def test_fusion_render_freshness_round_trips_and_legacy_payload_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=79, bar_count=8)
+    stored = session_routes.StoredSession(
+        id="fusion-render-freshness",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        session_preset="fusion",
+        bass_engine="phrase_v2",
+        fusion_dna_seed=contract.seed,
+        fusion_dna_revision=1,
+        fusion_contract_payload=contract.to_payload(),
+        fusion_bass_render_stale=True,
+    )
+    session_store.save_sessions({stored.id: stored})
+    restored = session_store.load_sessions(session_routes.StoredSession)
+    assert restored[stored.id].fusion_drums_render_stale is False
+    assert restored[stored.id].fusion_bass_render_stale is True
+    assert restored[stored.id].fusion_chords_render_stale is False
+
+    payload = session_store._session_to_payload(stored)  # type: ignore[attr-defined]
+    for field_name in (
+        "fusion_drums_render_stale",
+        "fusion_bass_render_stale",
+        "fusion_chords_render_stale",
+    ):
+        del payload[field_name]
+    session_store._SESSIONS_FILE.write_text(  # type: ignore[attr-defined]
+        json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_revision": 2,
+                "sessions": [payload],
+            }
+        ),
+        encoding="utf-8",
+    )
+    migrated = session_store.load_sessions(session_routes.StoredSession)
+    assert migrated[stored.id].fusion_drums_render_stale is True
+    assert migrated[stored.id].fusion_bass_render_stale is True
+    assert migrated[stored.id].fusion_chords_render_stale is True
 
 
 def test_live_bridge_overlay_is_not_serialized_until_committed(
@@ -300,6 +392,177 @@ def test_invalid_persisted_session_primitives_fail_closed(
 
     with pytest.raises(session_store.SessionStoreError):
         session_store.load_sessions(session_routes.StoredSession)
+
+
+def test_malformed_nested_fusion_contract_fails_as_session_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=73, bar_count=8)
+    stored = session_routes.StoredSession(
+        id="bad-fusion-contract",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        fusion_dna_seed=contract.seed,
+        fusion_dna_revision=1,
+        fusion_contract_payload=contract.to_payload(),
+    )
+    payload = session_store._session_to_payload(stored)  # type: ignore[attr-defined]
+    contract_payload = payload["fusion_contract_payload"]
+    assert isinstance(contract_payload, dict)
+    bars = contract_payload["bars"]
+    assert isinstance(bars, (list, tuple))
+    assert isinstance(bars[0], dict)
+    del bars[0]["kick_slots"]
+    session_store._SESSIONS_FILE.write_text(  # type: ignore[attr-defined]
+        json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_revision": 1,
+                "sessions": [payload],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(session_store.SessionStoreError):
+        session_store.load_sessions(session_routes.StoredSession)
+
+
+def test_invalid_fusion_source_mode_fails_as_session_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=74, bar_count=8)
+    stored = session_routes.StoredSession(
+        id="bad-fusion-source-mode",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        fusion_dna_seed=contract.seed,
+        fusion_dna_revision=1,
+        fusion_contract_payload=contract.to_payload(),
+    )
+    payload = session_store._session_to_payload(stored)  # type: ignore[attr-defined]
+    contract_payload = payload["fusion_contract_payload"]
+    assert isinstance(contract_payload, dict)
+    contract_payload["source_mode"] = "unknown"
+    session_store._SESSIONS_FILE.write_text(  # type: ignore[attr-defined]
+        json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_revision": 1,
+                "sessions": [payload],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        session_store.SessionStoreError,
+        match="source_mode must be either",
+    ):
+        session_store.load_sessions(session_routes.StoredSession)
+
+
+@pytest.mark.parametrize(
+    ("seed", "revision", "message"),
+    [
+        (None, 1, "requires a DNA seed"),
+        (75, 0, "requires a positive revision"),
+    ],
+)
+def test_fusion_payload_requires_seed_and_positive_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: int | None,
+    revision: int,
+    message: str,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=75, bar_count=8)
+    stored = session_routes.StoredSession(
+        id="bad-fusion-lifecycle",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        session_preset="fusion",
+        bass_engine="phrase_v2",
+        fusion_dna_seed=seed,
+        fusion_dna_revision=revision,
+        fusion_contract_payload=contract.to_payload(),
+    )
+    payload = session_store._session_to_payload(stored)  # type: ignore[attr-defined]
+    session_store._SESSIONS_FILE.write_text(  # type: ignore[attr-defined]
+        json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_revision": 1,
+                "sessions": [payload],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(session_store.SessionStoreError, match=message):
+        session_store.load_sessions(session_routes.StoredSession)
+
+
+def test_hidden_contract_is_detached_when_loading_non_fusion_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    contract = build_fusion_contract(seed=76, bar_count=8)
+    stored = session_routes.StoredSession(
+        id="hidden-fusion-contract",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        session_preset="soulful_funk",
+        bass_engine="phrase_v2",
+        fusion_dna_seed=contract.seed,
+        fusion_dna_revision=2,
+        fusion_contract_payload=contract.to_payload(),
+    )
+    session_store.save_sessions({stored.id: stored})
+
+    restored = session_store.load_sessions(session_routes.StoredSession)
+
+    assert restored[stored.id].fusion_contract_payload is None
+    assert restored[stored.id].fusion_dna_seed == contract.seed
+    assert restored[stored.id].fusion_dna_revision == 2
+
+
+def test_legacy_fusion_without_contract_loads_on_honest_engine_and_no_player(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store_at(tmp_path, monkeypatch)
+    stored = session_routes.StoredSession(
+        id="legacy-fusion-no-contract",
+        tempo=116,
+        key="D",
+        scale="natural_minor",
+        bar_count=8,
+        session_preset="fusion",
+        bass_engine="baseline",
+        bass_player="bootsy",
+    )
+    session_store.save_sessions({stored.id: stored})
+
+    restored = session_store.load_sessions(session_routes.StoredSession)
+
+    assert restored[stored.id].bass_engine == "phrase_v2"
+    assert restored[stored.id].bass_player is None
+    assert restored[stored.id].fusion_contract_payload is None
 
 
 def test_nonfinite_snapshot_input_and_output_fail_without_overwrite(

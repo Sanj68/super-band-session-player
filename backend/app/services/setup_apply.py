@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.setup import BandSetup
-from app.models.session import SessionPatch
+from app.models.session import (
+    BassEngine,
+    SessionPatch,
+    SessionPreset,
+    lane_styles_for_session_preset,
+)
 
 
 def band_setup_to_session_patch_payload(setup: BandSetup) -> dict[str, Any]:
@@ -17,10 +22,24 @@ def band_setup_to_session_patch_payload(setup: BandSetup) -> dict[str, Any]:
     in session_routes). When there is no preset, ``session_preset`` is omitted so an
     existing session preset is not cleared implicitly.
     """
+    bass_engine = (
+        BassEngine.phrase_v2
+        if setup.session_preset == SessionPreset.fusion
+        else setup.bass_engine
+    )
+    fusion_styles = (
+        lane_styles_for_session_preset(SessionPreset.fusion)
+        if setup.session_preset == SessionPreset.fusion
+        else None
+    )
     out: dict[str, Any] = {
-        "drum_style": setup.drum_style.value,
+        "drum_style": (
+            fusion_styles[0]
+            if fusion_styles is not None
+            else setup.drum_style.value
+        ),
         "bass_style": setup.bass_style.value,
-        "bass_engine": setup.bass_engine.value,
+        "bass_engine": bass_engine.value,
         "bass_articulation_focus": setup.bass_articulation_focus.value,
         "bass_expression": setup.bass_expression,
         "bass_performance_controls": (
@@ -29,7 +48,11 @@ def band_setup_to_session_patch_payload(setup: BandSetup) -> dict[str, Any]:
             else None
         ),
         "bass_density_bias": setup.bass_density_bias,
-        "chord_style": setup.chord_style.value,
+        "chord_style": (
+            fusion_styles[2]
+            if fusion_styles is not None
+            else setup.chord_style.value
+        ),
         "lead_style": setup.lead_style.value,
         "drum_kit": setup.drum_kit.value,
         "bass_instrument": setup.bass_instrument.value,
@@ -38,7 +61,9 @@ def band_setup_to_session_patch_payload(setup: BandSetup) -> dict[str, Any]:
     }
     if setup.session_preset is not None:
         out["session_preset"] = setup.session_preset.value
-    if setup.bass_player is not None:
+    if setup.session_preset == SessionPreset.fusion:
+        out["bass_player"] = None
+    elif setup.bass_player is not None:
         out["bass_player"] = setup.bass_player.value
     if setup.drum_player is not None:
         out["drum_player"] = setup.drum_player.value

@@ -18,6 +18,7 @@ import {
   getClipEvaluation,
   listMidiOutputs,
   listSetups,
+  newFusionDna,
   patchLaneLocks,
   patchSession,
   regenerateLane,
@@ -367,7 +368,10 @@ export default function App() {
         bar_count: bars,
         lead_style: leadStyle,
         bass_style: bassStyle,
-        bass_engine: bassEngine,
+        bass_engine:
+          newSessionPreset === "fusion"
+            ? "phrase_v2"
+            : bassEngine,
         bass_articulation_focus: bassArticulationFocus,
         bass_expression: bassExpression,
         bass_density_bias: bassDensityBias,
@@ -382,7 +386,7 @@ export default function App() {
       if (newSessionPreset) {
         body.session_preset = newSessionPreset;
       }
-      if (bassPlayer) {
+      if (bassPlayer && newSessionPreset !== "fusion") {
         body.bass_player = bassPlayer;
       }
       if (drumPlayer) {
@@ -725,6 +729,9 @@ export default function App() {
         Math.abs(activeBassDensityDraft - session.bass_density_bias) <= 0.0005;
       const patched = await patchSession(session.id, {
         bass_style: activeBassDraft,
+        ...(session.session_preset === "fusion"
+          ? { bass_engine: "phrase_v2" }
+          : {}),
         bass_articulation_focus: activeBassArticulationDraft,
         bass_expression: activeBassExpressionDraft,
         bass_density_bias: activeBassDensityDraft,
@@ -732,19 +739,27 @@ export default function App() {
           activeBassPerformanceDraft,
         ),
       });
-      const regenerated = await regenerateSelectedLanes(
-        patched.id,
-        ["bass"],
-        { preserveBassPhrase },
-      );
+      const createdFirstFusionDna =
+        patched.session_preset === "fusion" && !patched.fusion_contract_id;
+      const regenerated =
+        createdFirstFusionDna
+          ? await newFusionDna(patched.id)
+          : await regenerateSelectedLanes(
+              patched.id,
+              ["bass"],
+              { preserveBassPhrase },
+            );
       setSession(regenerated);
       setStatus(
-        regenerated.bass_performance_controls_notice ??
-          regenerated.bass_articulation_notice ??
-          (preserveBassPhrase
-            ? "Applied the selected touch and performance controls to the current bass phrase."
-            : regenerated.message ??
-              "Generated a fresh bass phrase with the selected player intent."),
+        createdFirstFusionDna
+          ? regenerated.message ??
+              "Created the first shared Fusion DNA and rebuilt drums, bass, and keys together."
+          : regenerated.bass_performance_controls_notice ??
+              regenerated.bass_articulation_notice ??
+              (preserveBassPhrase
+                ? "Applied the selected touch and performance controls to the current bass phrase."
+                : regenerated.message ??
+                  "Generated a fresh bass phrase with the selected player intent."),
       );
     } catch (e) {
       setError(e.message || String(e));
@@ -767,6 +782,9 @@ export default function App() {
     try {
       const patched = await patchSession(session.id, {
         bass_style: activeBassDraft,
+        ...(session.session_preset === "fusion"
+          ? { bass_engine: "phrase_v2" }
+          : {}),
         bass_articulation_focus: activeBassArticulationDraft,
         bass_expression: activeBassExpressionDraft,
         bass_density_bias: activeBassDensityDraft,
@@ -774,14 +792,23 @@ export default function App() {
           activeBassPerformanceDraft,
         ),
       });
-      const regenerated = await regenerateSelectedLanes(
-        patched.id,
-        ["bass"],
-        { preserveBassPhrase: false },
-      );
+      setSession(patched);
+      const regenerated =
+        patched.session_preset === "fusion"
+          ? await newFusionDna(patched.id)
+          : await regenerateSelectedLanes(
+              patched.id,
+              ["bass"],
+              { preserveBassPhrase: false },
+            );
       setSession(regenerated);
 
-      if (regenerated.groove_source_ready === true) {
+      if (regenerated.session_preset === "fusion") {
+        setStatus(
+          regenerated.message ??
+            "NEW DNA rebuilt drums, bass, and keys from one shared law.",
+        );
+      } else if (regenerated.groove_source_ready === true) {
         const frameCount = Number(regenerated.groove_source_frame_count);
         const frameSummary =
           Number.isFinite(frameCount) && frameCount > 0
@@ -1036,7 +1063,7 @@ export default function App() {
         lead_player: lp || null,
         lead_instrument: li,
         bass_instrument: bi,
-        bass_player: bp || null,
+        bass_player: preset === "fusion" ? null : bp || null,
         drum_player: dp || null,
         chord_player: cp || null,
         chord_instrument: ci,
@@ -2333,11 +2360,20 @@ export default function App() {
               maxWidth: 720,
             }}
           >
-            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Drum style (this session)</span>
+            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>
+              {session.session_preset === "fusion"
+                ? "Drum rhythm (set by Fusion DNA)"
+                : "Drum style (this session)"}
+            </span>
             <select
               value={activeDrumDraft}
               onChange={(e) => setActiveDrumDraft(e.target.value)}
-              disabled={busy}
+              disabled={busy || session.session_preset === "fusion"}
+              title={
+                session.session_preset === "fusion"
+                  ? "Contract-aware drum style adapters arrive in the next phase."
+                  : undefined
+              }
               style={{ fontSize: 14 }}
             >
               {ACTIVE_DRUM_OPTIONS.map((o) => (
@@ -2349,7 +2385,11 @@ export default function App() {
             <button
               type="button"
               onClick={onUpdateDrumStyle}
-              disabled={busy || activeDrumDraft === session.drum_style}
+              disabled={
+                busy ||
+                session.session_preset === "fusion" ||
+                activeDrumDraft === session.drum_style
+              }
               style={{ padding: "0.35rem 0.75rem" }}
             >
               Update Drum Style
@@ -2522,7 +2562,7 @@ export default function App() {
             <select
               value={activeBassEngineDraft}
               onChange={(e) => setActiveBassEngineDraft(e.target.value)}
-              disabled={busy}
+              disabled={busy || session.session_preset === "fusion"}
               style={{ fontSize: 14 }}
             >
               <option value="baseline">Baseline</option>
@@ -2531,7 +2571,11 @@ export default function App() {
             <button
               type="button"
               onClick={onUpdateBassEngine}
-              disabled={busy || activeBassEngineDraft === (session.bass_engine ?? "baseline")}
+              disabled={
+                busy ||
+                session.session_preset === "fusion" ||
+                activeBassEngineDraft === (session.bass_engine ?? "baseline")
+              }
               style={{ padding: "0.35rem 0.75rem" }}
             >
               Update Bass Engine
@@ -2551,11 +2595,15 @@ export default function App() {
               maxWidth: 720,
             }}
           >
-            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Bass player (this session)</span>
+            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>
+              {session.session_preset === "fusion"
+                ? "Bass player (contract-aware adapters coming later)"
+                : "Bass player (this session)"}
+            </span>
             <select
               value={activeBassPlayerDraft}
               onChange={(e) => setActiveBassPlayerDraft(e.target.value)}
-              disabled={busy}
+              disabled={busy || session.session_preset === "fusion"}
               style={{ fontSize: 14 }}
             >
               <option value="">None</option>
@@ -2568,6 +2616,7 @@ export default function App() {
               onClick={onUpdateBassPlayer}
               disabled={
                 busy ||
+                session.session_preset === "fusion" ||
                 (activeBassPlayerDraft || "") === (session.bass_player ?? "")
               }
               style={{ padding: "0.35rem 0.75rem" }}
@@ -2625,11 +2674,20 @@ export default function App() {
               maxWidth: 720,
             }}
           >
-            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Chord style (this session)</span>
+            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>
+              {session.session_preset === "fusion"
+                ? "Keys rhythm (set by Fusion DNA)"
+                : "Chord style (this session)"}
+            </span>
             <select
               value={activeChordDraft}
               onChange={(e) => setActiveChordDraft(e.target.value)}
-              disabled={busy}
+              disabled={busy || session.session_preset === "fusion"}
+              title={
+                session.session_preset === "fusion"
+                  ? "Contract-aware keys style adapters arrive in the next phase."
+                  : undefined
+              }
               style={{ fontSize: 14 }}
             >
               {ACTIVE_CHORD_OPTIONS.map((o) => (
@@ -2641,7 +2699,11 @@ export default function App() {
             <button
               type="button"
               onClick={onUpdateChordStyle}
-              disabled={busy || activeChordDraft === session.chord_style}
+              disabled={
+                busy ||
+                session.session_preset === "fusion" ||
+                activeChordDraft === session.chord_style
+              }
               style={{ padding: "0.35rem 0.75rem" }}
             >
               Update Chord Style

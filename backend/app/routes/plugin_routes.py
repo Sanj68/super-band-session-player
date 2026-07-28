@@ -61,6 +61,11 @@ def _capture_history_or_503(
     *,
     kept: bool = False,
 ) -> dict[str, object]:
+    if str(session.session_preset or "").strip().lower() == "fusion":
+        # Fusion history needs explicit MIDI provenance tied to the contract.
+        # Until that lands, do not archive snapshots that could later be
+        # mistaken for a legal reading of the shared law.
+        return {}
     try:
         return bass_history_store.capture(
             session_routes._durable_session_view(session),  # noqa: SLF001
@@ -73,6 +78,17 @@ def _capture_history_or_503(
 def _history_state_or_503(
     session: session_routes.StoredSession,
 ) -> dict[str, object]:
+    if str(session.session_preset or "").strip().lower() == "fusion":
+        return {
+            "session_id": session.id,
+            "count": 0,
+            "kept_count": 0,
+            "current_index": None,
+            "current_is_kept": False,
+            "can_previous": False,
+            "can_next": False,
+            "entries": [],
+        }
     try:
         return bass_history_store.history_state(
             session_routes._durable_session_view(session)  # noqa: SLF001
@@ -87,11 +103,40 @@ def _commit_recalled_bass(
 ) -> session_routes.StoredSession:
     """Publish the fully recalled durable revision in one mapping swap."""
 
+    if (
+        str(destination.session_preset or "").strip().lower() == "fusion"
+        and recalled.bass_engine != "phrase_v2"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_history_snapshot_incompatible",
+                "message": (
+                    "That archived Bass idea predates the shared Fusion law "
+                    "and cannot replace its contract-aware Bass lane."
+                ),
+            },
+        )
     session_routes._discard_live_bridge_overlay(recalled)  # noqa: SLF001
     return session_routes._publish_staged_session(  # noqa: SLF001
         destination,
         recalled,
     )
+
+
+def _reject_fusion_history(session: session_routes.StoredSession) -> None:
+    if str(session.session_preset or "").strip().lower() == "fusion":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_history_provenance_required",
+                "message": (
+                    "Fusion idea history is paused until snapshots carry "
+                    "verifiable shared-DNA provenance. Use Bass candidates "
+                    "inside the current DNA or start NEW DNA."
+                ),
+            },
+        )
 
 
 def _latest_bass_session() -> session_routes.StoredSession | None:
@@ -186,6 +231,7 @@ class PluginBassPart(BaseModel):
 def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
     """Serialize one already-resolved session for the MIDI FX client."""
 
+    session_routes._require_current_fusion_core(s)  # noqa: SLF001
     raw = s.bass_performance_bytes or s.bass_bytes
     source = "performance" if s.bass_performance_bytes else "clean"
     assert raw is not None
@@ -373,6 +419,39 @@ def _engine_for_player(player: str | None) -> str:
     return "phrase_v2" if player in _PHRASE_V2_PERSONAS else "baseline"
 
 
+def _engine_for_session_player(
+    session: session_routes.StoredSession,
+    player: str | None,
+) -> str:
+    # A Fusion session already owns one shared drums/bass/keys contract.
+    # Persona selection may re-perform that law, but must never route around
+    # it through the legacy baseline generator.
+    if str(session.session_preset or "").strip().lower() == "fusion":
+        return "phrase_v2"
+    return _engine_for_player(player)
+
+
+def _reject_unsupported_fusion_player(
+    session: session_routes.StoredSession,
+    player: str | None,
+) -> None:
+    if (
+        str(session.session_preset or "").strip().lower() == "fusion"
+        and player not in {None, "", "none"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fusion_named_bass_player_unsupported",
+                "message": (
+                    "Named Bass Player profiles do not yet have honest "
+                    "contract-aware Fusion adapters. Use Bass style, "
+                    "instrument, touch, and performance controls for now."
+                ),
+            },
+        )
+
+
 def _bass_structure_signature(
     session: session_routes.StoredSession,
 ) -> tuple[object, ...]:
@@ -445,6 +524,26 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
             part=None,
         )
 
+    _reject_unsupported_fusion_player(s, plan.player)
+    fusion_mode = (
+        str(s.session_preset or "").strip().lower() == "fusion"
+    )
+    fusion_full_reset = bool(
+        fusion_mode
+        and plan.full_regenerate
+        and not plan.bar_ranges
+    )
+    if fusion_full_reset:
+        session_routes._require_unlocked_fusion_core(s)  # noqa: SLF001
+    elif fusion_mode:
+        session_routes._require_current_fusion_core(  # noqa: SLF001
+            s,
+            allow_stale_lanes=(
+                ()
+                if plan.bar_ranges
+                else (LaneName.bass,)
+            ),
+        )
     _require_unlocked_bass(s)
     # Commands may surprise musically, never destructively.
     _capture_history_or_503(s)
@@ -466,11 +565,29 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
         )
     if plan.player is not None:
         staged.bass_player = None if plan.player == "none" else plan.player
-        staged.bass_engine = _engine_for_player(staged.bass_player)
+        staged.bass_engine = _engine_for_session_player(
+            staged,
+            staged.bass_player,
+        )
     if plan.style is not None:
         staged.bass_style = plan.style
 
-    if plan.bar_ranges:
+    replaced_fusion_dna = fusion_full_reset
+    if replaced_fusion_dna:
+        contract = session_routes._replace_fusion_dna_on_stored_session(  # noqa: SLF001
+            staged
+        )
+        plan.applied = [
+            (
+                f"new Fusion DNA -> {contract.covenant_id}"
+                if item == "full new take"
+                else item
+            )
+            for item in plan.applied
+        ]
+        regenerated_lanes = list(session_routes._FUSION_CORE_LANES)  # noqa: SLF001
+        fresh_lanes = regenerated_lanes
+    elif plan.bar_ranges:
         from app.models.session import RegenerateBassBarsBody
 
         for start, end in plan.bar_ranges:
@@ -482,6 +599,10 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
                     operation=plan.bar_operation,
                 ),
             )
+        regenerated_lanes = [LaneName.bass]
+        # A selected-bar splice cannot certify that the remaining Bass bars
+        # reflect a structural setting change made earlier.
+        fresh_lanes = []
     else:
         session_routes._regenerate_lane_on_stored_session(  # noqa: SLF001
             staged,
@@ -491,8 +612,14 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
                 LaneName.bass,
             ),
         )
-    session_routes._promote_live_bridge_overlay(staged)  # noqa: SLF001
-    session_routes._SESSIONS[s.id] = staged  # noqa: SLF001
+        regenerated_lanes = [LaneName.bass]
+        fresh_lanes = regenerated_lanes
+    staged = session_routes._commit_regenerated_lanes(  # noqa: SLF001
+        s,
+        staged,
+        regenerated_lanes,
+        fresh_lanes=fresh_lanes,
+    )
 
     return PluginCommandResult(
         ok=True,
@@ -508,6 +635,23 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    requested_player = (
+        None
+        if body.bass_player is None
+        or body.bass_player.strip().lower() in {"", "none"}
+        else body.bass_player
+    )
+    _reject_unsupported_fusion_player(s, requested_player)
+    fusion_mode = (
+        str(s.session_preset or "").strip().lower() == "fusion"
+    )
+    if fusion_mode and body.force_new_phrase:
+        session_routes._require_unlocked_fusion_core(s)  # noqa: SLF001
+    elif fusion_mode:
+        session_routes._require_current_fusion_core(  # noqa: SLF001
+            s,
+            allow_stale_lanes=(LaneName.bass,),
+        )
     _require_unlocked_bass(s)
     # Preserve the exact playable part before changing controls or MIDI.
     _capture_history_or_503(s)
@@ -537,16 +681,31 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
         )
     if body.force_new_phrase and body.host_tempo is not None:
         staged.tempo = int(round(float(body.host_tempo)))
-    staged.bass_engine = _engine_for_player(staged.bass_player)
+    staged.bass_engine = _engine_for_session_player(
+        staged,
+        staged.bass_player,
+    )
     raw_context = session_routes._context_for_lane_regeneration(  # noqa: SLF001
         staged,
         LaneName.bass,
     )
     if (
+        str(staged.session_preset or "").strip().lower() == "fusion"
+        and body.force_new_phrase
+    ):
+        session_routes._replace_fusion_dna_on_stored_session(  # noqa: SLF001
+            staged
+        )
+        regenerated_lanes = list(session_routes._FUSION_CORE_LANES)  # noqa: SLF001
+    elif (
         not body.force_new_phrase
         and _bass_structure_signature(staged) == prior_structure
         and staged.bass_seed is not None
         and staged.bass_bytes
+        and not (
+            str(staged.session_preset or "").strip().lower() == "fusion"
+            and staged.fusion_bass_render_stale
+        )
     ):
         session_routes._rerender_current_bass_performance(  # noqa: SLF001
             staged,
@@ -556,14 +715,19 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
                 else None
             ),
         )
+        regenerated_lanes = [LaneName.bass]
     else:
         session_routes._regenerate_lane_on_stored_session(  # noqa: SLF001
             staged,
             LaneName.bass,
             context=raw_context,
         )
-    session_routes._promote_live_bridge_overlay(staged)  # noqa: SLF001
-    session_routes._SESSIONS[s.id] = staged  # noqa: SLF001
+        regenerated_lanes = [LaneName.bass]
+    staged = session_routes._commit_regenerated_lanes(  # noqa: SLF001
+        s,
+        staged,
+        regenerated_lanes,
+    )
     return _bass_part_for_session(staged)
 
 
@@ -620,6 +784,7 @@ def plugin_keep(body: PluginHistoryBody) -> PluginHistoryActionResult:
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    _reject_fusion_history(s)
     _capture_history_or_503(s, kept=True)
     return PluginHistoryActionResult(
         message="Idea kept. You can explore and return to it.",
@@ -637,6 +802,7 @@ def plugin_history_navigate(
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    _reject_fusion_history(s)
     staged = session_routes._durable_session_view(s)  # noqa: SLF001
     try:
         bass_history_store.navigate(staged, body.direction)
@@ -672,6 +838,7 @@ def plugin_history_recall(
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    _reject_fusion_history(s)
     # Preserve an unlisted current state before jumping to a specific idea.
     _capture_history_or_503(s)
     staged = session_routes._durable_session_view(s)  # noqa: SLF001

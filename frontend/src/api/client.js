@@ -5,15 +5,34 @@
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
 async function parseError(res) {
-  let detail;
+  const raw = await res.text();
+  let detail = raw;
   try {
-    detail = await res.json();
+    detail = raw ? JSON.parse(raw) : null;
   } catch {
-    detail = await res.text();
+    // Keep a non-JSON response body as the error detail.
   }
-  const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  const nestedDetail =
+    detail && typeof detail === "object" && !Array.isArray(detail)
+      ? detail.detail
+      : null;
+  const message =
+    (typeof nestedDetail === "object" && nestedDetail?.message) ||
+    (typeof nestedDetail === "object" && nestedDetail?.error) ||
+    (typeof nestedDetail === "object" && nestedDetail?.reason) ||
+    (typeof nestedDetail === "string" && nestedDetail) ||
+    (typeof detail === "object" && detail?.message) ||
+    (typeof detail === "object" && detail?.error) ||
+    (typeof detail === "string" && detail.trim()) ||
+    `Request failed with HTTP ${res.status}`;
+  const err = new Error(String(message));
   err.status = res.status;
   err.detail = detail;
+  err.apiDetail = nestedDetail;
+  err.code =
+    (typeof nestedDetail === "object" && nestedDetail?.error) ||
+    (typeof detail === "object" && detail?.error) ||
+    null;
   throw err;
 }
 
@@ -190,6 +209,17 @@ export async function regenerateSelectedLanes(
 export async function regenerateUnlockedLanes(sessionId) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/regenerate-unlocked`, {
     method: "POST",
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+/** Replace shared Fusion law; optionally rebuild Lead in the same transaction. */
+export async function newFusionDna(sessionId, { includeLead = false } = {}) {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/fusion-dna/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ include_lead: Boolean(includeLead) }),
   });
   if (!res.ok) await parseError(res);
   return res.json();

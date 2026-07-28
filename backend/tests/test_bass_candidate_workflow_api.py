@@ -217,7 +217,7 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert run["take_count"] == 3
     assert run["bass_style"] == "supportive"
     assert run["bass_engine"] == "baseline"
-    assert run["generation_context_version"] == 4
+    assert run["generation_context_version"] == 5
     assert len(run["generation_context_fingerprint"]) == 64
     assert len(run["generation_evidence_fingerprint"]) == 64
     assert isinstance(run["run_id"], str) and run["run_id"]
@@ -251,7 +251,7 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert listed_run is not None
     assert listed_run["session_id"] == session_id
     assert listed_run["take_count"] == 3
-    assert listed_run["generation_context_version"] == 4
+    assert listed_run["generation_context_version"] == 5
     assert (
         listed_run["generation_context_fingerprint"]
         == run["generation_context_fingerprint"]

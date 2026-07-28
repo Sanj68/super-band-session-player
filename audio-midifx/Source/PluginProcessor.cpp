@@ -85,6 +85,56 @@ constexpr bool shouldAcceptFetchedPart (
     );
 }
 
+constexpr bool isSuccessfulHttpStatus (int statusCode)
+{
+    return statusCode >= 200 && statusCode < 300;
+}
+
+constexpr bool shouldInvalidateRejectedFetch (
+    int statusCode,
+    bool bindingEpochUnchanged,
+    bool bindingIdUnchanged)
+{
+    // A connection failure has status zero and is allowed to keep the last
+    // known-good part. A real server rejection fails closed, but only while
+    // the request still belongs to the current Logic project binding.
+    return (
+        statusCode != 0
+        && ! isSuccessfulHttpStatus (statusCode)
+        && bindingEpochUnchanged
+        && bindingIdUnchanged
+    );
+}
+
+juce::String responseMessageOr (
+    const juce::String& responseBody,
+    const juce::String& fallback)
+{
+    const auto parsed = juce::JSON::parse (responseBody);
+    if (! parsed.isObject())
+        return fallback;
+
+    const auto direct = parsed.getProperty ("message", "").toString().trim();
+    if (direct.isNotEmpty())
+        return direct;
+
+    const auto detail = parsed.getProperty ("detail", juce::var());
+    if (detail.isObject())
+    {
+        const auto nested = detail.getProperty ("message", "").toString().trim();
+        if (nested.isNotEmpty())
+            return nested;
+    }
+    else
+    {
+        const auto text = detail.toString().trim();
+        if (text.isNotEmpty())
+            return text;
+    }
+
+    return fallback;
+}
+
 void mixFingerprint (std::uint64_t& hash, std::uint64_t value)
 {
     hash ^= value;
@@ -245,6 +295,11 @@ static_assert (shouldAcceptFetchedPart (true, true, true));
 static_assert (! shouldAcceptFetchedPart (false, true, true));
 static_assert (! shouldAcceptFetchedPart (true, false, true));
 static_assert (! shouldAcceptFetchedPart (true, true, false));
+static_assert (shouldInvalidateRejectedFetch (409, true, true));
+static_assert (! shouldInvalidateRejectedFetch (409, false, true));
+static_assert (! shouldInvalidateRejectedFetch (409, true, false));
+static_assert (! shouldInvalidateRejectedFetch (200, true, true));
+static_assert (! shouldInvalidateRejectedFetch (0, true, true));
 
 juce::String loadPluginApiBaseUrl()
 {
@@ -388,13 +443,20 @@ void SessionPlayerMidiFXProcessor::run()
                 body->setProperty ("session_id", sessionId);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
             juce::URL url { apiBaseUrl_ + "/keep" };
+            int statusCode = 0;
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
-                               .withConnectionTimeoutMs (4000);
+                               .withConnectionTimeoutMs (4000)
+                               .withStatusCode (&statusCode);
             if (auto stream = url.withPOSTData (json).createInputStream (options))
             {
-                const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
-                setStatus (parsed.getProperty ("message", "Idea kept.").toString());
+                const auto responseBody = stream->readEntireStreamAsString();
+                setStatus (
+                    responseMessageOr (
+                        responseBody,
+                        isSuccessfulHttpStatus (statusCode)
+                            ? "Idea kept."
+                            : "Idea was not kept."));
             }
             else
                 setStatus ("engine offline (keep failed)");
@@ -503,11 +565,22 @@ void SessionPlayerMidiFXProcessor::run()
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
 
             juce::URL url { apiBaseUrl_ + "/regenerate" };
+            int statusCode = 0;
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
-                               .withConnectionTimeoutMs (4000);
+                               .withConnectionTimeoutMs (4000)
+                               .withStatusCode (&statusCode);
             if (auto stream = url.withPOSTData (json).createInputStream (options))
-                stream->readEntireStreamAsString(); // response == fresh part; next fetch picks it up
+            {
+                const auto responseBody = stream->readEntireStreamAsString();
+                if (! isSuccessfulHttpStatus (statusCode))
+                    setStatus (
+                        responseMessageOr (
+                            responseBody,
+                            "Regenerate was rejected by the engine."));
+                // A successful response is the fresh part; the normal fetch
+                // below publishes it after binding validation.
+            }
             else
                 setStatus ("engine offline (regenerate failed)");
         }
@@ -528,14 +601,20 @@ void SessionPlayerMidiFXProcessor::run()
             body->setProperty ("text", command);
             const auto json = juce::JSON::toString (juce::var (body.get()), true);
             juce::URL url { apiBaseUrl_ + "/command" };
+            int statusCode = 0;
             auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
                                .withExtraHeaders ("Content-Type: application/json")
-                               .withConnectionTimeoutMs (6000);
+                               .withConnectionTimeoutMs (6000)
+                               .withStatusCode (&statusCode);
             if (auto stream = url.withPOSTData (json).createInputStream (options))
             {
-                const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
-                const auto msg = parsed.getProperty ("message", "").toString();
-                setStatus (msg.isNotEmpty() ? msg : "command sent");
+                const auto responseBody = stream->readEntireStreamAsString();
+                setStatus (
+                    responseMessageOr (
+                        responseBody,
+                        isSuccessfulHttpStatus (statusCode)
+                            ? "command sent"
+                            : "Command was rejected by the engine."));
             }
             else
                 setStatus ("engine offline (command failed)");
@@ -586,16 +665,69 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     }
     if (requestedSessionId.isNotEmpty())
         url = url.withParameter ("session_id", requestedSessionId);
+    int statusCode = 0;
     auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                       .withConnectionTimeoutMs (3000);
+                       .withConnectionTimeoutMs (3000)
+                       .withStatusCode (&statusCode);
     auto stream = url.createInputStream (options);
+
+    const auto retireRejectedPartIfCurrent =
+        [&] (const juce::String& responseBody)
+        {
+            bool currentBindingWasRejected = false;
+            std::shared_ptr<const BassPart> retiredPart;
+            {
+                // Keep the same session -> part lock order as publication and
+                // project-state restore. A late rejection for project A must
+                // never erase a valid part already bound to project B.
+                const juce::ScopedLock sessionGuard (sessionLock_);
+                currentBindingWasRejected = shouldInvalidateRejectedFetch (
+                    statusCode,
+                    sessionBindingEpoch_ == requestedBindingEpoch,
+                    boundSessionId_ == requestedSessionId);
+                if (currentBindingWasRejected)
+                {
+                    const juce::SpinLock::ScopedLockType partGuard (partLock_);
+                    retiredPart = std::move (part_);
+                }
+            }
+            retirePart (std::move (retiredPart));
+
+            if (! currentBindingWasRejected)
+            {
+                // The binding moved while this request was in flight. Prompt
+                // the polling thread to fetch the new project's part instead.
+                refreshRequested_ = true;
+                notify();
+                return;
+            }
+
+            const auto fallback =
+                "The engine rejected this bass part. Generate the full session "
+                "or choose NEW DNA.";
+            setStatus (
+                "BASS STOPPED — "
+                + responseMessageOr (responseBody, fallback));
+        };
+
     if (stream == nullptr)
     {
+        if (statusCode != 0 && ! isSuccessfulHttpStatus (statusCode))
+        {
+            retireRejectedPartIfCurrent ({});
+            return;
+        }
         if (updateStatus)
             setStatus ("engine offline — start the Session Player backend");
         return;
     }
-    const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+    const auto responseBody = stream->readEntireStreamAsString();
+    if (! isSuccessfulHttpStatus (statusCode))
+    {
+        retireRejectedPartIfCurrent (responseBody);
+        return;
+    }
+    const auto parsed = juce::JSON::parse (responseBody);
     if (! parsed.isObject())
     {
         if (updateStatus)

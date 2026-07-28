@@ -8,6 +8,10 @@ from typing import Final, TypedDict
 
 import pretty_midi
 
+from app.services.fusion_contract import (
+    FusionGrooveContract,
+    slot_time_seconds,
+)
 from app.services.session_context import SessionAnchorContext, slot_pressure
 
 _KICK: Final[int] = 36
@@ -621,6 +625,79 @@ def _emit_latin(
             )
 
 
+def _emit_fusion_contract_bar(
+    inst: pretty_midi.Instrument,
+    *,
+    contract: FusionGrooveContract,
+    bar: int,
+    bar_off: float,
+    spb: float,
+) -> None:
+    """Render the drum/percussion jobs from one shared band contract."""
+
+    plan = contract.bar(bar)
+    sixteenth = spb / 4.0
+    energy = max(0.0, min(1.0, float(plan.energy)))
+
+    def hit_time(slot: int) -> float:
+        return bar_off + slot_time_seconds(
+            slot=slot,
+            microtiming_ticks=plan.microtiming_ticks,
+            seconds_per_beat=spb,
+        )
+
+    for slot in plan.hat_slots:
+        t0 = hit_time(slot)
+        accent = 1.0 if slot % 4 == 0 else 0.72
+        velocity = max(38, min(104, round((48 + 25 * energy) * accent)))
+        _note(
+            inst,
+            pitch=_HIHAT_CLOSED,
+            vel=velocity,
+            t0=t0,
+            t1=t0 + sixteenth * 0.58,
+        )
+    for slot in plan.kick_slots:
+        t0 = hit_time(slot)
+        velocity = max(
+            78,
+            min(
+                122,
+                round(91 + 22 * energy + (5 if slot in (0, 8) else 0)),
+            ),
+        )
+        _note(
+            inst,
+            pitch=_KICK,
+            vel=velocity,
+            t0=t0,
+            t1=t0 + sixteenth * 0.88,
+        )
+    for slot in plan.snare_slots:
+        t0 = hit_time(slot)
+        velocity = max(84, min(124, round(94 + 24 * energy)))
+        _note(
+            inst,
+            pitch=_SNARE,
+            vel=velocity,
+            t0=t0,
+            t1=t0 + sixteenth * 0.84,
+        )
+    for event in plan.percussion_events:
+        t0 = hit_time(event.slot)
+        velocity = max(
+            30,
+            min(112, round(int(event.velocity) * (0.72 + 0.36 * energy))),
+        )
+        _note(
+            inst,
+            pitch=int(event.pitch),
+            vel=velocity,
+            t0=t0,
+            t1=t0 + sixteenth * 0.62,
+        )
+
+
 def generate_drums(
     *,
     tempo: int,
@@ -630,6 +707,7 @@ def generate_drums(
     session_preset: str | None = None,
     drum_player: str | None = None,
     context: SessionAnchorContext | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str]:
     style = normalize_drum_style(drum_style)
     kit = normalize_drum_kit(drum_kit)
@@ -643,7 +721,15 @@ def generate_drums(
 
     for bar in range(bar_count):
         bar_off = bar * 4 * spb
-        if style == "straight":
+        if fusion_contract is not None:
+            _emit_fusion_contract_bar(
+                inst,
+                contract=fusion_contract,
+                bar=bar,
+                bar_off=bar_off,
+                spb=spb,
+            )
+        elif style == "straight":
             _emit_straight(inst, bar_off, sixteenth, salt=salt, bar=bar, traits=traits, anchor_ctx=context)
         elif style == "broken":
             _emit_broken(inst, bar_off, sixteenth, bar, salt=salt, traits=traits, anchor_ctx=context)
@@ -655,9 +741,10 @@ def generate_drums(
             _emit_laid_back_soul(inst, bar_off, sixteenth, salt=salt, bar=bar, traits=traits, anchor_ctx=context)
         else:
             _emit_latin(inst, bar_off, sixteenth, salt=salt, bar=bar, traits=traits, anchor_ctx=context)
-        _emit_profile_ghost_snares(inst, bar_off, sixteenth, salt=salt, bar=bar, traits=traits, anchor_ctx=context)
+        if fusion_contract is None:
+            _emit_profile_ghost_snares(inst, bar_off, sixteenth, salt=salt, bar=bar, traits=traits, anchor_ctx=context)
 
-    if kit == "percussion":
+    if kit == "percussion" and fusion_contract is None:
         fa = traits["fill_activity"] if traits else 0.5
         bongo_hi, bongo_lo, conga_hi, cowbell = 60, 61, 62, 56
         for bar in range(bar_count):
@@ -683,4 +770,18 @@ def generate_drums(
     pm.instruments.append(inst)
     buf = io.BytesIO()
     pm.write(buf)
-    return buf.getvalue(), _preview(style, bar_count, tempo, kit, session_preset=session_preset, drum_player=player_key)
+    preview = _preview(
+        style,
+        bar_count,
+        tempo,
+        kit,
+        session_preset=session_preset,
+        drum_player=player_key,
+    )
+    if fusion_contract is not None:
+        preview += (
+            f" Shared Fusion DNA: {fusion_contract.covenant_id} "
+            f"({fusion_contract.contract_id}); authored Latin percussion law, "
+            "funk attack, and section-shaped dynamics."
+        )
+    return buf.getvalue(), preview

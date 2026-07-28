@@ -10,6 +10,7 @@ from app.services.bass_performance import BassPerformanceNote
 from app.services.chord_generator import generate_chords as generate_chords_impl
 from app.services.conditioning import UnifiedConditioning
 from app.services.drum_generator import generate_drums as generate_drums_impl
+from app.services.fusion_contract import FusionGrooveContract
 from app.services.lead_generator import generate_lead as generate_lead_impl
 from app.services.session_context import SessionAnchorContext
 from app.utils import music_theory as mt
@@ -29,6 +30,7 @@ def generate_drums(
     drum_player: str | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str]:
     """Delegate to modular drum generator (styles: straight, broken, shuffle, funk, latin, laid_back_soul)."""
     return generate_drums_impl(
@@ -39,6 +41,7 @@ def generate_drums(
         drum_player=drum_player,
         session_preset=session_preset,
         context=context,
+        fusion_contract=fusion_contract,
     )
 
 
@@ -67,6 +70,7 @@ def generate_bass(
     slide_amount: float | None = None,
     legato_amount: float | None = None,
     candidate_role: str | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
     return generate_bass_impl(
@@ -93,6 +97,7 @@ def generate_bass(
         slide_amount=slide_amount,
         legato_amount=legato_amount,
         candidate_role=candidate_role,
+        fusion_contract=fusion_contract,
     )
 
 
@@ -108,6 +113,7 @@ def generate_chords(
     chord_progression: list[str] | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str]:
     """Delegate to modular chord generator (styles: simple, jazzy, wide, dense, stabs, warm_broken)."""
     return generate_chords_impl(
@@ -121,6 +127,7 @@ def generate_chords(
         chord_progression=chord_progression,
         session_preset=session_preset,
         context=context,
+        fusion_contract=fusion_contract,
     )
 
 

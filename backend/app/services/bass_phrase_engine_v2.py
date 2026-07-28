@@ -19,6 +19,13 @@ from app.services.conditioning import (
     source_slot_pressure,
     source_snare_weight,
 )
+from app.services.fusion_contract import (
+    FusionBarContract,
+    FusionBassEvent,
+    FusionGrooveContract,
+    PPQ,
+    slot_time_seconds,
+)
 from app.services.bass_vocabulary.paul_chambers import (
     get_chromatic_approaches,
     get_walking_cell,
@@ -1853,6 +1860,772 @@ def _pick_pitch(
     return _pc_to_bass_register(pick_pc, octave=2)
 
 
+def _fusion_contract_target_pc(
+    event: FusionBassEvent,
+    *,
+    bar: int,
+    harmonic_plan: list[tuple[int, list[int], list[int], list[int], float]],
+    confirmed_scale_pcs: set[int],
+    candidate_role: str | None = None,
+    candidate_seed: int | None = None,
+    contract_seed: int = 0,
+) -> int:
+    root_pc, stable_pcs, passing_pcs, avoid_pcs, _confidence = harmonic_plan[bar]
+    next_root_pc = harmonic_plan[(bar + 1) % len(harmonic_plan)][0]
+    avoid = {int(pc) % 12 for pc in avoid_pcs}
+    stable = [int(pc) % 12 for pc in stable_pcs if int(pc) % 12 not in avoid]
+    non_root = [pc for pc in stable if pc != int(root_pc) % 12]
+
+    if event.role in {"anchor", "octave"}:
+        return int(root_pc) % 12
+    if event.role == "anticipation":
+        return int(next_root_pc) % 12
+    if event.role == "fifth":
+        fifth = (int(root_pc) + 7) % 12
+        return fifth if fifth in stable else (non_root[-1] if non_root else int(root_pc) % 12)
+    if event.role in {"colour", "answer"}:
+        if not non_root:
+            return int(root_pc) % 12
+        ordered = sorted(
+            non_root,
+            key=lambda pc: ((pc - int(root_pc)) % 12, pc),
+        )
+        authored = ordered[0] if event.role == "colour" else ordered[-1]
+        if candidate_role == "harmonic_alternative":
+            # Change only the authored colour/answer choice, and only within
+            # the confirmed chord. Prefer another non-root colour before
+            # falling back to the root when the chord has only two safe tones.
+            alternatives = [pc for pc in ordered if pc != authored]
+            root = int(root_pc) % 12
+            if root != authored and root not in alternatives:
+                alternatives.append(root)
+            if alternatives:
+                rng = _fusion_candidate_rng(
+                    candidate_seed=candidate_seed,
+                    contract_seed=contract_seed,
+                    bar=bar,
+                    slot=event.slot,
+                    role="harmonic_alternative",
+                )
+                return alternatives[rng.randrange(len(alternatives))]
+        return authored
+    if event.role == "connector":
+        # Ghosted connectors are rhythmic glue, not harmonic licence. Keep
+        # them on the current chord so a short/dead rendering cannot disguise
+        # a wrong structural pitch.
+        return non_root[0] if non_root else int(root_pc) % 12
+    if event.role == "pickup":
+        if int(event.slot) < 14:
+            return int(root_pc) % 12
+        neighbours = [
+            int(pc) % 12
+            for pc in confirmed_scale_pcs
+            if int(pc) % 12 not in avoid
+            and 0
+            < min(
+                (int(pc) - int(next_root_pc)) % 12,
+                (int(next_root_pc) - int(pc)) % 12,
+            )
+            <= 2
+        ]
+        if neighbours:
+            return min(
+                neighbours,
+                key=lambda pc: (
+                    min(
+                        (pc - int(next_root_pc)) % 12,
+                        (int(next_root_pc) - pc) % 12,
+                    ),
+                    pc,
+                ),
+            )
+        return int(next_root_pc) % 12
+    return int(root_pc) % 12
+
+
+def _fusion_contract_pitch(
+    event: FusionBassEvent,
+    *,
+    bar: int,
+    harmonic_plan: list[tuple[int, list[int], list[int], list[int], float]],
+    confirmed_scale_pcs: set[int],
+    previous_pitch: int | None,
+    instrument_family: str,
+    bass_style: str,
+    candidate_role: str | None = None,
+    candidate_seed: int | None = None,
+    contract_seed: int = 0,
+) -> int:
+    target_pc = _fusion_contract_target_pc(
+        event,
+        bar=bar,
+        harmonic_plan=harmonic_plan,
+        confirmed_scale_pcs=confirmed_scale_pcs,
+        candidate_role=candidate_role,
+        candidate_seed=candidate_seed,
+        contract_seed=contract_seed,
+    )
+    lo, hi = _style_register_bounds(instrument_family, style=bass_style)
+    center = previous_pitch if previous_pitch is not None else 42
+    if event.role == "anchor":
+        center = min(center, 43)
+    elif event.role == "octave":
+        center = max(50, center + 7)
+    elif event.role == "anticipation":
+        center = min(48, center)
+    elif (
+        bass_style == "melodic"
+        and event.role in {"answer", "colour", "fifth"}
+    ):
+        center = max(47, center + 5)
+    elif (
+        bass_style == "fusion"
+        and event.role in {"answer", "colour"}
+    ):
+        center = max(45, center + 4)
+    pitch = _nearest_register_pitch(target_pc, center, lo=lo, hi=hi)
+    if event.role == "octave" and pitch < 48 and pitch + 12 <= hi:
+        pitch += 12
+    while previous_pitch is not None and abs(pitch - previous_pitch) > 12:
+        if pitch > previous_pitch and pitch - 12 >= lo:
+            pitch -= 12
+        elif pitch < previous_pitch and pitch + 12 <= hi:
+            pitch += 12
+        else:
+            break
+    return max(lo, min(hi, int(pitch)))
+
+
+_FUSION_CANDIDATE_ROLE_SALTS: Final[dict[str, int]] = {
+    "rhythmic_alternative": 0x45D9F3B,
+    "harmonic_alternative": 0x9E3779B1,
+    "performance_alternative": 0x7F4A7C15,
+}
+
+
+def _fusion_candidate_rng(
+    *,
+    candidate_seed: int | None,
+    contract_seed: int,
+    bar: int,
+    slot: int,
+    role: str,
+) -> random.Random:
+    """Return a stable RNG used only inside one bounded candidate edit."""
+
+    source_seed = int(contract_seed if candidate_seed is None else candidate_seed)
+    return random.Random(
+        source_seed
+        ^ (int(contract_seed) << 5)
+        ^ (int(bar) * 0x1F123BB5)
+        ^ (int(slot) * 0x6C8E9CF5)
+        ^ _FUSION_CANDIDATE_ROLE_SALTS.get(role, 0)
+    )
+
+
+def _fusion_activity_gear(density_bias: float) -> str:
+    """Resolve the same five discrete activity gears exposed by the UI."""
+
+    activity = max(-1.0, min(1.0, float(density_bias)))
+    if activity <= -0.75:
+        return "minimal"
+    if activity <= -0.25:
+        return "sparse"
+    if activity < 0.25:
+        return "balanced"
+    if activity < 0.75:
+        return "busy"
+    return "lead"
+
+
+def _fusion_minimal_events(
+    events: tuple[FusionBassEvent, ...],
+) -> tuple[FusionBassEvent, ...]:
+    """Reduce a bar to its body-code without losing its harmonic direction."""
+
+    essential = [
+        event
+        for event in events
+        if not event.optional
+        and event.role in {"anchor", "anticipation"}
+    ]
+    if not essential:
+        non_optional = [event for event in events if not event.optional]
+        if non_optional:
+            essential.append(
+                max(
+                    non_optional,
+                    key=lambda event: (float(event.accent), -int(event.slot)),
+                )
+            )
+    if len(essential) < 2:
+        remaining = [
+            event
+            for event in events
+            if not event.optional and event not in essential
+        ]
+        if remaining:
+            essential.append(
+                max(
+                    remaining,
+                    key=lambda event: (float(event.accent), int(event.slot)),
+                )
+            )
+    return tuple(sorted(essential[:2], key=lambda event: event.slot))
+
+
+def _fusion_rhythmic_view(
+    events: tuple[FusionBassEvent, ...],
+    *,
+    plan: FusionBarContract,
+    candidate_seed: int | None,
+    contract_seed: int,
+    salt: int,
+    move_count: int = 1,
+) -> tuple[FusionBassEvent, ...]:
+    """Move bounded glue/answer events while preserving the shared law."""
+
+    developed = list(events)
+    movable_roles = {
+        "answer",
+        "colour",
+        "connector",
+        "fifth",
+        "octave",
+        "pickup",
+    }
+    forbidden = {
+        *map(int, plan.protected_melodic_rest_slots),
+        *map(int, plan.snare_slots),
+        *(int(event.slot) for event in plan.keys_events),
+    }
+    for move_index in range(max(0, int(move_count))):
+        occupied = {int(event.slot) for event in developed}
+        permissioned: list[tuple[int, tuple[int, ...]]] = []
+        for index, event in enumerate(developed):
+            if event.role not in movable_roles:
+                continue
+            destinations = tuple(
+                slot
+                for shift in (-2, -1, 1, 2)
+                for slot in (int(event.slot) + shift,)
+                if 1 <= slot <= 14
+                and slot not in forbidden
+                and slot not in occupied
+            )
+            if destinations:
+                permissioned.append((index, destinations))
+        if not permissioned:
+            break
+
+        optional_moves = [
+            item for item in permissioned if developed[item[0]].optional
+        ]
+        pool = optional_moves or permissioned
+        source_seed = (
+            int(contract_seed)
+            if candidate_seed is None
+            else int(candidate_seed)
+        )
+        choices = [
+            (event_index, destination)
+            for event_index, destinations in pool
+            for destination in destinations
+        ]
+        choice_index = (
+            source_seed
+            + int(contract_seed) * 3
+            + int(plan.bar_index) * 17
+            + int(salt)
+            + move_index * 31
+        ) % len(choices)
+        event_index, destination = choices[choice_index]
+        event = developed[event_index]
+        developed[event_index] = replace(event, slot=destination)
+    return tuple(sorted(developed, key=lambda item: item.slot))
+
+
+def _fusion_add_permissioned_reply(
+    events: tuple[FusionBassEvent, ...],
+    *,
+    plan: FusionBarContract,
+    contract_seed: int,
+    salt: int,
+    role: str,
+    duration_slots: float,
+    accent: float,
+) -> tuple[FusionBassEvent, ...]:
+    """Add one short style/activity reply without occupying protected space."""
+
+    occupied = {int(event.slot) for event in events}
+    forbidden = {
+        *occupied,
+        *map(int, plan.protected_melodic_rest_slots),
+        *map(int, plan.snare_slots),
+        *(int(event.slot) for event in plan.keys_events),
+    }
+    kick_neighbours = [
+        slot
+        for kick in plan.kick_slots
+        for slot in (int(kick) + 1, int(kick) - 1)
+        if 1 <= slot <= 14 and slot not in forbidden
+    ]
+    offbeats = [
+        slot
+        for slot in range(1, 15, 2)
+        if slot not in forbidden
+    ]
+    remaining = [
+        slot
+        for slot in range(1, 15)
+        if slot not in forbidden
+    ]
+    candidates = tuple(dict.fromkeys(kick_neighbours + offbeats + remaining))
+    if not candidates:
+        return events
+    rng = _fusion_candidate_rng(
+        candidate_seed=int(contract_seed) ^ int(salt),
+        contract_seed=contract_seed,
+        bar=plan.bar_index,
+        slot=plan.two_bar_phase,
+        role="rhythmic_alternative",
+    )
+    destination = candidates[rng.randrange(len(candidates))]
+    return tuple(
+        sorted(
+            (
+                *events,
+                FusionBassEvent(
+                    slot=destination,
+                    role=role,
+                    duration_slots=duration_slots,
+                    accent=accent,
+                    optional=True,
+                ),
+            ),
+            key=lambda item: item.slot,
+        )
+    )
+
+
+def _fusion_contract_candidate_events(
+    plan: FusionBarContract,
+    *,
+    bass_style: str,
+    candidate_role: str | None,
+    candidate_seed: int | None,
+    contract_seed: int,
+    density_bias: float,
+) -> tuple[FusionBassEvent, ...]:
+    """Apply one role-specific onset edit without changing the contract.
+
+    The returned events are a per-take view. Protected rests, keys answers,
+    backbeats, anchors, and anticipations remain authoritative.
+    """
+
+    gear = _fusion_activity_gear(density_bias)
+    if gear == "minimal":
+        visible = _fusion_minimal_events(plan.bass_events)
+    elif gear == "sparse":
+        visible = tuple(
+            event for event in plan.bass_events if not event.optional
+        )
+    else:
+        visible = tuple(plan.bass_events)
+
+    if gear in {"busy", "lead"}:
+        visible = _fusion_rhythmic_view(
+            visible,
+            plan=plan,
+            candidate_seed=int(contract_seed) ^ 0x51A7D3,
+            contract_seed=contract_seed,
+            salt=0xB051E,
+        )
+    if gear == "lead":
+        visible = _fusion_add_permissioned_reply(
+            visible,
+            plan=plan,
+            contract_seed=contract_seed,
+            salt=0x1EAD,
+            role="answer",
+            duration_slots=0.9,
+            accent=0.70,
+        )
+
+    # Style is a contract-bounded performance arrangement, not a label. The
+    # supportive view is the written law; rhythmic and slap deliberately
+    # phrase its movable voices differently while protected rests, anchors,
+    # anticipations, and keys answers remain authoritative.
+    if bass_style == "rhythmic":
+        visible = _fusion_rhythmic_view(
+            visible,
+            plan=plan,
+            candidate_seed=int(contract_seed) ^ 0xA11CE,
+            contract_seed=contract_seed,
+            salt=0x2A17,
+        )
+    elif bass_style == "slap":
+        visible = _fusion_rhythmic_view(
+            visible,
+            plan=plan,
+            candidate_seed=int(contract_seed) ^ 0x51A9,
+            contract_seed=contract_seed,
+            salt=0x51A9,
+        )
+        visible = _fusion_add_permissioned_reply(
+            visible,
+            plan=plan,
+            contract_seed=contract_seed,
+            salt=0x5A7,
+            role="connector",
+            duration_slots=0.55,
+            accent=0.48,
+        )
+
+    if candidate_role == "pocket_keeper":
+        return tuple(event for event in visible if not event.optional)
+    if candidate_role == "rhythmic_alternative":
+        return _fusion_rhythmic_view(
+            visible,
+            plan=plan,
+            candidate_seed=candidate_seed,
+            contract_seed=contract_seed,
+            salt=0xC4AD,
+        )
+    return visible
+
+
+def _shape_fusion_contract_performance_candidate(
+    *,
+    event: FusionBassEvent,
+    plan: FusionBarContract,
+    candidate_role: str | None,
+    candidate_seed: int | None,
+    contract_seed: int,
+    seconds_per_beat: float,
+    start: float,
+    end: float,
+    velocity: int,
+    session_end: float,
+) -> tuple[float, float, int]:
+    """Reperform the same written event with bounded feel/detail changes."""
+
+    if candidate_role != "performance_alternative":
+        return start, end, velocity
+    rng = _fusion_candidate_rng(
+        candidate_seed=candidate_seed,
+        contract_seed=contract_seed,
+        bar=plan.bar_index,
+        slot=event.slot,
+        role="performance_alternative",
+    )
+    tick_seconds = float(seconds_per_beat) / float(PPQ)
+    if event.role in {"anticipation", "pickup"}:
+        feel_ticks = -(1 + rng.randrange(3))
+    else:
+        feel_ticks = 2 + rng.randrange(5)
+    duration = max(1e-4, float(end) - float(start))
+    if event.role == "connector":
+        duration_scale = 0.72 + 0.08 * rng.random()
+    elif event.role in {"anchor", "fifth", "octave"}:
+        duration_scale = 1.08 + 0.10 * rng.random()
+    else:
+        duration_scale = 0.90 + 0.16 * rng.random()
+
+    shaped_start = max(0.0, float(start) + feel_ticks * tick_seconds)
+    shaped_end = min(
+        float(session_end) - 1e-4,
+        shaped_start + duration * duration_scale,
+    )
+    if shaped_end <= shaped_start:
+        shaped_end = min(
+            float(session_end) - 1e-4,
+            shaped_start + 1e-4,
+        )
+    if event.slot in plan.kick_slots or event.role == "anchor":
+        velocity_delta = 4 + rng.randrange(4)
+    elif event.role == "connector":
+        velocity_delta = -(3 + rng.randrange(4))
+    else:
+        velocity_delta = (-2, 2, 3)[rng.randrange(3)]
+    return (
+        shaped_start,
+        shaped_end,
+        max(42, min(112, int(velocity) + velocity_delta)),
+    )
+
+
+def _shape_fusion_style_performance(
+    *,
+    event: FusionBassEvent,
+    bass_style: str,
+    sixteenth: float,
+    start: float,
+    end: float,
+    velocity: int,
+    session_end: float,
+) -> tuple[float, float, int]:
+    """Give each advertised style a distinct, bounded physical delivery."""
+
+    duration = max(1e-4, float(end) - float(start))
+    shaped_end = float(end)
+    shaped_velocity = int(velocity)
+    if bass_style == "melodic":
+        if event.role in {"answer", "colour", "fifth", "octave"}:
+            shaped_end = min(
+                float(session_end) - 1e-4,
+                float(start) + duration + 0.35 * float(sixteenth),
+            )
+            shaped_velocity -= 2
+    elif bass_style == "rhythmic":
+        if event.role not in {"anchor", "anticipation"}:
+            shaped_end = min(
+                shaped_end,
+                float(start) + max(1e-4, 0.78 * duration),
+            )
+            shaped_velocity += 4
+    elif bass_style == "slap":
+        if event.role == "connector":
+            shaped_end = min(
+                shaped_end,
+                float(start) + 0.42 * float(sixteenth),
+            )
+            shaped_velocity -= 10
+        else:
+            shaped_end = min(
+                shaped_end,
+                float(start) + max(0.55 * float(sixteenth), 0.68 * duration),
+            )
+            shaped_velocity += 7 if event.role != "anticipation" else 3
+    elif bass_style == "fusion":
+        if event.role == "connector":
+            shaped_end = min(
+                shaped_end,
+                float(start) + 0.5 * float(sixteenth),
+            )
+            shaped_velocity -= 7
+        elif event.role in {"answer", "colour", "octave"}:
+            shaped_velocity += 5
+        elif event.role == "anticipation":
+            shaped_end = min(
+                float(session_end) - 1e-4,
+                float(start) + duration + 0.25 * float(sixteenth),
+            )
+
+    if shaped_end <= float(start):
+        shaped_end = min(
+            float(session_end) - 1e-4,
+            float(start) + 1e-4,
+        )
+    return (
+        float(start),
+        shaped_end,
+        max(42, min(112, shaped_velocity)),
+    )
+
+
+def _render_fusion_contract_bass(
+    *,
+    contract: FusionGrooveContract,
+    tempo: int,
+    bar_count: int,
+    key: str,
+    scale: str,
+    bass_style: str,
+    instrument_family: str,
+    player: str | None,
+    harmonic_plan: list[tuple[int, list[int], list[int], list[int], float]],
+    confirmed_scale_pcs: set[int],
+    density_bias: float,
+    lock_to_groove: float | None,
+    expression_amount: float,
+    bass_articulation_focus: str | None,
+    ghost_amount: float | None,
+    mute_amount: float | None,
+    slide_amount: float | None,
+    legato_amount: float | None,
+    return_performance_notes: bool,
+    candidate_role: str | None,
+    candidate_seed: int | None,
+) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
+    """Realise semantic contract roles against the confirmed harmony."""
+
+    spb = 60.0 / float(tempo)
+    sixteenth = spb / 4.0
+    session_end = max(1, int(bar_count)) * 4.0 * spb
+    pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
+    inst = pretty_midi.Instrument(
+        program=bass_midi_program(instrument_family, bass_style),
+        name="Bass",
+    )
+    planned: list[BassPerformanceNote] = []
+    previous_pitch: int | None = None
+    groove_lock = max(
+        0.0,
+        min(1.0, 0.5 if lock_to_groove is None else float(lock_to_groove)),
+    )
+
+    for bar in range(max(1, int(bar_count))):
+        plan = contract.bar(bar)
+        candidate_events = _fusion_contract_candidate_events(
+            plan,
+            bass_style=bass_style,
+            candidate_role=candidate_role,
+            candidate_seed=candidate_seed,
+            contract_seed=contract.seed,
+            density_bias=density_bias,
+        )
+        for event in candidate_events:
+            pitch = _fusion_contract_pitch(
+                event,
+                bar=bar,
+                harmonic_plan=harmonic_plan,
+                confirmed_scale_pcs=confirmed_scale_pcs,
+                previous_pitch=previous_pitch,
+                instrument_family=instrument_family,
+                bass_style=bass_style,
+                candidate_role=candidate_role,
+                candidate_seed=candidate_seed,
+                contract_seed=contract.seed,
+            )
+            start = (
+                bar * 4.0 * spb
+                + slot_time_seconds(
+                    slot=event.slot,
+                    microtiming_ticks=plan.microtiming_ticks,
+                    seconds_per_beat=spb,
+                )
+            )
+            end = min(
+                session_end - 1e-4,
+                start + float(event.duration_slots) * sixteenth,
+            )
+            if end <= start:
+                continue
+            velocity = round(
+                54
+                + 46 * float(event.accent)
+                + (5 if event.slot in plan.kick_slots else 0)
+                + (4 if plan.phrase_role == "return" else 0)
+                - (9 if event.role == "connector" else 0)
+            )
+            velocity = max(42, min(112, velocity))
+            if event.slot in plan.kick_slots:
+                # Contract onsets already share drum microtiming. The lock
+                # control changes how firmly Bass occupies that shared pulse:
+                # tighter means a longer, more accented kick-coincident note;
+                # looser yields earlier release and softer contact.
+                lock_delta = groove_lock - 0.5
+                velocity = max(
+                    42,
+                    min(112, velocity + round(lock_delta * 24.0)),
+                )
+                end = max(
+                    start + 1e-4,
+                    min(
+                        session_end - 1e-4,
+                        end + lock_delta * 0.9 * sixteenth,
+                    ),
+                )
+            start, end, velocity = _shape_fusion_style_performance(
+                event=event,
+                bass_style=bass_style,
+                sixteenth=sixteenth,
+                start=start,
+                end=end,
+                velocity=velocity,
+                session_end=session_end,
+            )
+            start, end, velocity = (
+                _shape_fusion_contract_performance_candidate(
+                    event=event,
+                    plan=plan,
+                    candidate_role=candidate_role,
+                    candidate_seed=candidate_seed,
+                    contract_seed=contract.seed,
+                    seconds_per_beat=spb,
+                    start=start,
+                    end=end,
+                    velocity=velocity,
+                    session_end=session_end,
+                )
+            )
+            planned.append(
+                BassPerformanceNote(
+                    pitch=pitch,
+                    velocity=velocity,
+                    start=start,
+                    end=end,
+                    articulation="normal",
+                    role=event.role,
+                    bar_index=bar,
+                    slot_index=event.slot,
+                    source="phrase_v2",
+                    confidence=1.0,
+                )
+            )
+            previous_pitch = pitch
+
+    # Long anticipations may cross the bar line, but always yield cleanly to
+    # the next authored attack for reliable re-articulation in every host.
+    planned.sort(key=lambda note: (note.start, note.pitch, note.end))
+    for index, note in enumerate(planned[:-1]):
+        next_note = planned[index + 1]
+        if note.end > next_note.start:
+            planned[index] = replace(
+                note,
+                end=max(note.start + 1e-4, next_note.start - 1e-4),
+            )
+
+    for note in planned:
+        inst.notes.append(
+            pretty_midi.Note(
+                velocity=int(note.velocity),
+                pitch=int(note.pitch),
+                start=float(note.start),
+                end=float(note.end),
+            )
+        )
+    pm.instruments.append(inst)
+    buf = io.BytesIO()
+    pm.write(buf)
+    preview = (
+        f"Bass [phrase_v2, {instrument_family}, {bass_style}"
+        f"{', ' + player if player else ''}]: "
+        f"{mt.normalize_key(key)} {mt.describe_scale(scale)}, "
+        f"{bar_count} bar(s), {tempo} BPM — shared Fusion DNA "
+        f"{contract.covenant_id} ({contract.contract_id}); semantic anchors, "
+        "answers, protected rests, octave replies, and chord-directed "
+        "anticipations."
+    )
+    preview += (
+        f" {_fusion_activity_gear(density_bias).title()} activity; "
+        f"{bass_style.title()} contract adapter; groove lock "
+        f"{groove_lock:.2f}."
+    )
+    if contract.source_mode == "reference":
+        preview += " Contract rebuilt from the captured beat evidence."
+    else:
+        preview += " Authored two-bar law; no captured beat was used."
+
+    performance = infer_bass_articulations(
+        tuple(planned),
+        tempo=tempo,
+        style=bass_style,
+        source="phrase_v2",
+        expression_amount=expression_amount,
+        instrument_family=instrument_family,
+        bass_articulation_focus=bass_articulation_focus,
+        ghost_amount=ghost_amount,
+        mute_amount=mute_amount,
+        slide_amount=slide_amount,
+        legato_amount=legato_amount,
+    )
+    if return_performance_notes:
+        return buf.getvalue(), preview, performance
+    return buf.getvalue(), preview
+
+
 def generate_bass_phrase_v2(
     *,
     tempo: int,
@@ -1877,6 +2650,7 @@ def generate_bass_phrase_v2(
     slide_amount: float | None = None,
     legato_amount: float | None = None,
     candidate_role: str | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     rng = random.Random(seed) if seed is not None else random
     style = normalize_bass_style(bass_style)
@@ -1893,6 +2667,64 @@ def generate_bass_phrase_v2(
     player_profile_raw = player_persona.get("profile") if player_persona is not None else None
     player_profile: dict[str, Any] = dict(player_profile_raw) if isinstance(player_profile_raw, dict) else {}
     candidate_role_spec = bass_candidate_role_spec(candidate_role)
+
+    if fusion_contract is not None:
+        harmonic_plan = [
+            _harmonic_bar_plan(
+                bar,
+                key=key,
+                scale=scale,
+                context=context,
+                conditioning=conditioning,
+                chord_progression=chord_progression,
+            )
+            for bar in range(max(1, bar_count))
+        ]
+        confirmed_scale_pcs = {
+            (mt.key_root_pc(key) + interval) % 12
+            for interval in mt.scale_intervals(scale)
+        }
+        result = _render_fusion_contract_bass(
+            contract=fusion_contract,
+            tempo=tempo,
+            bar_count=bar_count,
+            key=key,
+            scale=scale,
+            bass_style=style,
+            instrument_family=bi,
+            player=player,
+            harmonic_plan=harmonic_plan,
+            confirmed_scale_pcs=confirmed_scale_pcs,
+            density_bias=density_bias,
+            lock_to_groove=lock_to_groove,
+            expression_amount=expression_amount,
+            bass_articulation_focus=bass_articulation_focus,
+            ghost_amount=ghost_amount,
+            mute_amount=mute_amount,
+            slide_amount=slide_amount,
+            legato_amount=legato_amount,
+            return_performance_notes=return_performance_notes,
+            candidate_role=candidate_role,
+            candidate_seed=seed,
+        )
+        if candidate_role_spec is None:
+            return result
+        if return_performance_notes:
+            midi_bytes, preview, performance = result
+            return (
+                midi_bytes,
+                preview
+                + f" Role: {candidate_role_spec.label} — "
+                + candidate_role_spec.description,
+                performance,
+            )
+        midi_bytes, preview = result
+        return (
+            midi_bytes,
+            preview
+            + f" Role: {candidate_role_spec.label} — "
+            + candidate_role_spec.description,
+        )
 
     if player == "paul_chambers":
         harmonic = [

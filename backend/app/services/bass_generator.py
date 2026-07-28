@@ -34,6 +34,7 @@ from app.services.conditioning import (
     source_snare_weight,
     source_slot_pressure,
 )
+from app.services.fusion_contract import FusionGrooveContract
 from app.services.reference_guidance import ReferenceGrooveGuidance, build_reference_guidance
 from app.services.session_context import (
     SessionAnchorContext,
@@ -1456,6 +1457,7 @@ def generate_bass(
     slide_amount: float | None = None,
     legato_amount: float | None = None,
     candidate_role: str | None = None,
+    fusion_contract: FusionGrooveContract | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     requested_density_bias = max(-1.0, min(1.0, float(density_bias)))
     density_bias, expression_amount = constrain_instrument_controls(
@@ -1473,7 +1475,14 @@ def generate_bass(
         # than silently resolving to the same sparse value.
         density_bias = 0.25 + (0.10 * requested_density_bias)
     rng = random.Random(seed) if seed is not None else random
-    engine_mode = normalize_bass_engine(bass_engine)
+    # A supplied Fusion contract is authoritative. Callers may carry legacy
+    # or persona-derived engine metadata, but the baseline renderer cannot
+    # consume the shared drums/bass/keys law.
+    engine_mode = (
+        "phrase_v2"
+        if fusion_contract is not None
+        else normalize_bass_engine(bass_engine)
+    )
     if engine_mode == "phrase_v2":
         return generate_bass_phrase_v2(
             tempo=tempo,
@@ -1498,6 +1507,7 @@ def generate_bass(
             slide_amount=slide_amount,
             legato_amount=legato_amount,
             candidate_role=candidate_role,
+            fusion_contract=fusion_contract,
         )
     # v0.3b lands in phrase_v2 only (BUILD_NOTES §6: do not touch baseline).
 

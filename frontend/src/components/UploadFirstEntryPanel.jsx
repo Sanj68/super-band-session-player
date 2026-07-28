@@ -4,6 +4,7 @@ import {
   analyzeGrooveReferenceAudio,
   createSession,
   generateSession,
+  newFusionDna,
   patchSession,
   regenerateLane,
   uploadReferenceAudio,
@@ -168,10 +169,20 @@ export default function UploadFirstEntryPanel({
       setSession(updated);
       updated = await analyzeGrooveReferenceAudio(session.id);
       setSession(updated);
-      await patchSession(session.id, { bass_engine: "phrase_v2" });
-      const regenerated = await regenerateLane(session.id, "bass");
-      setSession(regenerated.session);
-      setStatus("Groove reference understood. Pocket-aware bass regenerated.");
+      updated = await patchSession(updated.id, { bass_engine: "phrase_v2" });
+      setSession(updated);
+      if (updated.session_preset === "fusion") {
+        const regenerated = await newFusionDna(updated.id);
+        setSession(regenerated);
+        setStatus(
+          regenerated.message ??
+            "Groove reference understood. Rebuilt drums, bass, and keys from one shared Fusion DNA.",
+        );
+      } else {
+        const regenerated = await regenerateLane(updated.id, "bass");
+        setSession(regenerated.session);
+        setStatus("Groove reference understood. Pocket-aware bass regenerated.");
+      }
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -207,19 +218,28 @@ export default function UploadFirstEntryPanel({
     setBusy(true);
     setError(null);
     try {
-      await patchSession(session.id, {
+      const patched = await patchSession(session.id, {
         tempo: tempoEstimate,
         key: keyGuess,
         scale: scaleGuess,
         bar_count: barsGuess,
       });
-      const generated = await generateSession(session.id);
-      setSession(generated.session);
+      setSession(patched);
+      const generated =
+        patched.session_preset === "fusion"
+          ? await newFusionDna(patched.id, { includeLead: true })
+          : (await generateSession(patched.id)).session;
+      setSession(generated);
       setTempo(tempoEstimate);
       setKeyNote(keyGuess);
       setScale(scaleGuess);
       setBars(barsGuess);
-      setStatus("Applied detected context and generated lanes from this same reference session.");
+      setStatus(
+        patched.session_preset === "fusion"
+          ? generated.message ??
+              "Applied the detected context and rebuilt the full band from new Fusion DNA."
+          : "Applied detected context and generated lanes from this same reference session.",
+      );
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -269,7 +289,9 @@ export default function UploadFirstEntryPanel({
         </button>
         {session?.id ? (
           <button type="button" onClick={onAddGrooveAndRegenerate} disabled={busy || !selectedGrooveFile}>
-            Add Groove &amp; Regenerate
+            {session?.session_preset === "fusion"
+              ? "Add Groove + Rebuild Shared DNA"
+              : "Add Groove + Regenerate Bass"}
           </button>
         ) : null}
       </div>
