@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
+import json
 import math
 import time
 from pathlib import Path
@@ -11,13 +13,18 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models.session import SourceAnalysis
-from app.routes import midi_routes
+from app.routes import bridge_routes, midi_routes
 from app.routes import session_routes
 from app.services.audio_source_analysis import AudioAnalysisResult
 from app.services.session_context import build_session_context
 from app.services.source_analysis import build_source_analysis
 from app.services.midi_audition import FakeMidiBackend, MidiOutputInfo, RtMidiBackend
-from app.services import bass_candidate_store
+from app.services import (
+    bass_candidate_store,
+    bass_history_store,
+    bridge_store,
+    session_store,
+)
 
 
 def test_tentative_harmony_blocks_candidates_until_key_is_confirmed() -> None:
@@ -128,6 +135,7 @@ def test_reanalysis_preserves_user_confirmed_key_and_chord_map(
         },
     )
     assert confirmed.status_code == 200, confirmed.text
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
     assert stored.harmony_key_confirmed_by_user is True
     # Simulate a persisted session created before this provenance flag existed.
     # Its confirmed chord-map provenance still proves harmony was accepted.
@@ -169,6 +177,7 @@ def test_reanalysis_preserves_user_confirmed_key_and_chord_map(
     assert state["harmony_confirmation_required"] is False
     assert state["harmony_map_confirmation_required"] is False
     assert state["harmony_map_source"] == "confirmed_user"
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
     assert stored.harmony_key_confirmed_by_user is True
     assert stored.suggested_chord_progression == ["A", "F", "C", "G"]
 
@@ -208,6 +217,9 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert run["take_count"] == 3
     assert run["bass_style"] == "supportive"
     assert run["bass_engine"] == "baseline"
+    assert run["generation_context_version"] == 4
+    assert len(run["generation_context_fingerprint"]) == 64
+    assert len(run["generation_evidence_fingerprint"]) == 64
     assert isinstance(run["run_id"], str) and run["run_id"]
     assert isinstance(run["takes"], list) and len(run["takes"]) == 3
     first_take = run["takes"][0]
@@ -239,6 +251,11 @@ def test_bass_candidate_workflow_generate_list_notes_promote(tmp_path: Path) -> 
     assert listed_run is not None
     assert listed_run["session_id"] == session_id
     assert listed_run["take_count"] == 3
+    assert listed_run["generation_context_version"] == 4
+    assert (
+        listed_run["generation_context_fingerprint"]
+        == run["generation_context_fingerprint"]
+    )
     assert len(listed_run["takes"]) == 3
 
     notes_res = client.get(
@@ -360,6 +377,51 @@ def test_bass_candidate_generation_is_deterministic_for_same_take_seed(tmp_path:
     assert first_notes.status_code == 200
     assert second_notes.status_code == 200
     assert first_notes.json() == second_notes.json()
+
+
+def test_candidate_generation_does_not_enter_session_snapshot_transaction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 100, "key": "D", "scale": "minor", "bar_count": 2},
+    )
+    session_id = created.json()["session"]["id"]
+    monkeypatch.setattr(
+        app.state,
+        "session_persistence_enabled",
+        True,
+        raising=False,
+    )
+    save_calls: list[object] = []
+
+    def forbidden_session_save(sessions: object) -> int:
+        save_calls.append(sessions)
+        raise OSError("candidate generation must not save sessions")
+
+    monkeypatch.setattr(
+        session_store,
+        "save_sessions",
+        forbidden_session_save,
+    )
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 60607},
+    )
+
+    assert generated.status_code == 200, generated.text
+    assert save_calls == []
+    stored_run = bass_candidate_store.get_run_for_session(
+        session_id,
+        generated.json()["run_id"],
+    )
+    assert stored_run is not None
 
 
 def _source_analysis_for_vocabulary(bar_count: int) -> SourceAnalysis:
@@ -560,7 +622,10 @@ def test_promoted_labelled_candidate_keeps_guarded_performance_bytes(tmp_path: P
     assert _pitch_classes_from_midi(perf.content).issubset({6, 9, 1, 4})
 
 
-def test_promoting_unlabelled_candidate_keeps_seed_rerender_path(tmp_path: Path, monkeypatch) -> None:
+def test_promoting_unlabelled_candidate_uses_frozen_performance_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
     bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
     session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
@@ -602,7 +667,7 @@ def test_promoting_unlabelled_candidate_keeps_seed_rerender_path(tmp_path: Path,
         f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{unlabelled_take['take_id']}/promote"
     )
     assert promoted.status_code == 200
-    assert call_count["perf_regen"] == before + 1
+    assert call_count["perf_regen"] == before
 
 
 def test_audition_performance_after_labelled_promotion_uses_guarded_bytes(tmp_path: Path) -> None:
@@ -811,3 +876,476 @@ def test_bass_candidate_promote_lane_notes_match_candidate_notes(tmp_path: Path)
         assert lane_note["start"] == cand_note["start"]
         assert lane_note["end"] == cand_note["end"]
         assert lane_note["velocity"] == cand_note["velocity"]
+
+
+def test_candidate_promotion_rejects_legacy_and_changed_generation_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 100, "key": "D", "scale": "minor", "bar_count": 4},
+    )
+    session_id = created.json()["session"]["id"]
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 32123},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    run_id = run["run_id"]
+    take_id = run["takes"][0]["take_id"]
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+
+    original_lookup = bass_candidate_store.get_run_for_session
+
+    def legacy_lookup(request_session_id: str, request_run_id: str):
+        raw = original_lookup(request_session_id, request_run_id)
+        assert raw is not None
+        raw.pop("generation_context_version", None)
+        raw.pop("generation_context_fingerprint", None)
+        return raw
+
+    monkeypatch.setattr(bass_candidate_store, "get_run_for_session", legacy_lookup)
+    before_legacy_failure = copy.deepcopy(stored)
+    legacy = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
+    )
+    assert legacy.status_code == 409
+    assert legacy.json()["detail"]["error"] == "stale_candidate_generation_context"
+    assert legacy.json()["detail"]["reason"] == "legacy_or_unverifiable"
+    assert stored == before_legacy_failure
+
+    monkeypatch.setattr(
+        bass_candidate_store,
+        "get_run_for_session",
+        original_lookup,
+    )
+    patched = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"tempo": 101},
+    )
+    assert patched.status_code == 200
+    before_changed_failure = copy.deepcopy(stored)
+    changed = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
+    )
+    assert changed.status_code == 409
+    assert changed.json()["detail"]["error"] == "stale_candidate_generation_context"
+    assert changed.json()["detail"]["reason"] == "session_context_changed"
+    assert stored == before_changed_failure
+
+
+def test_candidate_promotion_preserves_displaced_bass_and_fails_closed_on_history_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 4},
+    )
+    session_id = created.json()["session"]["id"]
+    generated_session = client.post(f"/api/sessions/{session_id}/generate")
+    assert generated_session.status_code == 200
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    displaced_bass = bytes(stored.bass_bytes or b"")
+    assert displaced_bass
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 3, "seed": 45678},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    selected = None
+    for take in run["takes"]:
+        downloaded = client.get(
+            f"/api/sessions/{session_id}/bass-candidates/{run['run_id']}/{take['take_id']}"
+        )
+        assert downloaded.status_code == 200
+        if downloaded.content != displaced_bass:
+            selected = take
+            break
+    assert selected is not None
+    promote_url = (
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{selected['take_id']}/promote"
+    )
+
+    original_capture = bass_history_store.capture
+
+    def broken_capture(_session, *, kept: bool = False):
+        raise bass_history_store.BassHistoryStoreError("history document is corrupt")
+
+    monkeypatch.setattr(bass_history_store, "capture", broken_capture)
+    before_history_failure = copy.deepcopy(stored)
+    failed = client.post(promote_url)
+    assert failed.status_code == 503
+    assert failed.json()["detail"]["error"] == "bass_history_unavailable"
+    assert (
+        session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+        == before_history_failure
+    )
+    # Failed durable requests restore an immutable pre-request snapshot, so
+    # callers/tests must resolve the current session object again.
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(bass_history_store, "capture", original_capture)
+    promoted = client.post(promote_url)
+    assert promoted.status_code == 200
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.bass_bytes != displaced_bass
+    history = bass_history_store.history_state(stored)
+    assert history["count"] == 1
+    document = json.loads(bass_history_store._HISTORY_FILE.read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+    assert len(document["snapshots"]) == 1
+    assert (
+        base64.b64decode(document["snapshots"][0]["bass_bytes"].encode("ascii"))
+        == displaced_bass
+    )
+
+
+def test_candidate_promotion_preserves_displaced_performance_when_clean_midi_matches(
+    tmp_path: Path,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 4},
+    )
+    session_id = created.json()["session"]["id"]
+    generated_session = client.post(f"/api/sessions/{session_id}/generate")
+    assert generated_session.status_code == 200
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    displaced_performance = bytes(stored.bass_performance_bytes or b"")
+    assert displaced_performance
+    stored.current_bass_candidate_run_id = "displaced-run"
+    stored.current_bass_candidate_take_id = "displaced-take"
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 56789},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    selected = run["takes"][0]
+    candidate = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{selected['take_id']}"
+    )
+    assert candidate.status_code == 200
+    displaced_clean = candidate.content
+    stored.bass_bytes = displaced_clean
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{selected['take_id']}/promote"
+    )
+
+    assert promoted.status_code == 200, promoted.text
+    document = json.loads(
+        bass_history_store._HISTORY_FILE.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+    )
+    assert len(document["snapshots"]) == 1
+    displaced = document["snapshots"][0]
+    assert base64.b64decode(displaced["bass_bytes"]) == displaced_clean
+    assert (
+        base64.b64decode(displaced["bass_performance_bytes"])
+        == displaced_performance
+    )
+    assert (
+        displaced["controls"]["current_bass_candidate_run_id"]
+        == "displaced-run"
+    )
+    assert (
+        displaced["controls"]["current_bass_candidate_take_id"]
+        == "displaced-take"
+    )
+
+
+def test_candidate_promotion_uses_frozen_performance_when_conditioning_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 4},
+    )
+    session_id = created.json()["session"]["id"]
+    generated_session = client.post(f"/api/sessions/{session_id}/generate")
+    assert generated_session.status_code == 200
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 3, "seed": 67890},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    selected = next(
+        take for take in run["takes"] if not take.get("template_id")
+    )
+    candidate = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{selected['take_id']}"
+    )
+    assert candidate.status_code == 200
+
+    def fail_conditioning(*_args, **_kwargs):
+        raise RuntimeError("conditioning failed")
+
+    monkeypatch.setattr(
+        session_routes,
+        "_conditioning_for_generation",
+        fail_conditioning,
+    )
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{selected['take_id']}/promote"
+    )
+
+    assert promoted.status_code == 200, promoted.text
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.bass_bytes == candidate.content
+    raw_run = bass_candidate_store.get_run_for_session(
+        session_id,
+        run["run_id"],
+    )
+    assert raw_run is not None
+    raw_take = next(
+        take
+        for take in raw_run["takes"]
+        if take["take_id"] == selected["take_id"]
+    )
+    assert stored.bass_performance_bytes == base64.b64decode(
+        raw_take["performance_midi_b64"]
+    )
+    assert stored.current_bass_candidate_run_id == run["run_id"]
+    assert stored.current_bass_candidate_take_id == selected["take_id"]
+
+
+def test_candidate_payload_tamper_is_rejected_before_download_or_promotion(
+    tmp_path: Path,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 4},
+    )
+    session_id = created.json()["session"]["id"]
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 78901},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    take_id = run["takes"][0]["take_id"]
+    before = copy.deepcopy(
+        session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    )
+
+    document = json.loads(
+        bass_candidate_store._RUNS_FILE.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+    )
+    document["runs"][0]["takes"][0]["midi_b64"] = base64.b64encode(
+        b"tampered-but-valid-base64"
+    ).decode("ascii")
+    bass_candidate_store._RUNS_FILE.write_text(  # type: ignore[attr-defined]
+        json.dumps(document),
+        encoding="utf-8",
+    )
+
+    download = client.get(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{take_id}"
+    )
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{take_id}/promote"
+    )
+
+    assert download.status_code == 409
+    assert promoted.status_code == 409
+    assert promoted.json()["detail"]["error"] == "candidate_take_integrity_failed"
+    assert session_routes._SESSIONS[session_id] == before  # type: ignore[attr-defined]
+
+
+def test_live_bridge_changes_do_not_re_render_or_retarget_existing_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    bridge_store.clear_bridge_state()
+    monkeypatch.setenv(bridge_routes._FEATURE_FLAG_ENV, "true")
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 2},
+    )
+    session_id = created.json()["session"]["id"]
+    # Candidate evidence can follow a genuinely tentative imported/source
+    # session; required SessionCreate harmony itself remains authoritative.
+    session_routes._SESSIONS[session_id].harmony_key_confirmed_by_user = False  # type: ignore[attr-defined]
+
+    def harmonic_frame(*, key_pc: int, capture_epoch: int) -> dict[str, object]:
+        chroma = [0.0] * 12
+        chroma[key_pc] = 1.0
+        return {
+            "plugin_instance_id": "candidate-listener",
+            "session_id": session_id,
+            "source_id": "master-bus",
+            "capture_epoch": capture_epoch,
+            "sample_rate": 48000.0,
+            "host_tempo": 104.0,
+            "tempo_bpm": 104.0,
+            "tempo_confidence": 1.0,
+            "playing": True,
+            "ppq_position": float(capture_epoch * 4),
+            "bar_index": capture_epoch,
+            "duration_seconds": 0.125,
+            "chroma": chroma,
+            "key_pc": key_pc,
+            "scale": "major",
+            "key_confidence": 0.95,
+            "scale_confidence": 0.95,
+        }
+
+    first_live = client.post(
+        f"/api/bridge/sessions/{session_id}/harmonic",
+        json=[harmonic_frame(key_pc=2, capture_epoch=1)],
+    )
+    assert first_live.status_code == 200
+    assert session_routes._SESSIONS[session_id].key == "D"  # type: ignore[attr-defined]
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 89012},
+    )
+    assert generated.status_code == 200
+    run = generated.json()
+    take_id = run["takes"][0]["take_id"]
+    raw_run = bass_candidate_store.get_run_for_session(
+        session_id,
+        run["run_id"],
+    )
+    assert raw_run is not None
+    raw_take = next(
+        take for take in raw_run["takes"] if take["take_id"] == take_id
+    )
+    frozen_performance = base64.b64decode(
+        raw_take["performance_midi_b64"]
+    )
+
+    later_live = client.post(
+        f"/api/bridge/sessions/{session_id}/harmonic",
+        json=[harmonic_frame(key_pc=7, capture_epoch=2)],
+    )
+    assert later_live.status_code == 200
+    assert session_routes._SESSIONS[session_id].key == "G"  # type: ignore[attr-defined]
+
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{take_id}/promote"
+    )
+
+    assert promoted.status_code == 200, promoted.text
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.key == "D"
+    assert stored.bass_performance_bytes == frozen_performance
+    assert stored.bridge_live_overlay_active is False
+
+
+def test_durable_bridge_commit_stales_candidate_before_frozen_evidence_can_rollback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bass_candidate_store._DATA_DIR = tmp_path  # type: ignore[attr-defined]
+    bass_candidate_store._RUNS_FILE = tmp_path / "bass_candidate_runs.json"  # type: ignore[attr-defined]
+    session_routes._SESSIONS.clear()  # type: ignore[attr-defined]
+    bridge_store.clear_bridge_state()
+    monkeypatch.setenv(bridge_routes._FEATURE_FLAG_ENV, "true")
+    client = TestClient(app)
+    created = client.post(
+        "/api/sessions/",
+        json={"tempo": 104, "key": "C", "scale": "major", "bar_count": 2},
+    )
+    session_id = created.json()["session"]["id"]
+
+    frames = [
+        {
+            "plugin_instance_id": "candidate-source",
+            "session_id": session_id,
+            "source_id": "drum-bus",
+            "capture_epoch": 1,
+            "sample_rate": 48000.0,
+            "host_tempo": 104.0,
+            "playing": True,
+            "ppq_position": index * 0.5,
+            "bar_index": 0,
+            "duration_seconds": 0.125,
+            "rms": 0.5,
+            "low_band_energy": 0.9 if index in (0, 4) else 0.2,
+            "mid_band_energy": 0.5 if index in (2, 6) else 0.1,
+            "high_band_energy": 0.2,
+            "onset_strength": 0.8 if index % 2 == 0 else 0.2,
+        }
+        for index in range(8)
+    ]
+    live = client.post(
+        f"/api/bridge/sessions/{session_id}/source-frames",
+        json=frames,
+    )
+    assert live.status_code == 200, live.text
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.bridge_live_overlay_active is True
+    assert stored.bridge_live_base_source_analysis_override is None
+
+    generated = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 90123},
+    )
+    assert generated.status_code == 200, generated.text
+    run = generated.json()
+    take_id = run["takes"][0]["take_id"]
+
+    committed = client.post(
+        f"/api/bridge/sessions/{session_id}/commit-source-groove"
+    )
+    assert committed.status_code == 200, committed.text
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.bridge_live_overlay_active is False
+    assert stored.source_analysis_override is not None
+    before_stale_failure = copy.deepcopy(stored)
+
+    promoted = client.post(
+        f"/api/sessions/{session_id}/bass-candidates/"
+        f"{run['run_id']}/{take_id}/promote"
+    )
+
+    assert promoted.status_code == 409
+    assert (
+        promoted.json()["detail"]["error"]
+        == "stale_candidate_generation_context"
+    )
+    assert promoted.json()["detail"]["reason"] == "session_context_changed"
+    assert (
+        session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+        == before_stale_failure
+    )

@@ -131,12 +131,20 @@ export async function listBassCandidates(sessionId) {
   return res.json();
 }
 
-export function bassCandidateMidiUrl(sessionId, runId, takeId) {
-  return `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}`;
+function normalizeBassCandidateMidiMode(mode) {
+  return mode === "clean" ? "clean" : "performance";
 }
 
-export async function downloadBassCandidateMidi(sessionId, runId, takeId) {
-  const res = await fetch(bassCandidateMidiUrl(sessionId, runId, takeId));
+export function bassCandidateMidiUrl(sessionId, runId, takeId, mode = "performance") {
+  const requestedMode = normalizeBassCandidateMidiMode(mode);
+  return (
+    `${API_BASE}/api/sessions/${sessionId}/bass-candidates/` +
+    `${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}?mode=${requestedMode}`
+  );
+}
+
+export async function downloadBassCandidateMidi(sessionId, runId, takeId, mode = "performance") {
+  const res = await fetch(bassCandidateMidiUrl(sessionId, runId, takeId, mode));
   if (!res.ok) await parseError(res);
   return res.blob();
 }
@@ -150,20 +158,29 @@ export async function promoteBassCandidate(sessionId, runId, takeId) {
   return res.json();
 }
 
-export async function getBassCandidateTakeNotes(sessionId, runId, takeId) {
+export async function getBassCandidateTakeNotes(sessionId, runId, takeId, mode = "performance") {
+  const requestedMode = normalizeBassCandidateMidiMode(mode);
   const res = await fetch(
-    `${API_BASE}/api/sessions/${sessionId}/bass-candidates/${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}/notes`,
+    `${API_BASE}/api/sessions/${sessionId}/bass-candidates/` +
+      `${encodeURIComponent(runId)}/${encodeURIComponent(takeId)}/notes?mode=${requestedMode}`,
   );
   if (!res.ok) await parseError(res);
   return res.json();
 }
 
 /** @param {string[]} lanes e.g. `["bass", "chords"]` — returns full `SessionState` */
-export async function regenerateSelectedLanes(sessionId, lanes) {
+export async function regenerateSelectedLanes(
+  sessionId,
+  lanes,
+  { preserveBassPhrase = false } = {},
+) {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/regenerate-selected`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lanes }),
+    body: JSON.stringify({
+      lanes,
+      preserve_bass_phrase: Boolean(preserveBassPhrase),
+    }),
   });
   if (!res.ok) await parseError(res);
   return res.json();
@@ -217,26 +234,35 @@ export async function patchLaneLocks(sessionId, body) {
   return res.json();
 }
 
-export function midiLaneUrl(sessionId, lane) {
-  return `${API_BASE}/api/sessions/${sessionId}/midi/${lane}`;
+export function midiLaneUrl(sessionId, lane, mode = null) {
+  const url = `${API_BASE}/api/sessions/${sessionId}/midi/${lane}`;
+  return mode ? `${url}?mode=${encodeURIComponent(mode)}` : url;
 }
 
-export function exportZipUrl(sessionId) {
-  return `${API_BASE}/api/sessions/${sessionId}/export`;
-}
-
-export function sessionMidiUrl(sessionId) {
-  return `${API_BASE}/api/sessions/${sessionId}/midi`;
-}
-
-export async function downloadExportZip(sessionId) {
-  const res = await fetch(exportZipUrl(sessionId));
+export async function downloadLaneMidi(sessionId, lane, mode = null) {
+  const res = await fetch(midiLaneUrl(sessionId, lane, mode));
   if (!res.ok) await parseError(res);
   return res.blob();
 }
 
-export async function downloadSessionMidi(sessionId) {
-  const res = await fetch(sessionMidiUrl(sessionId));
+export function exportZipUrl(sessionId, bassMode = null) {
+  const url = `${API_BASE}/api/sessions/${sessionId}/export`;
+  return bassMode ? `${url}?bass_mode=${encodeURIComponent(bassMode)}` : url;
+}
+
+export function sessionMidiUrl(sessionId, bassMode = null) {
+  const url = `${API_BASE}/api/sessions/${sessionId}/midi`;
+  return bassMode ? `${url}?bass_mode=${encodeURIComponent(bassMode)}` : url;
+}
+
+export async function downloadExportZip(sessionId, bassMode = null) {
+  const res = await fetch(exportZipUrl(sessionId, bassMode));
+  if (!res.ok) await parseError(res);
+  return res.blob();
+}
+
+export async function downloadSessionMidi(sessionId, bassMode = null) {
+  const res = await fetch(sessionMidiUrl(sessionId, bassMode));
   if (!res.ok) await parseError(res);
   return res.blob();
 }

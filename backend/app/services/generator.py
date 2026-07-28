@@ -61,6 +61,11 @@ def generate_bass(
     lock_to_groove: float | None = None,
     density_bias: float = 0.0,
     expression_amount: float = 0.5,
+    bass_articulation_focus: str | None = "natural",
+    ghost_amount: float | None = None,
+    mute_amount: float | None = None,
+    slide_amount: float | None = None,
+    legato_amount: float | None = None,
     candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
     """Delegate to modular bass generator (styles: supportive, melodic, rhythmic, slap, fusion)."""
@@ -82,6 +87,11 @@ def generate_bass(
         lock_to_groove=lock_to_groove,
         density_bias=density_bias,
         expression_amount=expression_amount,
+        bass_articulation_focus=bass_articulation_focus,
+        ghost_amount=ghost_amount,
+        mute_amount=mute_amount,
+        slide_amount=slide_amount,
+        legato_amount=legato_amount,
         candidate_role=candidate_role,
     )
 
@@ -95,6 +105,7 @@ def generate_chords(
     chord_style: str | None = None,
     chord_instrument: str | None = None,
     chord_player: str | None = None,
+    chord_progression: list[str] | None = None,
     session_preset: str | None = None,
     context: SessionAnchorContext | None = None,
 ) -> tuple[bytes, str]:
@@ -107,6 +118,7 @@ def generate_chords(
         chord_style=chord_style,
         chord_instrument=chord_instrument,
         chord_player=chord_player,
+        chord_progression=chord_progression,
         session_preset=session_preset,
         context=context,
     )

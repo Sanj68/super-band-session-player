@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -29,6 +30,7 @@ struct FeatureFrame
     float highBandEnergy = 0.0f;
     float onsetStrength = 0.0f;
     int barIndex = 0;
+    std::uint64_t captureEpoch = 0;
     bool playing = false;
 };
 
@@ -94,6 +96,7 @@ public:
 
 private:
     void resetAnalysisState(double sampleRate);
+    void resetCaptureWindow();
     void accumulateSample(float x);
     void emitFrameFromAccumulator(int numSamples, const juce::AudioPlayHead::PositionInfo& position);
 
@@ -102,6 +105,10 @@ private:
     int frameHopSamples = 5512;
     int accumulatedSamples = 0;
     double processedSamples = 0.0;
+    std::uint64_t captureEpoch = 0;
+    bool wasTransportRunning = false;
+    double lastPpqPosition = -1.0;
+    double lastPlayingCallbackMs = 0.0;
 
     double lowState = 0.0;
     double highLowpassState = 0.0;

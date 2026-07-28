@@ -10,6 +10,7 @@ from app.services.conditioning import (
     ConditioningHarmonicBar,
     UnifiedConditioning,
     has_source_groove,
+    has_source_groove_bar,
     source_kick_weight,
     source_snare_weight,
     source_slot_pressure,
@@ -245,13 +246,21 @@ def _groove_score(
                 kick = drum_kick_weight(context, bar, slot)
                 pressure = slot_pressure(context, bar, slot)
                 score += _clamp(0.35 + 0.75 * kick - 0.3 * max(0.0, pressure - kick))
-            elif conditioning is not None and has_source_groove(conditioning) and (
+            elif conditioning is not None and has_source_groove_bar(conditioning, bar) and (
                 context is None or context.anchor_lane != "drums"
             ):
                 sk = source_kick_weight(conditioning, bar, slot)
                 pr = source_slot_pressure(conditioning, bar, slot)
                 sn = source_snare_weight(conditioning, bar, slot)
-                score += _clamp(0.35 + 0.42 * sk + 0.22 * pr - 0.2 * max(0.0, sn - sk))
+                # Dark cells are not partial pocket hits, and generic onset
+                # pressure is not evidence of a kick. Reward kick affinity
+                # directly while penalising snare/pressure that exceeds it.
+                score += _clamp(
+                    0.12
+                    + (0.88 * sk)
+                    - (0.32 * max(0.0, pr - sk))
+                    - (0.38 * max(0.0, sn - sk))
+                )
             else:
                 score += 0.9 if slot % 4 == 0 else 0.62
     return _clamp(score / max(total, 1e-9))
@@ -437,12 +446,13 @@ def _musicality_adjustment(
         aligned = 0
         source_total = 0
         for bar, bar_sig in enumerate(signature):
+            if not has_source_groove_bar(conditioning, bar):
+                continue
             for slot in bar_sig:
                 source_total += 1
                 sk = source_kick_weight(conditioning, bar, slot)
-                pr = source_slot_pressure(conditioning, bar, slot)
                 sn = source_snare_weight(conditioning, bar, slot)
-                if (sk >= 0.34 or pr >= 0.48) and not (sn >= 0.58 and sk < 0.32):
+                if sk >= 0.34 and not (sn >= 0.58 and sk < 0.32):
                     aligned += 1
         align_rate = aligned / max(1, source_total)
         if align_rate >= 0.58:

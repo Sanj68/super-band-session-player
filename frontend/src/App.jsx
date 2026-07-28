@@ -7,6 +7,7 @@ import {
   deleteSetup,
   duplicateSession,
   downloadExportZip,
+  downloadLaneMidi,
   downloadSessionMidi,
   generateAroundAnchor,
   generateSession,
@@ -17,7 +18,6 @@ import {
   getClipEvaluation,
   listMidiOutputs,
   listSetups,
-  midiLaneUrl,
   patchLaneLocks,
   patchSession,
   regenerateLane,
@@ -28,6 +28,10 @@ import {
 } from "./api/client.js";
 import LaneCard from "./components/LaneCard.jsx";
 import BassCandidatePanel from "./components/BassCandidatePanel.jsx";
+import BassPreferencesPanel, {
+  DEFAULT_BASS_PERFORMANCE_CONTROLS,
+  normalizeBassPerformanceControls,
+} from "./components/BassPreferencesPanel.jsx";
 import ReferenceAudioPanel from "./components/ReferenceAudioPanel.jsx";
 import SavedSetupsPanel from "./components/SavedSetupsPanel.jsx";
 import SessionComparePanel from "./components/SessionComparePanel.jsx";
@@ -88,6 +92,9 @@ const ACTIVE_LEAD_INSTRUMENTS = [
 
 const ACTIVE_BASS_INSTRUMENTS = [
   { value: "finger_bass", label: "Finger bass" },
+  { value: "fretless_bass", label: "Fretless bass" },
+  { value: "upright_bass", label: "Upright bass" },
+  { value: "sub_bass", label: "Sub / synth bass" },
   { value: "slap_bass", label: "Slap bass" },
   { value: "synth_bass", label: "Synth bass" },
 ];
@@ -123,6 +130,12 @@ export default function App() {
   const [leadPlayer, setLeadPlayer] = useState("");
   const [bassStyle, setBassStyle] = useState("supportive");
   const [bassEngine, setBassEngine] = useState("baseline");
+  const [bassArticulationFocus, setBassArticulationFocus] = useState("natural");
+  const [bassExpression, setBassExpression] = useState(0.5);
+  const [bassDensityBias, setBassDensityBias] = useState(0);
+  const [bassPerformanceControls, setBassPerformanceControls] = useState(() => ({
+    ...DEFAULT_BASS_PERFORMANCE_CONTROLS,
+  }));
   const [chordStyle, setChordStyle] = useState("simple");
   const [chordProgression, setChordProgression] = useState("");
   const [chordPlayer, setChordPlayer] = useState("");
@@ -140,6 +153,12 @@ export default function App() {
   const [activeBassDraft, setActiveBassDraft] = useState("supportive");
   const [activeBassEngineDraft, setActiveBassEngineDraft] = useState("baseline");
   const [activeBassLockDraft, setActiveBassLockDraft] = useState(null);
+  const [activeBassArticulationDraft, setActiveBassArticulationDraft] = useState("natural");
+  const [activeBassExpressionDraft, setActiveBassExpressionDraft] = useState(0.5);
+  const [activeBassDensityDraft, setActiveBassDensityDraft] = useState(0);
+  const [activeBassPerformanceDraft, setActiveBassPerformanceDraft] = useState(() => ({
+    ...DEFAULT_BASS_PERFORMANCE_CONTROLS,
+  }));
   const [activeBassPhaseDraft, setActiveBassPhaseDraft] = useState(0);
   const [activeChordDraft, setActiveChordDraft] = useState("simple");
   const [activeDrumDraft, setActiveDrumDraft] = useState("straight");
@@ -299,6 +318,12 @@ export default function App() {
     setActiveBassPlayerDraft(session?.bass_player ?? "");
     setActiveBassEngineDraft(session?.bass_engine ?? "baseline");
     setActiveBassLockDraft(session?.bass_lock_to_groove ?? null);
+    setActiveBassArticulationDraft(session?.bass_articulation_focus ?? "natural");
+    setActiveBassExpressionDraft(session?.bass_expression ?? 0.5);
+    setActiveBassDensityDraft(session?.bass_density_bias ?? 0);
+    setActiveBassPerformanceDraft(
+      normalizeBassPerformanceControls(session?.bass_performance_controls),
+    );
     setActiveBassPhaseDraft(session?.bass_phase_offset_beats ?? 0);
     setActiveDrumPlayerDraft(session?.drum_player ?? "");
     setActiveChordPlayerDraft(session?.chord_player ?? "");
@@ -319,6 +344,10 @@ export default function App() {
     session?.bass_player,
     session?.bass_engine,
     session?.bass_lock_to_groove,
+    session?.bass_articulation_focus,
+    session?.bass_expression,
+    session?.bass_density_bias,
+    session?.bass_performance_controls,
     session?.bass_phase_offset_beats,
     session?.drum_player,
     session?.chord_player,
@@ -339,6 +368,10 @@ export default function App() {
         lead_style: leadStyle,
         bass_style: bassStyle,
         bass_engine: bassEngine,
+        bass_articulation_focus: bassArticulationFocus,
+        bass_expression: bassExpression,
+        bass_density_bias: bassDensityBias,
+        bass_performance_controls: normalizeBassPerformanceControls(bassPerformanceControls),
         chord_style: chordStyle,
         drum_style: drumStyle,
         lead_instrument: leadInstrument,
@@ -385,6 +418,10 @@ export default function App() {
     leadStyle,
     bassStyle,
     bassEngine,
+    bassArticulationFocus,
+    bassExpression,
+    bassDensityBias,
+    bassPerformanceControls,
     chordStyle,
     chordProgression,
     drumStyle,
@@ -533,14 +570,14 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const blob = await downloadExportZip(session.id);
+      const blob = await downloadExportZip(session.id, "performance");
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `${session.id}_super_band_lanes.zip`;
       a.click();
       URL.revokeObjectURL(url);
-      setStatus("Export downloaded.");
+      setStatus("Export downloaded with the Bass performance heard in Logic.");
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -553,7 +590,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const blob = await downloadSessionMidi(session.id);
+      const blob = await downloadSessionMidi(session.id, "performance");
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -562,7 +599,7 @@ export default function App() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setStatus("Session MIDI exported.");
+      setStatus("Session MIDI exported with the Bass performance heard in Logic.");
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -571,17 +608,32 @@ export default function App() {
   }, [session]);
 
   const onDownloadLaneMidi = useCallback(
-    (lane) => {
+    async (lane, mode = null) => {
       if (!session?.id || !session.lanes?.[lane]?.generated) return;
-      const a = document.createElement("a");
-      a.href = midiLaneUrl(session.id, lane);
-      a.download = `${session.id}_${lane}.mid`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setStatus(`${lane[0].toUpperCase()}${lane.slice(1)} MIDI exported.`);
+      setBusy(true);
+      setError(null);
+      try {
+        const blob = await downloadLaneMidi(session.id, lane, mode);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${session.id}_${lane}${mode ? `_${mode}` : ""}.mid`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setStatus(
+          lane === "bass" && mode === "performance"
+            ? "Bass performance MIDI exported — this is the part heard in Logic."
+            : `${lane[0].toUpperCase()}${lane.slice(1)}${mode === "clean" ? " clean" : ""} MIDI exported.`,
+        );
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        setBusy(false);
+      }
     },
-    [session],
+    [session, setBusy, setError, setStatus],
   );
 
   const refresh = useCallback(async () => {
@@ -662,20 +714,103 @@ export default function App() {
     }
   }, [session, activeDrumPlayerDraft]);
 
-  const onUpdateBassStyle = useCallback(async () => {
+  const onGenerateBassIdea = useCallback(async () => {
     if (!session?.id) return;
     setBusy(true);
     setError(null);
     try {
-      const updated = await patchSession(session.id, { bass_style: activeBassDraft });
-      setSession(updated);
-      setStatus(updated.message ?? "Styles updated. Regenerate affected lane(s) to rebuild MIDI.");
+      const preserveBassPhrase =
+        activeBassDraft === session.bass_style &&
+        Math.abs(activeBassExpressionDraft - session.bass_expression) <= 0.0005 &&
+        Math.abs(activeBassDensityDraft - session.bass_density_bias) <= 0.0005;
+      const patched = await patchSession(session.id, {
+        bass_style: activeBassDraft,
+        bass_articulation_focus: activeBassArticulationDraft,
+        bass_expression: activeBassExpressionDraft,
+        bass_density_bias: activeBassDensityDraft,
+        bass_performance_controls: normalizeBassPerformanceControls(
+          activeBassPerformanceDraft,
+        ),
+      });
+      const regenerated = await regenerateSelectedLanes(
+        patched.id,
+        ["bass"],
+        { preserveBassPhrase },
+      );
+      setSession(regenerated);
+      setStatus(
+        regenerated.bass_performance_controls_notice ??
+          regenerated.bass_articulation_notice ??
+          (preserveBassPhrase
+            ? "Applied the selected touch and performance controls to the current bass phrase."
+            : regenerated.message ??
+              "Generated a fresh bass phrase with the selected player intent."),
+      );
     } catch (e) {
       setError(e.message || String(e));
     } finally {
       setBusy(false);
     }
-  }, [session, activeBassDraft]);
+  }, [
+    session,
+    activeBassDraft,
+    activeBassArticulationDraft,
+    activeBassExpressionDraft,
+    activeBassDensityDraft,
+    activeBassPerformanceDraft,
+  ]);
+
+  const onResetBassForNewBeat = useCallback(async () => {
+    if (!session?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const patched = await patchSession(session.id, {
+        bass_style: activeBassDraft,
+        bass_articulation_focus: activeBassArticulationDraft,
+        bass_expression: activeBassExpressionDraft,
+        bass_density_bias: activeBassDensityDraft,
+        bass_performance_controls: normalizeBassPerformanceControls(
+          activeBassPerformanceDraft,
+        ),
+      });
+      const regenerated = await regenerateSelectedLanes(
+        patched.id,
+        ["bass"],
+        { preserveBassPhrase: false },
+      );
+      setSession(regenerated);
+
+      if (regenerated.groove_source_ready === true) {
+        const frameCount = Number(regenerated.groove_source_frame_count);
+        const frameSummary =
+          Number.isFinite(frameCount) && frameCount > 0
+            ? ` from ${frameCount} captured groove frame${frameCount === 1 ? "" : "s"}`
+            : " using the captured beat source";
+        setStatus(`Fresh bass phrase generated${frameSummary}.`);
+      } else if (regenerated.groove_source_ready === false) {
+        setStatus(
+          regenerated.groove_source_notice ??
+            "Fresh bass phrase generated. No beat source is connected, so this reset did not analyse the new beat.",
+        );
+      } else {
+        setStatus(
+          "Fresh bass phrase generated from scratch. Beat analysis is only used when a groove source is connected.",
+        );
+      }
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    session,
+    activeBassDraft,
+    activeBassArticulationDraft,
+    activeBassExpressionDraft,
+    activeBassDensityDraft,
+    activeBassPerformanceDraft,
+  ]);
 
   const onUpdateBassEngine = useCallback(async () => {
     if (!session?.id) return;
@@ -867,6 +1002,12 @@ export default function App() {
     const drum = fromSession ? activeDrumDraft : drumStyle;
     const bass = fromSession ? activeBassDraft : bassStyle;
     const bassEngineMode = fromSession ? activeBassEngineDraft : bassEngine;
+    const bassTouch = fromSession ? activeBassArticulationDraft : bassArticulationFocus;
+    const bassCharacter = fromSession ? activeBassExpressionDraft : bassExpression;
+    const bassActivity = fromSession ? activeBassDensityDraft : bassDensityBias;
+    const bassPerformance = fromSession
+      ? activeBassPerformanceDraft
+      : bassPerformanceControls;
     const chord = fromSession ? activeChordDraft : chordStyle;
     const lead = fromSession ? activeLeadDraft : leadStyle;
     const lp = fromSession ? activeLeadPlayerDraft : leadPlayer;
@@ -886,6 +1027,10 @@ export default function App() {
         drum_style: drum,
         bass_style: bass,
         bass_engine: bassEngineMode,
+        bass_articulation_focus: bassTouch,
+        bass_expression: bassCharacter,
+        bass_density_bias: bassActivity,
+        bass_performance_controls: normalizeBassPerformanceControls(bassPerformance),
         chord_style: chord,
         lead_style: lead,
         lead_player: lp || null,
@@ -919,6 +1064,14 @@ export default function App() {
     bassStyle,
     activeBassEngineDraft,
     bassEngine,
+    activeBassArticulationDraft,
+    bassArticulationFocus,
+    activeBassExpressionDraft,
+    bassExpression,
+    activeBassDensityDraft,
+    bassDensityBias,
+    activeBassPerformanceDraft,
+    bassPerformanceControls,
     activeChordDraft,
     chordStyle,
     activeLeadDraft,
@@ -953,6 +1106,12 @@ export default function App() {
     setDrumStyle(s.drum_style);
     setBassStyle(s.bass_style);
     setBassEngine(s.bass_engine ?? "baseline");
+    setBassArticulationFocus(s.bass_articulation_focus ?? "natural");
+    setBassExpression(s.bass_expression ?? 0.5);
+    setBassDensityBias(s.bass_density_bias ?? 0);
+    setBassPerformanceControls(
+      normalizeBassPerformanceControls(s.bass_performance_controls),
+    );
     setChordStyle(s.chord_style);
     setChordPlayer(s.chord_player ?? "");
     setLeadStyle(s.lead_style);
@@ -966,6 +1125,12 @@ export default function App() {
     setNewSessionPreset(s.session_preset ?? "");
     setActiveDrumDraft(s.drum_style);
     setActiveBassDraft(s.bass_style);
+    setActiveBassArticulationDraft(s.bass_articulation_focus ?? "natural");
+    setActiveBassExpressionDraft(s.bass_expression ?? 0.5);
+    setActiveBassDensityDraft(s.bass_density_bias ?? 0);
+    setActiveBassPerformanceDraft(
+      normalizeBassPerformanceControls(s.bass_performance_controls),
+    );
     setActiveChordDraft(s.chord_style);
     setActiveChordPlayerDraft(s.chord_player ?? "");
     setActiveLeadDraft(s.lead_style);
@@ -1028,6 +1193,12 @@ export default function App() {
     setLeadStyle(s.lead_style);
     setLeadPlayer(s.lead_player ?? "");
     setBassStyle(s.bass_style);
+    setBassArticulationFocus(s.bass_articulation_focus ?? "natural");
+    setBassExpression(s.bass_expression ?? 0.5);
+    setBassDensityBias(s.bass_density_bias ?? 0);
+    setBassPerformanceControls(
+      normalizeBassPerformanceControls(s.bass_performance_controls),
+    );
     setChordStyle(s.chord_style);
     setChordProgression(
       (s.chord_progression?.length
@@ -1467,6 +1638,27 @@ export default function App() {
             <p className="sp-panel-sub">
               Labelled Sub One candidates: Warm Jazz-Funk · Dark Slinky Grit · Fusion Answer · Hip-Hop Soul Restraint · Tight Head-Nod Pocket. Audition / promote / export from each card.
             </p>
+            {session && (
+              <BassPreferencesPanel
+                session={session}
+                busy={busy}
+                style={activeBassDraft}
+                setStyle={setActiveBassDraft}
+                touch={activeBassArticulationDraft}
+                setTouch={setActiveBassArticulationDraft}
+                activity={activeBassDensityDraft}
+                setActivity={setActiveBassDensityDraft}
+                character={activeBassExpressionDraft}
+                setCharacter={setActiveBassExpressionDraft}
+                performanceControls={activeBassPerformanceDraft}
+                setPerformanceControls={setActiveBassPerformanceDraft}
+                effectivePerformanceControls={session.bass_performance_controls_effective}
+                performanceControlsNotice={session.bass_performance_controls_notice}
+                instrument={session.bass_instrument}
+                onGenerate={onGenerateBassIdea}
+                onResetForNewBeat={onResetBassForNewBeat}
+              />
+            )}
             {session && (session.bass_engine ?? "baseline") !== "phrase_v2" && (
               <div
                 style={{
@@ -2326,42 +2518,6 @@ export default function App() {
               maxWidth: 720,
             }}
           >
-            <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Bass style (this session)</span>
-            <select
-              value={activeBassDraft}
-              onChange={(e) => setActiveBassDraft(e.target.value)}
-              disabled={busy}
-              style={{ fontSize: 14 }}
-            >
-              {ACTIVE_BASS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={onUpdateBassStyle}
-              disabled={busy || activeBassDraft === session.bass_style}
-              style={{ padding: "0.35rem 0.75rem" }}
-            >
-              Update Bass Style
-            </button>
-          </div>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "0.5rem",
-              alignItems: "center",
-              marginBottom: "1rem",
-              padding: "0.65rem 0.85rem",
-              background: "#fff",
-              border: "1px solid #e2e8f0",
-              borderRadius: 10,
-              maxWidth: 720,
-            }}
-          >
             <span style={{ fontSize: 14, color: "#475569", marginRight: 4 }}>Bass engine (this session)</span>
             <select
               value={activeBassEngineDraft}
@@ -2730,15 +2886,33 @@ export default function App() {
             )}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" onClick={onExportSessionMidi} disabled={busy || !allGenerated}>
-              Download MIDI for Logic
+            <button
+              type="button"
+              onClick={onExportSessionMidi}
+              disabled={busy || !allGenerated || !session.bass_performance_available}
+              title={
+                session.bass_performance_available
+                  ? "Export the complete session with the Bass performance heard in Logic"
+                  : "Regenerate the full Bass lane to restore its performance render"
+              }
+            >
+              Download MIDI for Logic (heard Bass performance)
             </button>
-            <button type="button" onClick={onExport} disabled={busy || !allGenerated}>
-              Export MIDI (zip)
+            <button
+              type="button"
+              onClick={onExport}
+              disabled={busy || !allGenerated || !session.bass_performance_available}
+              title={
+                session.bass_performance_available
+                  ? "Export all lanes with the Bass performance heard in Logic"
+                  : "Regenerate the full Bass lane to restore its performance render"
+              }
+            >
+              Export MIDI ZIP (heard Bass performance)
             </button>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-            {["drums", "bass", "chords", "lead"].map((lane) => (
+            {["drums", "chords", "lead"].map((lane) => (
               <button
                 key={lane}
                 type="button"
@@ -2748,6 +2922,26 @@ export default function App() {
                 Download {lane[0].toUpperCase()}{lane.slice(1)} MIDI
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => onDownloadLaneMidi("bass", "performance")}
+              disabled={busy || !session.bass_performance_available}
+              title={
+                session.bass_performance_available
+                  ? "Export the performed bass part currently heard from Session Player Bass in Logic"
+                  : "Regenerate the full Bass lane to restore its performance render"
+              }
+            >
+              Download Bass Performance MIDI (what you hear)
+            </button>
+            <button
+              type="button"
+              onClick={() => onDownloadLaneMidi("bass", "clean")}
+              disabled={busy || !session.lanes?.bass?.generated}
+              title="Export the clean, pre-performance bass notes for secondary editing"
+            >
+              Download Clean Bass MIDI
+            </button>
           </div>
         </>
       )}

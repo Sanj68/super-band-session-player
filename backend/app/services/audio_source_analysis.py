@@ -246,11 +246,13 @@ def should_anchor_bounce_to_session_grid(
     detected_tempo: float,
     detected_bar_count: int | None,
     head_trim_seconds: float,
+    trust_session_bar_count: bool = False,
 ) -> bool:
     """Recognise a grid-aligned session bounce whose tracker missed beat zero."""
     tempo = float(session_tempo)
     bars = int(session_bar_count)
-    if tempo <= 0.0 or bars <= 0 or detected_bar_count != bars:
+    bar_count_evidence = bars if trust_session_bar_count else detected_bar_count
+    if tempo <= 0.0 or bars <= 0 or bar_count_evidence != bars:
         return False
     if abs(float(detected_tempo) - tempo) / tempo > 0.04:
         return False
@@ -987,6 +989,7 @@ def analyze_reference_audio(
         detected_tempo=float(tempo_est),
         detected_bar_count=auto_bar_count,
         head_trim_seconds=head_trim,
+        trust_session_bar_count=trust_session_bar_count,
     )
     if session_grid_anchor:
         # A beat tracker often omits the transient at file time zero. When the

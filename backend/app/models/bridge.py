@@ -36,7 +36,7 @@ class BridgeTransportFrame(BaseModel):
     host_tempo: float | None = Field(default=None, ge=20.0, le=400.0)
     sample_rate: float | None = Field(default=None, ge=4000.0, le=384000.0)
     playing: bool = False
-    ppq_position: float | None = None
+    ppq_position: float | None = Field(default=None, allow_inf_nan=False)
     bar_index: int | None = Field(default=None, ge=0)
     beat_index: int | None = Field(default=None, ge=0)
 
@@ -47,13 +47,22 @@ class BridgeSourceFeatureFrame(BaseModel):
     plugin_instance_id: str = Field(min_length=1, max_length=128)
     session_id: str = Field(min_length=1, max_length=128)
     source_id: str = Field(min_length=1, max_length=128)
+    capture_epoch: int | None = Field(default=None, ge=0)
     sample_rate: float = Field(ge=4000.0, le=384000.0)
     host_tempo: float | None = Field(default=None, ge=20.0, le=400.0)
     playing: bool = False
-    ppq_position: float | None = None
+    ppq_position: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+    )
     bar_index: int = Field(ge=0)
-    frame_start_seconds: float | None = Field(default=None, ge=0.0)
-    duration_seconds: float = Field(gt=0.0)
+    frame_start_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+    duration_seconds: float = Field(gt=0.0, allow_inf_nan=False)
     rms: float = 0.0
     low_band_energy: float = 0.0
     mid_band_energy: float = 0.0
@@ -110,17 +119,26 @@ class BridgeHarmonicFrame(BaseModel):
     plugin_instance_id: str = Field(min_length=1, max_length=128)
     session_id: str = Field(min_length=1, max_length=128)
     source_id: str = Field(default="session-player-listener", min_length=1, max_length=128)
+    capture_epoch: int | None = Field(default=None, ge=0)
     sample_rate: float | None = Field(default=None, ge=4000.0, le=384000.0)
     host_tempo: float | None = Field(default=None, ge=20.0, le=400.0)
     tempo_bpm: float | None = Field(default=None, ge=20.0, le=400.0)
     tempo_confidence: float = 0.0
     playing: bool = False
-    ppq_position: float | None = None
+    ppq_position: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+    )
     bar_index: int = Field(default=0, ge=0)
     beat_index: int | None = Field(default=None, ge=0)
-    bar_position: float | None = None
-    frame_start_seconds: float | None = Field(default=None, ge=0.0)
-    duration_seconds: float = Field(gt=0.0)
+    bar_position: float | None = Field(default=None, allow_inf_nan=False)
+    frame_start_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+    duration_seconds: float = Field(gt=0.0, allow_inf_nan=False)
     chroma: list[float] = Field(min_length=12, max_length=12)
     key_pc: int | None = Field(default=None, ge=0, le=11)
     key: str | None = Field(default=None, max_length=8)
@@ -173,7 +191,12 @@ class BridgeStateResponse(BaseModel):
     plugin_instance_id: str | None = None
     session_id: str | None = None
     source_id: str | None = None
+    source_plugin_instance_id: str | None = None
+    harmonic_plugin_instance_id: str | None = None
+    harmonic_source_id: str | None = None
     last_seen_at: str | None = None
     frame_count: int = 0
     harmonic_frame_count: int = 0
+    source_epoch: int = 0
+    harmonic_epoch: int = 0
     last_transport: dict[str, Any] | None = None

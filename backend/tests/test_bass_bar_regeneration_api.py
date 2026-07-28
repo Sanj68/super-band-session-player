@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
 from fastapi.testclient import TestClient
+import mido
 import pytest
 
 from app.main import app
 from app.routes import session_routes
+from app.services.bass_bar_splice import splice_bass_bars
 
 
 def _client() -> TestClient:
@@ -86,6 +89,81 @@ def _regenerate_bass_bars(
     regenerated = client.post(f"/api/sessions/{session_id}/lanes/bass/regenerate-bars", json=body)
     assert regenerated.status_code == 200
     return dict(regenerated.json())
+
+
+def _midi_with_tick_notes(
+    notes: list[tuple[int, int, int]],
+    *,
+    ticks_per_beat: int = 220,
+) -> bytes:
+    midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+    events: list[tuple[int, mido.Message]] = []
+    for pitch, start_tick, duration_ticks in notes:
+        events.append(
+            (
+                start_tick,
+                mido.Message("note_on", note=pitch, velocity=90, time=0),
+            )
+        )
+        events.append(
+            (
+                start_tick + duration_ticks,
+                mido.Message("note_off", note=pitch, velocity=0, time=0),
+            )
+        )
+    events.sort(
+        key=lambda event: (
+            event[0],
+            0 if event[1].type == "note_off" else 1,
+        )
+    )
+    track = mido.MidiTrack()
+    previous_tick = 0
+    for tick, message in events:
+        track.append(message.copy(time=tick - previous_tick))
+        previous_tick = tick
+    track.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(track)
+    buffer = io.BytesIO()
+    midi.save(file=buffer)
+    return buffer.getvalue()
+
+
+def test_performance_splice_assigns_early_downbeats_to_their_musical_bar() -> None:
+    # At 220 PPQ, the selected range is [880, 1760) ticks. Humanized
+    # downbeats arrive a few ticks early on both sides of that range.
+    existing = _midi_with_tick_notes(
+        [
+            (30, 400, 20),
+            (40, 876, 20),
+            (50, 1755, 20),
+        ]
+    )
+    replacement = _midi_with_tick_notes(
+        [
+            (31, 400, 20),
+            (41, 876, 20),
+            (51, 1755, 20),
+        ]
+    )
+
+    spliced = splice_bass_bars(
+        existing_midi=existing,
+        replacement_midi=replacement,
+        tempo=96,
+        bar_start=1,
+        bar_end=2,
+        humanize_boundary_seconds=0.02,
+    )
+    output = mido.MidiFile(file=io.BytesIO(spliced))
+    pitches = [
+        int(message.note)
+        for track in output.tracks
+        for message in track
+        if message.type == "note_on" and int(message.velocity) > 0
+    ]
+
+    assert pitches == [30, 41, 50]
 
 
 def test_regenerate_bass_bars_invalid_ranges_return_400() -> None:
@@ -205,7 +283,13 @@ def test_turnaround_adds_explicit_approach_and_preserves_other_bars(engine: str)
     ]
     assert stable_original == stable_after
 
-    late_notes = [note for note in notes if final_beat_start <= float(note["start"]) < bar_end]
+    # A humanized downbeat from the following bar can land just before the raw
+    # timestamp boundary while still belonging outside the edited bar.
+    late_notes = [
+        note
+        for note in notes
+        if final_beat_start <= float(note["start"]) < bar_end - 0.02
+    ]
     assert len(late_notes) == 3
     assert int(late_notes[-1]["pitch"]) % 12 in {11, 1}  # chromatic neighbor of next C root
 

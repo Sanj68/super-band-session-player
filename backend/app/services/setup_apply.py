@@ -20,6 +20,15 @@ def band_setup_to_session_patch_payload(setup: BandSetup) -> dict[str, Any]:
     out: dict[str, Any] = {
         "drum_style": setup.drum_style.value,
         "bass_style": setup.bass_style.value,
+        "bass_engine": setup.bass_engine.value,
+        "bass_articulation_focus": setup.bass_articulation_focus.value,
+        "bass_expression": setup.bass_expression,
+        "bass_performance_controls": (
+            setup.bass_performance_controls.model_dump(mode="json")
+            if setup.bass_performance_controls is not None
+            else None
+        ),
+        "bass_density_bias": setup.bass_density_bias,
         "chord_style": setup.chord_style.value,
         "lead_style": setup.lead_style.value,
         "drum_kit": setup.drum_kit.value,

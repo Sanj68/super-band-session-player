@@ -8,8 +8,10 @@ the producer must be able to recover the exact playable MIDI in every case.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -28,7 +30,10 @@ _RESTORED_FIELDS = (
     "bass_player",
     "bass_engine",
     "bass_lock_to_groove",
+    "bass_articulation_focus",
     "bass_expression",
+    "bass_performance_controls",
+    "bass_phase_offset_beats",
     "bass_density_bias",
     "bass_seed",
     "bass_preview",
@@ -36,6 +41,10 @@ _RESTORED_FIELDS = (
     "current_bass_candidate_run_id",
     "current_bass_candidate_take_id",
 )
+_RESTORED_FIELD_DEFAULTS: dict[str, object] = {
+    "bass_articulation_focus": "natural",
+    "bass_performance_controls": None,
+}
 
 
 def _now() -> str:
@@ -82,22 +91,224 @@ def context_fingerprint(session: object) -> str:
 def part_fingerprint(session: object) -> str:
     """Identify exact MIDI plus the controls needed to explain/replay it."""
 
-    payload = {
-        "context": _context_payload(session),
-        "bass_bytes": _encode_bytes(getattr(session, "bass_bytes")),
-        "bass_performance_bytes": _encode_bytes(
+    return _part_fingerprint_from_values(
+        context=_context_payload(session),
+        bass_bytes=_encode_bytes(getattr(session, "bass_bytes")),
+        bass_performance_bytes=_encode_bytes(
             getattr(session, "bass_performance_bytes")
         ),
-        "controls": {
-            field: getattr(session, field)
+        controls={
+            field: getattr(
+                session,
+                field,
+                _RESTORED_FIELD_DEFAULTS.get(field),
+            )
             for field in _RESTORED_FIELDS
         },
-    }
-    return _stable_hash(payload)
+    )
+
+
+def _part_fingerprint_from_values(
+    *,
+    context: object,
+    bass_bytes: object,
+    bass_performance_bytes: object,
+    controls: object,
+) -> str:
+    return _stable_hash(
+        {
+            "context": context,
+            "bass_bytes": bass_bytes,
+            "bass_performance_bytes": bass_performance_bytes,
+            "controls": controls,
+        }
+    )
 
 
 def _empty_document() -> dict[str, Any]:
     return {"schema_version": _SCHEMA_VERSION, "snapshots": []}
+
+
+class BassHistoryStoreError(RuntimeError):
+    """The history file could not be preserved safely."""
+
+
+def _is_finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _controls_have_supported_shape(controls: dict[str, Any]) -> bool:
+    required = set(_RESTORED_FIELDS) - {
+        "bass_phase_offset_beats",
+        "bass_articulation_focus",
+        "bass_performance_controls",
+    }
+    if not required.issubset(controls):
+        return False
+    if any(
+        not isinstance(controls.get(field), str)
+        for field in ("bass_style", "bass_instrument", "bass_engine", "bass_preview")
+    ):
+        return False
+    if any(
+        controls.get(field) is not None
+        and not isinstance(controls.get(field), str)
+        for field in (
+            "bass_player",
+            "current_bass_candidate_run_id",
+            "current_bass_candidate_take_id",
+        )
+    ):
+        return False
+    if controls.get("bass_lock_to_groove") is not None and not _is_finite_number(
+        controls.get("bass_lock_to_groove")
+    ):
+        return False
+    if (
+        "bass_articulation_focus" in controls
+        and controls.get("bass_articulation_focus")
+        not in {"natural", "clean", "ghosted", "muted", "connected"}
+    ):
+        return False
+    if any(
+        not _is_finite_number(controls.get(field))
+        for field in ("bass_expression", "bass_density_bias")
+    ):
+        return False
+    performance_controls = controls.get("bass_performance_controls")
+    if performance_controls is not None:
+        expected = {
+            "ghost",
+            "mute",
+            "slide",
+            "legato",
+            "timing_humanize",
+            "velocity_humanize",
+        }
+        if (
+            not isinstance(performance_controls, dict)
+            or set(performance_controls) != expected
+            or any(
+                not _is_finite_number(value)
+                or not 0.0 <= float(value) <= 1.0
+                for value in performance_controls.values()
+            )
+        ):
+            return False
+    if "bass_phase_offset_beats" in controls and not _is_finite_number(
+        controls.get("bass_phase_offset_beats")
+    ):
+        return False
+    seed = controls.get("bass_seed")
+    if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
+        return False
+    return isinstance(controls.get("bass_locked"), bool)
+
+
+def _snapshot_has_supported_shape(row: object) -> bool:
+    if not isinstance(row, dict):
+        return False
+    required_text = (
+        "snapshot_id",
+        "session_id",
+        "created_at",
+        "context_fingerprint",
+        "part_fingerprint",
+    )
+    if any(
+        not isinstance(row.get(field), str) or not row[field]
+        for field in required_text
+    ):
+        return False
+    if not isinstance(row.get("kept"), bool):
+        return False
+    if row.get("kept_at") is not None and not isinstance(row.get("kept_at"), str):
+        return False
+    if not isinstance(row.get("context"), dict) or not isinstance(row.get("controls"), dict):
+        return False
+    if not _controls_have_supported_shape(row["controls"]):
+        return False
+    if not isinstance(row.get("bass_bytes"), str):
+        return False
+    if row.get("bass_performance_bytes") is not None and not isinstance(
+        row.get("bass_performance_bytes"), str
+    ):
+        return False
+    try:
+        if _decode_bytes(row["bass_bytes"]) is None:
+            return False
+        _decode_bytes(row.get("bass_performance_bytes"))
+    except (ValueError, binascii.Error):
+        return False
+    return True
+
+
+def _document_has_supported_shape(document: object) -> bool:
+    version = (
+        document.get("schema_version")
+        if isinstance(document, dict)
+        else None
+    )
+    return (
+        isinstance(document, dict)
+        and isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == _SCHEMA_VERSION
+        and isinstance(document.get("snapshots"), list)
+        and all(_snapshot_has_supported_shape(row) for row in document["snapshots"])
+    )
+
+
+def _document_fingerprints_are_valid(document: dict[str, Any]) -> bool:
+    for row in document["snapshots"]:
+        if row["context_fingerprint"] != _stable_hash(row["context"]):
+            return False
+        expected_part = _part_fingerprint_from_values(
+            context=row["context"],
+            bass_bytes=row["bass_bytes"],
+            bass_performance_bytes=row.get("bass_performance_bytes"),
+            controls=row["controls"],
+        )
+        if row["part_fingerprint"] != expected_part:
+            return False
+    return True
+
+
+def _migrate_legacy_articulation_focus(document: dict[str, Any]) -> bool:
+    """Upgrade pre-Touch snapshots without quarantining recoverable ideas."""
+
+    changed = False
+    for row in document["snapshots"]:
+        controls = row["controls"]
+        if "bass_articulation_focus" in controls:
+            continue
+        controls["bass_articulation_focus"] = "natural"
+        row["part_fingerprint"] = _part_fingerprint_from_values(
+            context=row["context"],
+            bass_bytes=row["bass_bytes"],
+            bass_performance_bytes=row.get("bass_performance_bytes"),
+            controls=controls,
+        )
+        changed = True
+    return changed
+
+
+def _quarantine_unlocked(reason: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    quarantine_file = _HISTORY_FILE.with_name(
+        f"{_HISTORY_FILE.name}.quarantine-{reason}-{stamp}-{uuid4().hex[:8]}"
+    )
+    try:
+        _HISTORY_FILE.replace(quarantine_file)
+    except OSError as exc:
+        raise BassHistoryStoreError(
+            "Bass history is invalid and could not be preserved for recovery"
+        ) from exc
+    return quarantine_file
 
 
 def _load_unlocked() -> dict[str, Any]:
@@ -105,23 +316,48 @@ def _load_unlocked() -> dict[str, Any]:
         return _empty_document()
     try:
         document = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except FileNotFoundError:
         return _empty_document()
-    if (
-        not isinstance(document, dict)
-        or document.get("schema_version") != _SCHEMA_VERSION
-        or not isinstance(document.get("snapshots"), list)
-    ):
-        return _empty_document()
+    except (json.JSONDecodeError, UnicodeError, RecursionError):
+        quarantine_file = _quarantine_unlocked("invalid-json")
+        raise BassHistoryStoreError(
+            f"Invalid bass history was preserved at {quarantine_file.name}"
+        )
+    except OSError:
+        quarantine_file = _quarantine_unlocked("unreadable")
+        raise BassHistoryStoreError(
+            f"Unreadable bass history was preserved at {quarantine_file.name}"
+        )
+    if not _document_has_supported_shape(document):
+        quarantine_file = _quarantine_unlocked("unsupported-schema")
+        raise BassHistoryStoreError(
+            f"Unsupported bass history was preserved at {quarantine_file.name}"
+        )
+    if not _document_fingerprints_are_valid(document):
+        quarantine_file = _quarantine_unlocked("invalid-fingerprint")
+        raise BassHistoryStoreError(
+            f"Invalid bass history was preserved at {quarantine_file.name}"
+        )
+    if _migrate_legacy_articulation_focus(document):
+        _write_unlocked(document)
     return document
 
 
 def _write_unlocked(document: dict[str, Any]) -> None:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
     raw = json.dumps(document, indent=2, sort_keys=True) + "\n"
     tmp = _HISTORY_FILE.with_suffix(".json.tmp")
-    tmp.write_text(raw, encoding="utf-8")
-    tmp.replace(_HISTORY_FILE)
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(raw, encoding="utf-8")
+        tmp.replace(_HISTORY_FILE)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise BassHistoryStoreError(
+            "Bass history could not be written safely"
+        ) from exc
 
 
 def _snapshot_from_session(session: object, *, kept: bool) -> dict[str, Any]:
@@ -136,7 +372,11 @@ def _snapshot_from_session(session: object, *, kept: bool) -> dict[str, Any]:
         "part_fingerprint": part_fingerprint(session),
         "context": _context_payload(session),
         "controls": {
-            field: getattr(session, field)
+            field: getattr(
+                session,
+                field,
+                _RESTORED_FIELD_DEFAULTS.get(field),
+            )
             for field in _RESTORED_FIELDS
         },
         "bass_bytes": _encode_bytes(getattr(session, "bass_bytes")),
@@ -262,6 +502,11 @@ def history_state(session: object) -> dict[str, Any]:
                         "bass_instrument", "finger_bass"
                     )
                 ),
+                "bass_articulation_focus": str(
+                    (row.get("controls") or {}).get(
+                        "bass_articulation_focus", "natural"
+                    )
+                ),
             }
             for row in rows
         ],
@@ -298,6 +543,10 @@ def recall(session: object, snapshot_id: str) -> dict[str, Any]:
     for field in _RESTORED_FIELDS:
         if field in controls:
             setattr(session, field, controls[field])
+    if "bass_articulation_focus" not in controls:
+        setattr(session, "bass_articulation_focus", "natural")
+    if "bass_performance_controls" not in controls:
+        setattr(session, "bass_performance_controls", None)
     return dict(snapshot)
 
 

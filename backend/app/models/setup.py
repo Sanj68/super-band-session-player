@@ -5,7 +5,10 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.session import (
+    BassArticulationFocus,
+    BassEngine,
     BassInstrument,
+    BassPerformanceControls,
     BassPlayer,
     BassStyle,
     ChordInstrument,
@@ -44,6 +47,13 @@ class BandSetup(BaseModel):
     session_preset: SessionPreset | None = None
     drum_style: DrumStyle
     bass_style: BassStyle
+    bass_engine: BassEngine = Field(default=BassEngine.baseline)
+    bass_articulation_focus: BassArticulationFocus = Field(
+        default=BassArticulationFocus.natural
+    )
+    bass_expression: float = Field(default=0.5, ge=0.0, le=1.0)
+    bass_performance_controls: BassPerformanceControls | None = None
+    bass_density_bias: float = Field(default=0.0, ge=-1.0, le=1.0)
     chord_style: ChordStyle
     lead_style: LeadStyle
     lead_instrument: LeadInstrument = Field(default=LeadInstrument.flute)
@@ -106,6 +116,13 @@ class BandSetupCreate(BaseModel):
     session_preset: SessionPreset | None = None
     drum_style: DrumStyle
     bass_style: BassStyle
+    bass_engine: BassEngine = Field(default=BassEngine.baseline)
+    bass_articulation_focus: BassArticulationFocus = Field(
+        default=BassArticulationFocus.natural
+    )
+    bass_expression: float = Field(default=0.5, ge=0.0, le=1.0)
+    bass_performance_controls: BassPerformanceControls | None = None
+    bass_density_bias: float = Field(default=0.0, ge=-1.0, le=1.0)
     chord_style: ChordStyle
     lead_style: LeadStyle
     lead_instrument: LeadInstrument = Field(default=LeadInstrument.flute)

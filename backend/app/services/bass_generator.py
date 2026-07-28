@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import random
+from dataclasses import replace
 from typing import Final, TypedDict, cast
 
 import pretty_midi
@@ -15,7 +16,10 @@ from app.services.anchor_lane_roles import (
 )
 from app.services.bass_articulation import ghost_eligibility, shape_note
 from app.services.bass_performance import BassPerformanceNote, infer_bass_articulations
-from app.services.bass_instrument_profiles import constrain_instrument_controls
+from app.services.bass_instrument_profiles import (
+    bass_instrument_profile,
+    constrain_instrument_controls,
+)
 from app.services.bass_phrase_engine_v2 import generate_bass_phrase_v2
 from app.services.bass_phrase_plan import build_phrase_plan
 from app.services.bass_vocabulary.paul_chambers import (
@@ -253,25 +257,59 @@ def _pick_pool_groove(
     return candidates[(salt + shift) % len(candidates)]
 
 
-def _pick_fusion_pair(
+def _pick_fusion_role_groove(
     salt: int,
+    variant_salt: int,
     bar: int,
+    role: str,
     *,
     use_profile: bool,
     traits: BassProfile,
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    if not use_profile:
-        n = len(_FUSION_GROOVES)
-        return _FUSION_GROOVES[salt % n], _FUSION_GROOVES[(salt + 3) % n]
+) -> tuple[int, ...]:
+    """Choose a coherent Fusion cell for this phrase role.
+
+    A single A/B pair repeated for the whole part made fresh regenerations
+    collapse to five rhythmic skeletons.  Keep a recognisable anchor inside
+    each four-bar cell, but let the answer, push, and next cell be selected
+    from independent seeded dimensions.  ``variant_salt`` consumes the full
+    regeneration seed rather than only ``salt % len(pool)``.
+    """
     ceiling = traits["density_ceiling"]
-    candidates = [g for g in _FUSION_GROOVES if len(g) <= ceiling] or list(_FUSION_GROOVES)
-    rev = traits["syncopation_bias"] >= 0.5
-    candidates = sorted(candidates, key=_syncop_score, reverse=rev)
-    rep = traits["groove_repetition_strength"]
-    sh = 0 if rep >= 0.55 else bar
-    ia = (salt + sh) % len(candidates)
-    ib = (salt + 3 + sh * 2) % len(candidates)
-    return candidates[ia], candidates[ib]
+    candidates = (
+        [g for g in _FUSION_GROOVES if len(g) <= ceiling]
+        or list(_FUSION_GROOVES)
+    )
+    if use_profile:
+        candidates = sorted(
+            candidates,
+            key=_syncop_score,
+            reverse=traits["syncopation_bias"] >= 0.5,
+        )
+
+    count = len(candidates)
+    if count == 1:
+        return candidates[0]
+
+    # Four-bar grammar: establish, answer, push, resolve.  Independent
+    # offsets produce many phrases while the release returns to the anchor.
+    answer_offset = 1 + ((variant_salt // 4) % (count - 1))
+    push_offset = 1 + ((variant_salt // 16) % (count - 1))
+    role_offset = {
+        "anchor": 0,
+        "answer": answer_offset,
+        "push": push_offset,
+        "release": 0,
+    }.get(str(role), bar % count)
+
+    repetition = traits["groove_repetition_strength"] if use_profile else 0.0
+    cell_stride = 1 + (variant_salt % (count - 1))
+    if repetition >= 0.72:
+        cell_stride = 0
+    elif repetition >= 0.55:
+        cell_stride = 1
+    cell = max(0, int(bar)) // 4
+    anchor_index = (salt + (variant_salt // 64) + cell * cell_stride) % count
+    return candidates[(anchor_index + role_offset) % count]
 
 
 def _thin_slots(
@@ -1144,6 +1182,207 @@ def _clamp_f(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def _thin_baseline_notes_for_activity(
+    notes: list[pretty_midi.Note],
+    *,
+    density_bias: float,
+    bar_count: int,
+    bar_anchor: float,
+    seconds_per_beat: float,
+) -> list[pretty_midi.Note]:
+    """Deterministically open space for negative Activity.
+
+    Baseline styles build notes through several independent vocabulary paths,
+    so their profile-level density ceiling is not a reliable thinning rail
+    when no named player or anchor is active. Apply one final musical filter:
+    preserve each bar's first statement, prefer strong-beat anchors, and drop
+    weaker events until the requested global density is reached.
+    """
+
+    activity = max(-1.0, min(0.0, float(density_bias)))
+    if activity > -0.25 or len(notes) <= max(1, int(bar_count)):
+        return notes
+
+    keep_fraction = 1.0 - (0.45 * abs(activity))
+    target = max(
+        max(1, int(bar_count)),
+        int(round(len(notes) * keep_fraction)),
+    )
+    if target >= len(notes):
+        return notes
+
+    sixteenth = float(seconds_per_beat) / 4.0
+    bar_length = float(seconds_per_beat) * 4.0
+    note_positions: list[tuple[int, int, int]] = []
+    first_index_per_bar: dict[int, int] = {}
+    for index, note in enumerate(notes):
+        relative = max(0.0, float(note.start) - float(bar_anchor))
+        bar = max(
+            0,
+            min(max(1, int(bar_count)) - 1, int(relative // bar_length)),
+        )
+        bar_start = float(bar_anchor) + (bar * bar_length)
+        slot = max(
+            0,
+            min(15, int(round((float(note.start) - bar_start) / sixteenth))),
+        )
+        note_positions.append((index, bar, slot))
+        incumbent = first_index_per_bar.get(bar)
+        if incumbent is None or float(note.start) < float(notes[incumbent].start):
+            first_index_per_bar[bar] = index
+
+    keep = set(first_index_per_bar.values())
+    remaining = max(0, target - len(keep))
+
+    def keep_priority(position: tuple[int, int, int]) -> tuple[int, int, int]:
+        index, bar, slot = position
+        note = notes[index]
+        if slot == 0:
+            structural = 4
+        elif slot == 8:
+            structural = 3
+        elif slot % 4 == 0:
+            structural = 2
+        else:
+            structural = 1
+        stable = (
+            bar * 1009
+            + slot * 131
+            + int(note.pitch) * 17
+            + index * 53
+        ) & 0xFFFF
+        return (structural, int(note.velocity), stable)
+
+    eligible = [
+        position
+        for position in note_positions
+        if position[0] not in keep
+    ]
+    eligible.sort(key=keep_priority, reverse=True)
+    keep.update(index for index, _bar, _slot in eligible[:remaining])
+    return [
+        note
+        for index, note in enumerate(notes)
+        if index in keep
+    ]
+
+
+def _add_baseline_activity_gap_notes(
+    notes: list[pretty_midi.Note],
+    *,
+    style: str,
+    density_bias: float,
+    bar_count: int,
+    bar_anchor: float,
+    seconds_per_beat: float,
+) -> list[pretty_midi.Note]:
+    """Add safe deterministic pickups where phrase slots are not sufficient.
+
+    Melodic and slap own fixed event templates and do not consume added phrase
+    slots. Supportive lines on lower-density instrument profiles can also lose
+    one planned opportunity to their existing vocabulary cap. Fit short notes
+    into real gaps using pitches already chosen by the line, so Activity
+    reliably increases attacks without rewriting harmony or contour.
+    """
+
+    density = float(density_bias)
+    fixed_template = style in {"melodic", "slap"}
+    capped_supportive = style == "supportive"
+    if density < 0.25 or not (fixed_template or capped_supportive):
+        return notes
+
+    take_per_bar = 2 if density >= 0.75 else 1
+    sixteenth = float(seconds_per_beat) / 4.0
+    bar_length = float(seconds_per_beat) * 4.0
+    preferred_even = (3, 11, 14, 6, 10, 2, 7, 13, 15, 5, 9, 1)
+    preferred_odd = (2, 10, 14, 5, 11, 3, 7, 13, 15, 6, 9, 1)
+    out = list(notes)
+
+    for bar in range(max(1, int(bar_count))):
+        bar_start = float(bar_anchor) + (bar * bar_length)
+        bar_end = bar_start + bar_length
+        inserted = 0
+        preferred = preferred_even if bar % 2 == 0 else preferred_odd
+        for slot in preferred:
+            if inserted >= take_per_bar:
+                break
+            target_start = bar_start + (slot * sixteenth)
+            bar_notes = sorted(
+                (
+                    note
+                    for note in out
+                    if bar_start <= float(note.start) < bar_end
+                ),
+                key=lambda note: (float(note.start), int(note.pitch), float(note.end)),
+            )
+            if any(
+                abs(float(note.start) - target_start) < sixteenth * 0.32
+                for note in bar_notes
+            ):
+                continue
+            previous = next(
+                (
+                    note
+                    for note in reversed(bar_notes)
+                    if float(note.start) < target_start
+                ),
+                None,
+            )
+            following = next(
+                (
+                    note
+                    for note in bar_notes
+                    if float(note.start) > target_start
+                ),
+                None,
+            )
+            cap = (
+                min(bar_end - 1e-4, float(following.start) - 1e-4)
+                if following is not None
+                else bar_end - 1e-4
+            )
+            duration_scale = {
+                "melodic": 0.72,
+                "supportive": 0.62,
+                "slap": 0.5,
+            }.get(style, 0.6)
+            desired_duration = sixteenth * duration_scale
+            end = min(cap, target_start + desired_duration)
+            if end - target_start < max(0.012, sixteenth * 0.18):
+                continue
+            if previous is not None and float(previous.end) > target_start - 1e-4:
+                trimmed_end = target_start - 1e-4
+                if trimmed_end - float(previous.start) < max(0.012, sixteenth * 0.18):
+                    continue
+                previous.end = trimmed_end
+
+            if style == "melodic":
+                source_note = following or previous
+                velocity = 68 + ((bar * 7 + slot * 3) % 9)
+            elif style == "slap":
+                source_note = (
+                    min(bar_notes, key=lambda note: (float(note.start), int(note.pitch)))
+                    if bar_notes
+                    else previous or following
+                )
+                velocity = 44 + ((bar * 5 + slot * 7) % 13)
+            else:
+                source_note = following or previous
+                velocity = 58 + ((bar * 5 + slot * 3) % 9)
+            if source_note is None:
+                continue
+            out.append(
+                pretty_midi.Note(
+                    pitch=int(source_note.pitch),
+                    velocity=int(velocity),
+                    start=float(target_start),
+                    end=float(end),
+                )
+            )
+            inserted += 1
+    return out
+
+
 def _supportive_unified_slot8_pitch(
     *,
     planned_tidx: int,
@@ -1211,13 +1450,28 @@ def generate_bass(
     lock_to_groove: float | None = None,
     density_bias: float = 0.0,
     expression_amount: float = 0.5,
+    bass_articulation_focus: str | None = "natural",
+    ghost_amount: float | None = None,
+    mute_amount: float | None = None,
+    slide_amount: float | None = None,
+    legato_amount: float | None = None,
     candidate_role: str | None = None,
 ) -> tuple[bytes, str] | tuple[bytes, str, tuple[BassPerformanceNote, ...]]:
+    requested_density_bias = max(-1.0, min(1.0, float(density_bias)))
     density_bias, expression_amount = constrain_instrument_controls(
         bass_instrument,
-        density_bias=density_bias,
+        density_bias=requested_density_bias,
         expression_amount=expression_amount,
     )
+    if (
+        bass_instrument_profile(bass_instrument).id == "sub_bass"
+        and requested_density_bias > 0.0
+    ):
+        # The legacy sub profile deliberately defaults sparse
+        # (density_ceiling=-0.35). Preserve that default, but let an explicit
+        # positive Activity request add one protected retrigger per bar rather
+        # than silently resolving to the same sparse value.
+        density_bias = 0.25 + (0.10 * requested_density_bias)
     rng = random.Random(seed) if seed is not None else random
     engine_mode = normalize_bass_engine(bass_engine)
     if engine_mode == "phrase_v2":
@@ -1229,6 +1483,7 @@ def generate_bass(
             bass_style=bass_style,
             bass_instrument=bass_instrument,
             bass_player=bass_player,
+            chord_progression=chord_progression,
             session_preset=session_preset,
             context=context,
             conditioning=conditioning,
@@ -1237,6 +1492,11 @@ def generate_bass(
             lock_to_groove=lock_to_groove,
             density_bias=density_bias,
             expression_amount=expression_amount,
+            bass_articulation_focus=bass_articulation_focus,
+            ghost_amount=ghost_amount,
+            mute_amount=mute_amount,
+            slide_amount=slide_amount,
+            legato_amount=legato_amount,
             candidate_role=candidate_role,
         )
     # v0.3b lands in phrase_v2 only (BUILD_NOTES §6: do not touch baseline).
@@ -1265,6 +1525,10 @@ def generate_bass(
 
     melodic_shape = _MELODIC_SHAPES[salt % len(_MELODIC_SHAPES)]
     slap_template_idx = salt % 5
+    # A second seeded dimension prevents Fusion regeneration from collapsing
+    # to ``salt % 5`` while leaving every other style's deterministic stream
+    # untouched.
+    fusion_variant_salt = rng.randint(0, 65535) if style == "fusion" else 0
 
     bass_role_name = bass_role_for_anchor(context.anchor_lane) if context else None
     bass_knobs = bass_knobs_for_role(bass_role_name) if context and bass_role_name else None
@@ -1331,6 +1595,54 @@ def generate_bass(
     phrase_plan = build_phrase_plan(
         bar_count=bar_count, style=style, salt=salt, context=context, conditioning=conditioning
     )
+    if density_bias >= 0.25:
+        # Phrase plans are the shared composition rail for every baseline
+        # style. Add deterministic offbeat opportunities here so positive
+        # Activity is audible even without a player profile or drum anchor.
+        # Downstream pressure/rest gates can still reject an unsafe extra.
+        activity_take = 2 if density_bias >= 0.75 else 1
+        activity_slots = (3, 11, 14, 6, 10, 2, 7, 13, 15, 5, 9)
+        denser_plan = []
+        for phrase_bar in phrase_plan:
+            original_tones = {
+                slot: (
+                    phrase_bar.tone_path[index % len(phrase_bar.tone_path)]
+                    if phrase_bar.tone_path
+                    else 0
+                )
+                for index, slot in enumerate(phrase_bar.slots)
+            }
+            extras = [
+                slot
+                for slot in activity_slots
+                if slot not in phrase_bar.slots
+            ][:activity_take]
+            slots = tuple(sorted(set(phrase_bar.slots).union(extras)))
+            tone_path = tuple(
+                (
+                    original_tones[slot]
+                    if slot in original_tones
+                    else original_tones[
+                        min(
+                            original_tones,
+                            key=lambda existing: (
+                                abs(existing - slot),
+                                existing > slot,
+                                existing,
+                            ),
+                        )
+                    ]
+                )
+                for slot in slots
+            )
+            denser_plan.append(
+                replace(
+                    phrase_bar,
+                    slots=slots,
+                    tone_path=tone_path,
+                )
+            )
+        phrase_plan = denser_plan
     source_minor_riff_root_pc = _supportive_source_minor_riff_active(
         style=style,
         context=context,
@@ -1902,9 +2214,23 @@ def generate_bass(
             shape = melodic_shape[rot:] + melodic_shape[:rot]
             rb = melodic_root_bias()
             rest = (bias_traits["rest_preference"] if bias_traits else 0.0) + (0.45 * float(intent["rest_bias"]))
+            if density_bias >= 0.75:
+                melodic_slots = (
+                    (0, 1, 4, 6, 9, 11, 13, 15)
+                    if bar % 2 == 0
+                    else (0, 3, 5, 8, 10, 12, 14, 15)
+                )
+            elif density_bias >= 0.25:
+                melodic_slots = (
+                    (0, 1, 4, 7, 9, 11, 13, 15)
+                    if bar % 2 == 0
+                    else (0, 3, 5, 8, 10, 12, 14, 15)
+                )
+            else:
+                melodic_slots = tuple(i * 2 for i in range(8))
             for i in range(8):
+                slot = melodic_slots[i]
                 if context:
-                    slot = min(15, i * 2)
                     if _drum_anchor_ctx(context):
                         kw = drum_kick_weight(context, bar, slot)
                         pr = slot_pressure(context, bar, slot)
@@ -1933,7 +2259,7 @@ def generate_bass(
                     pitch = _pick_harmonic_style_pitch(
                         style="melodic",
                         role=str(phrase_bar.role),
-                        slot=min(15, i * 2),
+                        slot=slot,
                         root_pitch=r,
                         fifth_pitch=f,
                         third_pitch=t,
@@ -1946,11 +2272,13 @@ def generate_bass(
                     )
                 rb_use = rb
                 if _drum_anchor_ctx(context) and i in (0, 4):
-                    kw_m = drum_kick_weight(context, bar, min(15, i * 2))
+                    kw_m = drum_kick_weight(context, bar, slot)
                     rb_use = min(0.98, rb + 0.12 * kw_m * kick_lock_m)
                 if i in (0, 4) and rng.random() < rb_use:
                     pitch = r
-                elif rng.random() < 0.06 * (0.4 if use_profile and traits else 1.0):
+                elif rng.random() < (
+                    0.04 + (0.16 * float(expression_amount))
+                ) * (0.4 if use_profile and traits else 1.0):
                     pitch = min(pitch + 12, 74)
                 if intent["role"] == "release" and i >= 6 and rng.random() < (0.55 * float(intent["cadence_strength"])):
                     pitch = r if i == 6 else f
@@ -1961,7 +2289,7 @@ def generate_bass(
                 ph += sixteenth * 0.1 * float(intent["offbeat_push"]) * (0.35 if i in (0, 4) else 1.0)
                 if context:
                     ph += sixteenth * 0.05 * min(1.0, context.syncopation_score) * (0.4 if i in (0, 4) else 1.0)
-                t0 = bar_t0 + i * eighth + ph + rng.uniform(0, 0.012) * spb
+                t0 = bar_t0 + slot * sixteenth + ph + rng.uniform(0, 0.012) * spb
                 t1 = t0 + eighth * dur_j(0.9)
                 vel = max(70, min(100, (88 if i in (0, 4) else 76) + rng.randint(-8, 8)))
                 emit_note(
@@ -1969,7 +2297,7 @@ def generate_bass(
                     start=t0,
                     end=t1,
                     vel=vel,
-                    slot=min(15, i * 2),
+                    slot=slot,
                     is_structural=(i in (0, 4)),
                     traits_fallback=bass_profiles["pino"],
                 )
@@ -1977,9 +2305,12 @@ def generate_bass(
                     prev_structural_pitch = pitch
 
         elif style == "rhythmic":
+            rhythmic_salt = salt + bar + (
+                17 if density_bias >= 0.75 else 9 if density_bias >= 0.25 else 0
+            )
             raw = _pick_pool_groove(
                 _RHYTHMIC_GROOVES,
-                salt,
+                rhythmic_salt,
                 bar,
                 use_profile=use_profile,
                 traits=traits_engine,
@@ -1991,7 +2322,23 @@ def generate_bass(
                 salt=salt,
                 bar=bar,
             )
-            pat = tuple(phrase_bar.slots)
+            if density_bias >= 0.25:
+                rhythmic_development = (
+                    (2, 5, 9, 13, 15)
+                    if bar % 2 == 0
+                    else (3, 6, 10, 13, 15)
+                )
+                take = 2 if density_bias >= 0.75 else 1
+                pat = tuple(
+                    sorted(
+                        set(pat).union(
+                            slot
+                            for slot in rhythmic_development
+                            if slot not in pat
+                        )
+                    )
+                )
+                pat = pat[: len(raw) + take]
             p_root_off = offbeat_root_p()
             extras: list[int] = []
             if (
@@ -2093,7 +2440,14 @@ def generate_bass(
                 ((0, 2, t, 102), (4, 1, r, 56), (8, 2, oct_pop, 104), (11, 1, f, 52), (14, 2, r, 84)),
                 ((1, 2, f, 96), (5, 1, r, 58), (9, 2, oct_pop, 100), (13, 1, t, 54)),
             )
-            tpl = (slap_template_idx + bar // 2) % len(event_templates)
+            activity_template_shift = (
+                2 if density_bias >= 0.75 else 1 if density_bias >= 0.25 else 0
+            )
+            tpl = (
+                slap_template_idx
+                + bar // 2
+                + activity_template_shift
+            ) % len(event_templates)
             events = event_templates[tpl]
             for s0, dur_s, pitch, vel in events:
                 t0 = bar_t0 + s0 * sixteenth + rng.uniform(0, 0.014) * spb
@@ -2116,10 +2470,17 @@ def generate_bass(
                 )
 
         else:  # fusion
-            fusion_slots_a, fusion_slots_b = _pick_fusion_pair(
-                salt, bar, use_profile=use_profile, traits=traits_engine
+            fusion_activity_shift = (
+                19 if density_bias >= 0.75 else 11 if density_bias >= 0.25 else 0
             )
-            pat_slots = fusion_slots_a if bar % 2 == 0 else fusion_slots_b
+            pat_slots = _pick_fusion_role_groove(
+                salt + fusion_activity_shift,
+                fusion_variant_salt + (fusion_activity_shift * 257),
+                bar,
+                str(phrase_bar.role),
+                use_profile=use_profile,
+                traits=traits_engine,
+            )
             pat_slots = _thin_slots(
                 tuple(sorted(set(pat_slots))),
                 use_profile=use_profile,
@@ -2127,7 +2488,19 @@ def generate_bass(
                 salt=salt,
                 bar=bar,
             )
-            pat_slots = tuple(phrase_bar.slots)
+            if density_bias >= 0.25:
+                fusion_development = (
+                    (1, 4, 8, 11, 13, 15)
+                    if bar % 2 == 0
+                    else (2, 5, 7, 10, 13, 15)
+                )
+                take = 2 if density_bias >= 0.75 else 1
+                extras = [
+                    slot
+                    for slot in fusion_development
+                    if slot not in pat_slots
+                ][:take]
+                pat_slots = tuple(sorted(set(pat_slots).union(extras)))
             if context:
                 if _drum_anchor_ctx(context):
                     dd_f = density_for_bar(context, bar)
@@ -2187,7 +2560,10 @@ def generate_bass(
                     prev_structural_pitch = pitch
                 elif str(phrase_bar.role) == "release" and s >= 12:
                     pitch = r if rng.random() < 0.7 else f
-                elif True:
+                elif rng.random() < max(
+                    0.22,
+                    0.72 - (0.42 * float(expression_amount)),
+                ):
                     pitch = _pick_harmonic_style_pitch(
                         style="fusion",
                         role=str(phrase_bar.role),
@@ -2202,7 +2578,18 @@ def generate_bass(
                         prev_pitch=prev_structural_pitch,
                         rng=rng,
                     )
-                if rng.random() < 0.07 * (1.4 if use_profile and traits and traits["fill_activity"] > 0.55 else 1.0):
+                octave_color_probability = (
+                    0.10
+                    + (0.24 * float(expression_amount))
+                    + (0.08 * max(0.0, float(density_bias)))
+                )
+                if rng.random() < octave_color_probability * (
+                    1.2
+                    if use_profile
+                    and traits
+                    and traits["fill_activity"] > 0.55
+                    else 1.0
+                ):
                     pitch = min(62, max(34, pitch + rng.choice((0, 12, -12))))
                 if avoid_pcs and (pitch % 12) in set(avoid_pcs):
                     pitch = r
@@ -2229,6 +2616,22 @@ def generate_bass(
                     is_structural=(s in (0, 8)),
                     traits_fallback=bass_profiles["marcus"],
                 )
+
+    inst.notes = _add_baseline_activity_gap_notes(
+        inst.notes,
+        style=style,
+        density_bias=density_bias,
+        bar_count=bar_count,
+        bar_anchor=bar_anchor,
+        seconds_per_beat=spb,
+    )
+    inst.notes = _thin_baseline_notes_for_activity(
+        inst.notes,
+        density_bias=requested_density_bias,
+        bar_count=bar_count,
+        bar_anchor=bar_anchor,
+        seconds_per_beat=spb,
+    )
 
     # Keep rendered note ends within an exact timeline cap for deterministic tests.
     total_len = round(float(bar_anchor + (bar_count * 4 * spb)), 6)
@@ -2278,6 +2681,11 @@ def generate_bass(
                 source="baseline",
                 expression_amount=expression_amount,
                 instrument_family=bi,
+                bass_articulation_focus=bass_articulation_focus,
+                ghost_amount=ghost_amount,
+                mute_amount=mute_amount,
+                slide_amount=slide_amount,
+                legato_amount=legato_amount,
             )
         )
     preview = _preview(

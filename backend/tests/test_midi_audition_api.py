@@ -3,11 +3,17 @@ from __future__ import annotations
 from io import BytesIO
 import time
 
+import pretty_midi
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routes import midi_routes, session_routes
-from app.services.midi_audition import FakeMidiBackend, MidiOutputInfo, RtMidiBackend
+from app.services.midi_audition import (
+    AuditionStartResult,
+    FakeMidiBackend,
+    MidiOutputInfo,
+    RtMidiBackend,
+)
 
 
 def teardown_function() -> None:
@@ -113,6 +119,46 @@ def test_audition_performance_bass_uses_performance_bytes_when_available() -> No
     _wait_for(lambda: any(getattr(message, "type", "") == "note_on" for message in backend.sent_messages))
     note_ons = [message for message in backend.sent_messages if getattr(message, "type", "") == "note_on"]
     assert any(getattr(message, "note", None) == 65 for message in note_ons)
+
+
+def test_performance_audition_uses_heard_phase_without_mutating_stored_midi(
+    monkeypatch,
+) -> None:
+    performance = _midi_bytes(pitch=65)
+    session_id = _session(
+        clean=_midi_bytes(pitch=48),
+        performance=performance,
+    )
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    stored.bass_phase_offset_beats = 0.5
+    captured: dict[str, object] = {}
+
+    class SpyAuditionPlayer:
+        def start(self, **kwargs):
+            captured.update(kwargs)
+            return AuditionStartResult(
+                status="playing",
+                session_id=session_id,
+                mode="performance",
+                output="IAC Driver Bus 1",
+                duration_seconds=2.25,
+            )
+
+    monkeypatch.setattr(
+        session_routes,
+        "get_audition_player",
+        lambda: SpyAuditionPlayer(),
+    )
+
+    response = _client().post(
+        f"/api/sessions/{session_id}/audition/bass",
+        json={"output": "iac-1", "mode": "performance"},
+    )
+
+    assert response.status_code == 200, response.text
+    heard = pretty_midi.PrettyMIDI(BytesIO(captured["midi_bytes"]))
+    assert heard.instruments[0].notes[0].start == 0.25
+    assert stored.bass_performance_bytes == performance
 
 
 def test_audition_without_generated_bass_returns_400() -> None:

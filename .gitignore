@@ -28,6 +28,7 @@ backend/data/reference_audio/
 # clips stay local; manifests (the ground truth) are committed
 backend/data/validation_pack/clips/
 backend/data/validation_pack_commercial/clips/
+research/benchmark_results/
 
 # Desktop wrapper
 desktop/node_modules/

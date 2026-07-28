@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.models.session import GrooveProfile, HarmonyPlan, SourceAnalysis
+from app.models.session import GrooveProfile, HarmonyPlan, HarmonyPlanBar, SourceAnalysis
 from app.services.conditioning import (
     UnifiedConditioning,
     build_unified_conditioning,
@@ -172,3 +172,67 @@ def test_helpers_return_zero_for_missing_or_short_rows() -> None:
     assert source_slot_pressure(uc, 3, 0) == 0.0
     assert source_kick_weight(uc, 0, 0) == 0.0
     assert source_snare_weight(None, 0, 0) == 0.0
+
+
+def test_confirmed_chord_map_overrides_conflicting_anchor_harmony() -> None:
+    src = _source_with_groove(bars=2)
+    groove = GrooveProfile(
+        pocket_feel="steady",
+        syncopation_score=0.2,
+        density_per_bar_estimate=4.0,
+        accent_strength=0.5,
+        confidence=0.8,
+    )
+    harmony = HarmonyPlan(
+        key_center="D",
+        scale="minor",
+        source="confirmed_chord_progression",
+        bars=[
+            HarmonyPlanBar(
+                bar_index=0,
+                root_pc=2,
+                target_pcs=[2, 5, 9],
+                passing_pcs=[4, 7],
+                avoid_pcs=[3],
+                confidence=1.0,
+                source="confirmed_chord_progression",
+            ),
+            HarmonyPlanBar(
+                bar_index=1,
+                root_pc=7,
+                target_pcs=[7, 10, 2],
+                passing_pcs=[9, 0],
+                avoid_pcs=[8],
+                confidence=1.0,
+                source="confirmed_chord_progression",
+            ),
+        ],
+    )
+    conflicting_context = SimpleNamespace(
+        beat_phase_offset_beats=0,
+        beat_phase_confidence=0.9,
+        bar_start_anchor_sec=0.0,
+        harmonic_root_pc_per_bar=(0, 5),
+        harmonic_target_pcs_per_bar=((0, 4, 7), (5, 9, 0)),
+        harmonic_passing_pcs_per_bar=((2, 5), (7, 10)),
+        harmonic_avoid_pcs_per_bar=((1,), (6,)),
+        harmonic_confidence_per_bar=(0.95, 0.95),
+        harmonic_source_per_bar=("anchor_midi", "anchor_midi"),
+    )
+
+    conditioning = build_unified_conditioning(
+        session=SimpleNamespace(bar_count=2, tempo=120),
+        source=src,
+        groove=groove,
+        harmony=harmony,
+        context=conflicting_context,
+    )
+
+    assert [bar.root_pc for bar in conditioning.harmonic_bars] == [2, 7]
+    assert [bar.target_pcs for bar in conditioning.harmonic_bars] == [
+        (2, 5, 9),
+        (7, 10, 2),
+    ]
+    assert {bar.source for bar in conditioning.harmonic_bars} == {
+        "confirmed_chord_progression"
+    }

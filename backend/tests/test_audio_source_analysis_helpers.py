@@ -70,6 +70,30 @@ def test_grid_aligned_bounce_allows_two_beat_render_tail() -> None:
     )
 
 
+def test_trusted_session_grid_anchors_known_116_bpm_logic_bounce_without_auto_bar_count() -> None:
+    assert asa.should_anchor_bounce_to_session_grid(
+        duration_seconds=33.1034,
+        session_tempo=116,
+        session_bar_count=16,
+        detected_tempo=116.0,
+        detected_bar_count=None,
+        head_trim_seconds=0.0,
+        trust_session_bar_count=True,
+    )
+
+
+def test_untrusted_upload_does_not_promote_session_bar_placeholder_to_grid_evidence() -> None:
+    assert not asa.should_anchor_bounce_to_session_grid(
+        duration_seconds=33.1034,
+        session_tempo=116,
+        session_bar_count=16,
+        detected_tempo=116.0,
+        detected_bar_count=None,
+        head_trim_seconds=0.0,
+        trust_session_bar_count=False,
+    )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -92,6 +116,44 @@ def test_grid_aligned_bounce_rejects_ambiguous_timeline(
     }
     values.update(overrides)
     assert not asa.should_anchor_bounce_to_session_grid(**values)  # type: ignore[arg-type]
+
+
+def test_audio_analysis_uses_trusted_session_bars_for_whole_grid_bounce(tmp_path) -> None:
+    import soundfile as sf
+
+    sr = 22050
+    tempo = 116
+    bars = 16
+    duration = bars * 4.0 * 60.0 / tempo
+    sample_count = int(round(sr * duration))
+    time = np.arange(sample_count, dtype=np.float32) / sr
+    audio = 0.025 * np.sin(2.0 * np.pi * 73.42 * time)
+    click = np.hanning(220).astype(np.float32) * 0.6
+    for beat in range(bars * 4):
+        start = int(round(beat * (60.0 / tempo) * sr))
+        stop = min(sample_count, start + len(click))
+        audio[start:stop] += click[: stop - start]
+    path = tmp_path / "session_player_116_Dm_16bar.wav"
+    sf.write(str(path), audio, sr)
+
+    result = asa.analyze_reference_audio(
+        audio_path=path,
+        session_tempo=tempo,
+        bar_count=bars,
+        session_key="D",
+        session_scale="natural_minor",
+        source_filename=path.name,
+        trust_session_bar_count=True,
+    )
+
+    source = result.source_analysis
+    assert result.duration_seconds == pytest.approx(33.1034, abs=0.0001)
+    assert source.source_metadata["auto_bar_count"] is None
+    assert source.source_metadata["timeline_alignment"] == "session_grid_zero"
+    assert source.generation_aligned_to_anchor
+    assert source.beat_phase_offset_beats == 0
+    assert source.bar_start_anchor_used_seconds == 0.0
+    assert len(source.bar_starts_seconds) == bars
 
 
 def test_tentative_chord_map_folds_repeating_four_bar_audio_profiles() -> None:

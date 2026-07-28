@@ -14,6 +14,71 @@ constexpr auto listenerVersion = "0.1.0";
 constexpr double defaultTempo = 120.0;
 constexpr double beatsPerBar = 4.0;
 constexpr double referencePitch = 440.0;
+constexpr double maxPlayingCallbackGapMs = 500.0;
+constexpr double backwardPpqJitterBeats = 0.25;
+constexpr double minimumForwardSeekBeats = 2.0;
+
+constexpr bool isPreRollPpq(double ppqPosition)
+{
+    return ppqPosition < 0.0;
+}
+
+constexpr bool isMeaningfulPpqDiscontinuity(
+    double previousPpq,
+    double observedPpq,
+    double blockBeats)
+{
+    const auto positiveBlockBeats = blockBeats > 0.0 ? blockBeats : 0.0;
+    const auto blockScaledForwardLimit = positiveBlockBeats * 2.0 + backwardPpqJitterBeats;
+    const auto forwardLimit = blockScaledForwardLimit > minimumForwardSeekBeats
+        ? blockScaledForwardLimit
+        : minimumForwardSeekBeats;
+    const auto observedDelta = observedPpq - previousPpq;
+    return (
+        observedDelta < -backwardPpqJitterBeats
+        || observedDelta > forwardLimit
+    );
+}
+
+struct BarTransition
+{
+    int activeBar;
+    int completedBar;
+};
+
+constexpr BarTransition advanceBar(int activeBar, int observedBar)
+{
+    if (activeBar < 0)
+        return { observedBar, -1 };
+    // A meaningful backwards jump resets the capture before this tracker is
+    // called. Any remaining lower bar is host jitter around a boundary.
+    if (observedBar <= activeBar)
+        return { activeBar, -1 };
+    return { observedBar, activeBar };
+}
+
+static_assert(isPreRollPpq(-0.5));
+static_assert(! isPreRollPpq(0.0));
+static_assert(! isPreRollPpq(0.5));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 8.0, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 7.99, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 8.5, 0.025));
+static_assert(isMeaningfulPpqDiscontinuity(8.0, 7.5, 0.025));
+static_assert(isMeaningfulPpqDiscontinuity(8.0, 10.5, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 10.4, 1.2));
+static_assert(advanceBar(-1, 0).activeBar == 0);
+static_assert(advanceBar(-1, 0).completedBar == -1);
+static_assert(advanceBar(0, 0).completedBar == -1);
+static_assert(advanceBar(1, 0).activeBar == 1);
+static_assert(advanceBar(1, 0).completedBar == -1);
+
+// A two-chord C -> G boundary closes and reports the C bar; the new G bar
+// becomes active only after that completed-bar decision has been made.
+constexpr std::array<int, 2> twoChordPitchClasses { 0, 7 };
+constexpr auto twoChordBoundary = advanceBar(0, 1);
+static_assert(twoChordBoundary.completedBar == 0);
+static_assert(twoChordPitchClasses[static_cast<size_t>(twoChordBoundary.completedBar)] == 0);
+static_assert(twoChordPitchClasses[static_cast<size_t>(twoChordBoundary.activeBar)] == 7);
 
 constexpr std::array<const char*, 12> noteNames {
     "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"
@@ -115,7 +180,7 @@ bool HarmonicBridgeClient::pushFrame(const HarmonicFrame& frame)
         return false;
 
     frames[static_cast<size_t>(scope.startIndex1)] = frame;
-    fifo.finishedWrite(1);
+    // ScopedWrite commits the slot when it leaves scope.
     return true;
 }
 
@@ -131,15 +196,16 @@ void HarmonicBridgeClient::run()
         std::vector<HarmonicFrame> batch;
         batch.reserve(8);
 
-        const auto available = juce::jmin(8, fifo.getNumReady());
-        const auto scope = fifo.read(available);
+        {
+            const auto available = juce::jmin(8, fifo.getNumReady());
+            const auto scope = fifo.read(available);
 
-        for (int i = 0; i < scope.blockSize1; ++i)
-            batch.push_back(frames[static_cast<size_t>(scope.startIndex1 + i)]);
-        for (int i = 0; i < scope.blockSize2; ++i)
-            batch.push_back(frames[static_cast<size_t>(scope.startIndex2 + i)]);
-
-        fifo.finishedRead(static_cast<int>(batch.size()));
+            for (int i = 0; i < scope.blockSize1; ++i)
+                batch.push_back(frames[static_cast<size_t>(scope.startIndex1 + i)]);
+            for (int i = 0; i < scope.blockSize2; ++i)
+                batch.push_back(frames[static_cast<size_t>(scope.startIndex2 + i)]);
+            // ScopedRead consumes exactly these slots when it leaves scope.
+        }
 
         // Stopping transport invalidates every queued analysis frame. The
         // bridge thread remains the FIFO's sole consumer and drains them here,
@@ -268,6 +334,7 @@ juce::String HarmonicBridgeClient::frameToJson(
         + "\"plugin_instance_id\":\"" + jsonEscape(pluginId) + "\","
         + "\"session_id\":\"" + jsonEscape(frame.sessionId) + "\","
         + "\"source_id\":\"session-player-listener\","
+        + "\"capture_epoch\":" + juce::String(static_cast<juce::int64>(frame.captureEpoch)) + ","
         + "\"sample_rate\":" + juce::String(frame.sampleRate, 1) + ","
         + "\"host_tempo\":" + juce::String(frame.tempo, 3) + ","
         + "\"tempo_bpm\":" + juce::String(frame.tempo, 3) + ","
@@ -370,13 +437,58 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
             resetCaptureWindow();
 
         wasTransportRunning = false;
+        lastPpqPosition = -1.0;
+        lastPlayingCallbackMs = 0.0;
         return;
     }
 
-    if (! wasTransportRunning)
+    const auto hostPpq = position.getPpqPosition();
+    if (hostPpq.hasValue() && isPreRollPpq(*hostPpq))
+    {
+        // Treat host count-in/pre-roll as silence for analysis. PPQ zero
+        // reopens the client and establishes a fresh capture epoch.
+        bridgeClient.setTransportRunning(false);
         resetCaptureWindow();
+        wasTransportRunning = false;
+        lastPpqPosition = -1.0;
+        lastPlayingCallbackMs = 0.0;
+        return;
+    }
+
+    auto tempo = defaultTempo;
+    if (auto bpm = position.getBpm(); bpm.hasValue())
+        tempo = juce::jlimit(20.0, 400.0, *bpm);
+    const auto blockBeats = (tempo / 60.0)
+        * (static_cast<double>(numSamples) / currentSampleRate);
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    bool startsNewCapture = ! wasTransportRunning;
+    if (
+        wasTransportRunning
+        && lastPlayingCallbackMs > 0.0
+        && nowMs - lastPlayingCallbackMs > maxPlayingCallbackGapMs
+    )
+        startsNewCapture = true;
+    if (wasTransportRunning && hostPpq.hasValue() && lastPpqPosition >= 0.0)
+    {
+        // Logic may repeat a coarse PPQ value across many callbacks, then
+        // advance it in a larger step. Judge only the observed musical delta:
+        // tolerate repeats/jitter/coarse updates and reset on an actual seek.
+        if (isMeaningfulPpqDiscontinuity(
+                lastPpqPosition, *hostPpq, blockBeats))
+            startsNewCapture = true;
+    }
+    if (startsNewCapture)
+    {
+        ++captureEpoch;
+        resetCaptureWindow();
+    }
     wasTransportRunning = true;
     bridgeClient.setTransportRunning(true);
+
+    // PPQ identifies the bar at the start of this block. Close the previous
+    // bar before any samples from the newly observed bar enter its window.
+    if (hostPpq.hasValue())
+        maybeEmitBarFrame(position);
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -389,7 +501,12 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
         ++samplesSinceLastFallbackBar;
     }
 
-    maybeEmitBarFrame(position);
+    // Without PPQ, sample count is the only boundary signal and is available
+    // only after this block has been accumulated.
+    if (! hostPpq.hasValue())
+        maybeEmitBarFrame(position);
+    lastPpqPosition = hostPpq.hasValue() ? *hostPpq : -1.0;
+    lastPlayingCallbackMs = nowMs;
 }
 
 juce::AudioProcessorEditor* SessionPlayerListenerAudioProcessor::createEditor()
@@ -478,6 +595,8 @@ void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
 {
     currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     wasTransportRunning = false;
+    lastPpqPosition = -1.0;
+    lastPlayingCallbackMs = 0.0;
     resetCaptureWindow();
 
     juce::dsp::WindowingFunction<float>::fillWindowingTables(
@@ -490,11 +609,17 @@ void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
 void SessionPlayerListenerAudioProcessor::resetCaptureWindow()
 {
     processedSamples = 0.0;
+    lastEmittedBar = -1;
+    fallbackBarIndex = 0;
+    activeBarIndex = -1;
+    clearBarAnalysisWindow();
+}
+
+void SessionPlayerListenerAudioProcessor::clearBarAnalysisWindow()
+{
     samplesSinceLastFallbackBar = 0.0;
     writeIndex = 0;
     validSamples = 0;
-    lastEmittedBar = -1;
-    fallbackBarIndex = 0;
     window.fill(0.0f);
 }
 
@@ -515,42 +640,49 @@ void SessionPlayerListenerAudioProcessor::maybeEmitBarFrame(const juce::AudioPla
 
     auto barIndex = fallbackBarIndex;
     auto shouldEmit = samplesSinceLastFallbackBar >= fallbackBarSamples;
+    auto framePpq = -1.0;
 
     if (auto ppq = position.getPpqPosition(); ppq.hasValue())
     {
-        barIndex = barIndexFromPpq(*ppq);
-        shouldEmit = barIndex != lastEmittedBar;
+        const auto transition = advanceBar(activeBarIndex, barIndexFromPpq(*ppq));
+        activeBarIndex = transition.activeBar;
+        barIndex = transition.completedBar;
+        shouldEmit = barIndex >= 0;
+        if (shouldEmit)
+            framePpq = static_cast<double>(barIndex) * beatsPerBar;
     }
 
-    if (! shouldEmit || validSamples < fftSize / 2)
+    if (! shouldEmit)
         return;
 
-    auto frame = analyseCurrentWindow(tempo, barIndex);
-    frame.sampleRate = currentSampleRate;
-    frame.tempoConfidence = position.getBpm().hasValue() ? 1.0 : 0.25;
-    frame.playing = position.getIsPlaying();
-    frame.frameStartSeconds = juce::jmax(
-        0.0,
-        (processedSamples - static_cast<double>(validSamples)) / currentSampleRate);
-    frame.durationSeconds = juce::jmax(
-        0.001,
-        static_cast<double>(validSamples) / currentSampleRate);
-    if (auto ppq = position.getPpqPosition(); ppq.hasValue())
-        frame.ppqPosition = *ppq;
-    bridgeClient.pushFrame(frame);
-
+    if (validSamples >= fftSize / 2)
     {
-        const juce::ScopedLock lock(keyLock);
-        currentKeyText = frame.key + " " + frame.scale;
-        currentKeyConfidence = frame.keyConfidence;
+        auto frame = analyseCurrentWindow(tempo, barIndex);
+        frame.sampleRate = currentSampleRate;
+        frame.tempoConfidence = position.getBpm().hasValue() ? 1.0 : 0.25;
+        frame.captureEpoch = captureEpoch;
+        frame.playing = position.getIsPlaying() || position.getIsRecording();
+        frame.frameStartSeconds = juce::jmax(
+            0.0,
+            (processedSamples - static_cast<double>(validSamples)) / currentSampleRate);
+        frame.durationSeconds = juce::jmax(
+            0.001,
+            static_cast<double>(validSamples) / currentSampleRate);
+        frame.ppqPosition = framePpq;
+        bridgeClient.pushFrame(frame);
+
+        {
+            const juce::ScopedLock lock(keyLock);
+            currentKeyText = frame.key + " " + frame.scale;
+            currentKeyConfidence = frame.keyConfidence;
+        }
+
+        lastEmittedBar = barIndex;
     }
 
-    lastEmittedBar = barIndex;
     if (! position.getPpqPosition().hasValue())
-    {
         ++fallbackBarIndex;
-        samplesSinceLastFallbackBar = 0.0;
-    }
+    clearBarAnalysisWindow();
 }
 
 HarmonicFrame SessionPlayerListenerAudioProcessor::analyseCurrentWindow(double tempo, int barIndex)

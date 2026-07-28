@@ -23,6 +23,10 @@ const STAGE_LABELS = {
   final_fill: "Fallback Take",
 };
 
+function candidateNoteCacheKey(runId, takeId, mode) {
+  return `${mode}::${runId}::${takeId}`;
+}
+
 function apiErrorMessage(error) {
   const detail = error?.detail?.detail;
   if (detail?.message) return detail.message;
@@ -209,6 +213,10 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     setAbAuditioning(false);
   }, [clearPlaybackResources]);
 
+  useEffect(() => {
+    stopPlayback();
+  }, [auditionMode, stopPlayback]);
+
   const beginPlaybackSequence = useCallback(() => {
     clearPlaybackResources();
     sequenceIdRef.current += 1;
@@ -251,12 +259,17 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   const loadTakeNotes = useCallback(
     async (runId, takeId) => {
       if (!session?.id) return;
-      const key = `${runId}::${takeId}`;
+      const key = candidateNoteCacheKey(runId, takeId, auditionMode);
       if (takeNotesByKey[key]) return takeNotesByKey[key];
       if (loadingTakeNotes[key]) return null;
       setLoadingTakeNotes((prev) => ({ ...prev, [key]: true }));
       try {
-        const notes = await getBassCandidateTakeNotes(session.id, runId, takeId);
+        const notes = await getBassCandidateTakeNotes(
+          session.id,
+          runId,
+          takeId,
+          auditionMode,
+        );
         const nextNotes = Array.isArray(notes) ? notes : [];
         setTakeNotesByKey((prev) => ({ ...prev, [key]: nextNotes }));
         return nextNotes;
@@ -267,7 +280,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
         setLoadingTakeNotes((prev) => ({ ...prev, [key]: false }));
       }
     },
-    [session?.id, takeNotesByKey, loadingTakeNotes, setError],
+    [session?.id, auditionMode, takeNotesByKey, loadingTakeNotes, setError],
   );
 
   const onToggleTakeRoll = useCallback(
@@ -312,6 +325,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       const { skipStop = false, sequenceId = null, onEnded = null } = options;
       if (!session?.id) return;
       const key = `${runId}::${takeId}`;
+      const noteKey = candidateNoteCacheKey(runId, takeId, auditionMode);
       let seqId = sequenceId;
       if (!skipStop) {
         seqId = beginPlaybackSequence();
@@ -319,7 +333,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       if (seqId == null) {
         seqId = sequenceIdRef.current;
       }
-      let notes = takeNotesByKey[key];
+      let notes = takeNotesByKey[noteKey];
       if (!notes) {
         notes = await loadTakeNotes(runId, takeId);
       }
@@ -374,15 +388,24 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       });
       return true;
     },
-    [session?.id, takeNotesByKey, loadTakeNotes, setStatus, beginPlaybackSequence, registerSequenceTimer],
+    [
+      session?.id,
+      auditionMode,
+      takeNotesByKey,
+      loadTakeNotes,
+      setStatus,
+      beginPlaybackSequence,
+      registerSequenceTimer,
+    ],
   );
 
   const playTakeInContext = useCallback(
     async (runId, takeId) => {
       if (!session?.id) return false;
       const key = `${runId}::${takeId}`;
+      const noteKey = candidateNoteCacheKey(runId, takeId, auditionMode);
       const seqId = beginPlaybackSequence();
-      let bassNotes = takeNotesByKey[key];
+      let bassNotes = takeNotesByKey[noteKey];
       if (!bassNotes) {
         bassNotes = await loadTakeNotes(runId, takeId);
       }
@@ -465,15 +488,25 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
       });
       return true;
     },
-    [session, takeNotesByKey, loadTakeNotes, setStatus, beginPlaybackSequence, registerSequenceTimer, bassContextLevel],
+    [
+      session,
+      auditionMode,
+      takeNotesByKey,
+      loadTakeNotes,
+      setStatus,
+      beginPlaybackSequence,
+      registerSequenceTimer,
+      bassContextLevel,
+    ],
   );
 
   const playTakeWithSource = useCallback(
     async (runId, takeId) => {
       if (!session?.id || !session?.reference_audio) return false;
       const key = `${runId}::${takeId}`;
+      const noteKey = candidateNoteCacheKey(runId, takeId, auditionMode);
       const seqId = beginPlaybackSequence();
-      let bassNotes = takeNotesByKey[key];
+      let bassNotes = takeNotesByKey[noteKey];
       if (!bassNotes) {
         bassNotes = await loadTakeNotes(runId, takeId);
       }
@@ -530,6 +563,7 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
     },
     [
       session,
+      auditionMode,
       takeNotesByKey,
       loadTakeNotes,
       setStatus,
@@ -547,14 +581,14 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   }, []);
 
   const getTakeDurationSec = useCallback(async (runId, takeId) => {
-    const key = `${runId}::${takeId}`;
+    const key = candidateNoteCacheKey(runId, takeId, auditionMode);
     let notes = takeNotesByKey[key];
     if (!notes) {
       notes = await loadTakeNotes(runId, takeId);
     }
     if (!Array.isArray(notes) || notes.length === 0) return 0;
     return notes.reduce((acc, n) => Math.max(acc, Number(n.end) || 0), 0);
-  }, [takeNotesByKey, loadTakeNotes]);
+  }, [auditionMode, takeNotesByKey, loadTakeNotes]);
 
   const onAuditionAB = useCallback(async () => {
     if (!takeAKey || !takeBKey) {
@@ -611,29 +645,38 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
   }, []);
 
   const onDownloadTakeMidi = useCallback(
-    async (runId, takeId) => {
+    async (runId, takeId, performanceAvailable) => {
       if (!session?.id) return;
       const takeKey = `${runId}::${takeId}`;
+      const servedMode =
+        auditionMode === "performance" && performanceAvailable
+          ? "performance"
+          : "clean";
       setError(null);
       setDownloadingTakeKey(takeKey);
       try {
-        const blob = await downloadBassCandidateMidi(session.id, runId, takeId);
+        const blob = await downloadBassCandidateMidi(
+          session.id,
+          runId,
+          takeId,
+          auditionMode,
+        );
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `bass_candidate_${takeId}.mid`;
+        a.download = `bass_candidate_${takeId}_${servedMode}.mid`;
         document.body.appendChild(a);
         a.click();
         a.remove();
         URL.revokeObjectURL(url);
-        setStatus(`Downloaded MIDI for ${takeId}.`);
+        setStatus(`Downloaded ${servedMode} MIDI for ${takeId}.`);
       } catch (e) {
         setError(e.message || String(e));
       } finally {
         setDownloadingTakeKey("");
       }
     },
-    [session?.id, setError, setStatus],
+    [session?.id, auditionMode, setError, setStatus],
   );
 
   const onGenerateBassCandidates = useCallback(async () => {
@@ -908,13 +951,17 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
               </select>
             </label>
             <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
-              Mode
+              MIDI sound
               <select value={auditionMode} onChange={(e) => setAuditionMode(e.target.value)} disabled={auditionBusy}>
                 <option value="clean">Clean</option>
                 <option value="performance">Performance</option>
               </select>
             </label>
           </div>
+          <span style={{ fontSize: 12, color: "#64748b" }}>
+            This sound also drives candidate Play, A/B, piano-roll, source/context preview, and download.
+            Performance is the expressive MIDI that promotion installs; Clean is the composition before touch.
+          </span>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
               type="button"
@@ -1000,6 +1047,17 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
           }}
         >
           <strong>A/B:</strong>
+          <span
+            style={{
+              background: auditionMode === "performance" ? "#dcfce7" : "#e2e8f0",
+              color: auditionMode === "performance" ? "#166534" : "#334155",
+              borderRadius: 999,
+              padding: "1px 8px",
+              fontWeight: 600,
+            }}
+          >
+            {auditionMode === "performance" ? "Performance sound" : "Clean composition"}
+          </span>
           <span>A {takeAKey ? findTakeLabel(takeAKey) : "not set"}</span>
           <span>·</span>
           <span>B {takeBKey ? findTakeLabel(takeBKey) : "not set"}</span>
@@ -1051,11 +1109,19 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                   session?.current_bass_candidate_run_id === run.run_id &&
                   session?.current_bass_candidate_take_id === take.take_id;
                 const takeKey = `${run.run_id}::${take.take_id}`;
+                const noteKey = candidateNoteCacheKey(run.run_id, take.take_id, auditionMode);
                 const isRollOpen = !!openTakeRolls[takeKey];
-                const isNotesLoading = !!loadingTakeNotes[takeKey];
-                const takeNotes = takeNotesByKey[takeKey] ?? [];
+                const isNotesLoading = !!loadingTakeNotes[noteKey];
+                const takeNotes = takeNotesByKey[noteKey] ?? [];
                 const isPlaying = playingTakeKey === takeKey;
                 const isDownloading = downloadingTakeKey === takeKey;
+                const performanceAvailable =
+                  Number(take?.performance_byte_length) > 0 &&
+                  !!String(take?.performance_midi_sha256 || "").trim();
+                const servedCandidateMode =
+                  auditionMode === "performance" && performanceAvailable
+                    ? "performance"
+                    : "clean";
                 const playbackStatus = isNotesLoading ? "Loading notes..." : isPlaying ? "Playing" : "Stopped";
                 const playbackStatusColor = isNotesLoading
                   ? "#0369a1"
@@ -1187,11 +1253,19 @@ export default function BassCandidatePanel({ session, setSession, busy, setBusy,
                       </span>
                       <button
                         type="button"
-                        onClick={() => onDownloadTakeMidi(run.run_id, take.take_id)}
+                        onClick={() =>
+                          onDownloadTakeMidi(
+                            run.run_id,
+                            take.take_id,
+                            performanceAvailable,
+                          )
+                        }
                         disabled={isDownloading}
                         style={{ padding: "0.2rem 0.6rem" }}
                       >
-                        {isDownloading ? "Downloading..." : "Download MIDI"}
+                        {isDownloading
+                          ? "Downloading..."
+                          : `Download ${servedCandidateMode} MIDI`}
                       </button>
                       <button
                         type="button"

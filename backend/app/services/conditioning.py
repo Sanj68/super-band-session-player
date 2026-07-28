@@ -70,6 +70,48 @@ def has_source_groove(conditioning: UnifiedConditioning | None) -> bool:
     return any(float(x) > 1e-6 for row in rows for x in row)
 
 
+def has_source_groove_bar(
+    conditioning: UnifiedConditioning | None,
+    bar_index: int,
+    *,
+    min_confidence: float = 0.45,
+) -> bool:
+    """Return whether one bar has usable, non-empty source-groove evidence.
+
+    Live bridge maps are padded to the session length.  A global
+    ``has_source_groove`` check therefore cannot distinguish a captured bar
+    from an untouched zero row.  Generation decisions need that distinction
+    so an incomplete capture does not silently condition the whole phrase.
+    """
+
+    if conditioning is None:
+        return False
+    bar = int(bar_index)
+    if bar < 0 or bar >= int(conditioning.bar_count):
+        return False
+
+    confidence = conditioning.source_groove_confidence
+    if confidence:
+        if bar >= len(confidence):
+            return False
+        value = float(confidence[bar])
+        if value != value or value < max(0.0, float(min_confidence)):
+            return False
+
+    rows = (
+        conditioning.source_kick_weight,
+        conditioning.source_snare_weight,
+        conditioning.source_slot_pressure,
+        conditioning.source_onset_weight,
+    )
+    for lane in rows:
+        if bar >= len(lane):
+            continue
+        if any(float(value) > 1e-6 for value in lane[bar]):
+            return True
+    return False
+
+
 def source_kick_weight(conditioning: UnifiedConditioning | None, bar_index: int, slot_index: int) -> float:
     if conditioning is None or not conditioning.source_kick_weight:
         return 0.0
@@ -122,7 +164,21 @@ def build_unified_conditioning(
         anchor_sec = float(context.bar_start_anchor_sec)
 
     harm_rows: list[ConditioningHarmonicBar] = []
-    if context is not None and context.harmonic_target_pcs_per_bar:
+    confirmed_harmony = harmony.source == "confirmed_chord_progression"
+    if confirmed_harmony and harmony.bars:
+        for row in harmony.bars:
+            harm_rows.append(
+                ConditioningHarmonicBar(
+                    bar_index=int(row.bar_index),
+                    root_pc=int(row.root_pc) % 12,
+                    target_pcs=tuple(int(x) % 12 for x in row.target_pcs),
+                    passing_pcs=tuple(int(x) % 12 for x in row.passing_pcs),
+                    avoid_pcs=tuple(int(x) % 12 for x in row.avoid_pcs),
+                    confidence=float(row.confidence),
+                    source=str(row.source),
+                )
+            )
+    elif context is not None and context.harmonic_target_pcs_per_bar:
         for bar in range(bars):
             i = min(bar, len(context.harmonic_target_pcs_per_bar) - 1)
             harm_rows.append(

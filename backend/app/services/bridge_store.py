@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any
 
 from app.models.bridge import BridgeHarmonicFrame, BridgeHeartbeatRequest, BridgeSourceFeatureFrame, BridgeTransportFrame
@@ -15,21 +16,40 @@ class _BridgeState:
     plugin_instance_id: str | None = None
     plugin_version: str | None = None
     source_id: str | None = None
+    harmonic_plugin_instance_id: str | None = None
+    harmonic_source_id: str | None = None
     last_seen_at: str | None = None
     last_transport: dict[str, Any] | None = None
     feature_frames: list[BridgeSourceFeatureFrame] = field(default_factory=list)
     harmonic_frames: list[BridgeHarmonicFrame] = field(default_factory=list)
+    source_epoch: int = 0
+    harmonic_epoch: int = 0
+    source_identity: tuple[str, str] | None = None
+    harmonic_identity: tuple[str, str] | None = None
+    source_capture_epoch: int | None = None
+    harmonic_capture_epoch: int | None = None
+    source_last_ppq: float | None = None
+    harmonic_last_ppq: float | None = None
+    source_last_bar: int | None = None
+    harmonic_last_bar: int | None = None
+    source_origin_bar: int | None = None
+    harmonic_origin_bar: int | None = None
+    source_epoch_closed: bool = False
+    harmonic_epoch_closed: bool = False
 
 
 _STATES: dict[str, _BridgeState] = {}
 _MAX_FRAMES_PER_SESSION = 4096
+_LOCK = RLock()
+_POSITION_EPSILON = 1.0e-6
+_BAR_START_TOLERANCE_BEATS = 0.25
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _state_for(session_id: str) -> _BridgeState:
+def _state_for_unlocked(session_id: str) -> _BridgeState:
     st = _STATES.get(session_id)
     if st is None:
         st = _BridgeState()
@@ -37,76 +57,309 @@ def _state_for(session_id: str) -> _BridgeState:
     return st
 
 
+def _source_identity(frame: BridgeSourceFeatureFrame) -> tuple[str, str]:
+    return str(frame.plugin_instance_id), str(frame.source_id)
+
+
+def _harmonic_identity(frame: BridgeHarmonicFrame) -> tuple[str, str]:
+    return str(frame.plugin_instance_id), str(frame.source_id)
+
+
+def _rewound(
+    *,
+    last_ppq: float | None,
+    last_bar: int | None,
+    ppq: float | None,
+    bar: int,
+) -> bool:
+    if last_bar is not None and int(bar) < last_bar:
+        return True
+    if (
+        ppq is not None
+        and last_ppq is not None
+        and float(ppq) < last_ppq - _POSITION_EPSILON
+        and float(ppq)
+        <= (int(bar) * 4.0) + _BAR_START_TOLERANCE_BEATS
+    ):
+        return True
+    return False
+
+
+def _reset_source_epoch_unlocked(
+    st: _BridgeState,
+    *,
+    identity: tuple[str, str] | None = None,
+) -> None:
+    st.feature_frames.clear()
+    st.source_epoch += 1
+    st.source_identity = identity if identity is not None else st.source_identity
+    st.source_capture_epoch = None
+    st.source_last_ppq = None
+    st.source_last_bar = None
+    st.source_origin_bar = None
+    st.source_epoch_closed = False
+
+
+def _reset_harmonic_epoch_unlocked(
+    st: _BridgeState,
+    *,
+    identity: tuple[str, str] | None = None,
+) -> None:
+    st.harmonic_frames.clear()
+    st.harmonic_epoch += 1
+    st.harmonic_identity = (
+        identity if identity is not None else st.harmonic_identity
+    )
+    st.harmonic_capture_epoch = None
+    st.harmonic_last_ppq = None
+    st.harmonic_last_bar = None
+    st.harmonic_origin_bar = None
+    st.harmonic_epoch_closed = False
+
+
 def record_heartbeat(req: BridgeHeartbeatRequest) -> None:
     sid = req.session_id or "_pending_"
-    st = _state_for(sid)
-    st.plugin_instance_id = req.plugin_instance_id
-    st.plugin_version = req.plugin_version
-    if req.source_id:
-        st.source_id = req.source_id
-    st.last_seen_at = _now_iso()
+    with _LOCK:
+        st = _state_for_unlocked(sid)
+        st.plugin_instance_id = req.plugin_instance_id
+        st.plugin_version = req.plugin_version
+        if req.source_id:
+            st.source_id = req.source_id
+        st.last_seen_at = _now_iso()
 
 
-def record_transport(frame: BridgeTransportFrame) -> None:
-    st = _state_for(frame.session_id)
-    st.plugin_instance_id = frame.plugin_instance_id
-    st.last_seen_at = _now_iso()
-    st.last_transport = frame.model_dump()
+def record_transport(frame: BridgeTransportFrame) -> bool:
+    """Record transport and report when prior live evidence was invalidated."""
+
+    with _LOCK:
+        st = _state_for_unlocked(frame.session_id)
+        had_transport = st.last_transport is not None
+        had_capture = bool(st.feature_frames or st.harmonic_frames)
+        was_playing = bool(
+            st.last_transport
+            and st.last_transport.get("playing", False)
+        )
+        st.plugin_instance_id = frame.plugin_instance_id
+        st.last_seen_at = _now_iso()
+        st.last_transport = frame.model_dump()
+        if not frame.playing:
+            st.source_epoch_closed = True
+            st.harmonic_epoch_closed = True
+        elif not was_playing:
+            # A transport restart is an explicit take boundary. Keep source
+            # identities so the next frame can continue without looking like
+            # a second identity reset, but discard all prior-take evidence.
+            _reset_source_epoch_unlocked(st)
+            _reset_harmonic_epoch_unlocked(st)
+        return bool(
+            frame.playing
+            and not was_playing
+            and (had_transport or had_capture)
+        )
 
 
-def record_source_frame(frame: BridgeSourceFeatureFrame) -> None:
-    st = _state_for(frame.session_id)
-    st.plugin_instance_id = frame.plugin_instance_id
-    st.source_id = frame.source_id
-    st.last_seen_at = _now_iso()
-    st.feature_frames.append(frame)
-    if len(st.feature_frames) > _MAX_FRAMES_PER_SESSION:
-        # Drop oldest frames; cheap protection against unbounded growth.
-        excess = len(st.feature_frames) - _MAX_FRAMES_PER_SESSION
-        del st.feature_frames[:excess]
+def record_source_frame(frame: BridgeSourceFeatureFrame) -> bool:
+    """Record a playing source frame; return whether it began a new epoch."""
+
+    with _LOCK:
+        st = _state_for_unlocked(frame.session_id)
+        identity = _source_identity(frame)
+        rewind = _rewound(
+            last_ppq=st.source_last_ppq,
+            last_bar=st.source_last_bar,
+            ppq=frame.ppq_position,
+            bar=frame.bar_index,
+        )
+        capture_epoch_changed = (
+            frame.capture_epoch is not None
+            and st.source_capture_epoch is not None
+            and frame.capture_epoch != st.source_capture_epoch
+        )
+        reset_epoch = False
+        if st.source_identity is None:
+            st.source_identity = identity
+            if st.source_epoch == 0:
+                st.source_epoch = 1
+            st.source_epoch_closed = False
+        elif (
+            st.source_identity != identity
+            or st.source_epoch_closed
+            or capture_epoch_changed
+            or rewind
+        ):
+            _reset_source_epoch_unlocked(st, identity=identity)
+            reset_epoch = True
+        st.source_capture_epoch = frame.capture_epoch
+        if st.source_origin_bar is None:
+            st.source_origin_bar = int(frame.bar_index)
+        st.plugin_instance_id = frame.plugin_instance_id
+        st.source_id = frame.source_id
+        st.last_seen_at = _now_iso()
+        st.feature_frames.append(frame)
+        st.source_last_ppq = (
+            float(frame.ppq_position)
+            if frame.ppq_position is not None
+            else st.source_last_ppq
+        )
+        st.source_last_bar = int(frame.bar_index)
+        if len(st.feature_frames) > _MAX_FRAMES_PER_SESSION:
+            excess = len(st.feature_frames) - _MAX_FRAMES_PER_SESSION
+            del st.feature_frames[:excess]
+        return reset_epoch
 
 
-def record_harmonic_frame(frame: BridgeHarmonicFrame) -> None:
-    st = _state_for(frame.session_id)
-    st.plugin_instance_id = frame.plugin_instance_id
-    st.source_id = frame.source_id
-    st.last_seen_at = _now_iso()
-    st.harmonic_frames.append(frame)
-    if len(st.harmonic_frames) > _MAX_FRAMES_PER_SESSION:
-        excess = len(st.harmonic_frames) - _MAX_FRAMES_PER_SESSION
-        del st.harmonic_frames[:excess]
+def record_harmonic_frame(frame: BridgeHarmonicFrame) -> bool:
+    """Record a playing harmonic frame; return whether it began a new epoch."""
+
+    with _LOCK:
+        st = _state_for_unlocked(frame.session_id)
+        identity = _harmonic_identity(frame)
+        rewind = _rewound(
+            last_ppq=st.harmonic_last_ppq,
+            last_bar=st.harmonic_last_bar,
+            ppq=frame.ppq_position,
+            bar=frame.bar_index,
+        )
+        capture_epoch_changed = (
+            frame.capture_epoch is not None
+            and st.harmonic_capture_epoch is not None
+            and frame.capture_epoch != st.harmonic_capture_epoch
+        )
+        reset_epoch = False
+        if st.harmonic_identity is None:
+            st.harmonic_identity = identity
+            if st.harmonic_epoch == 0:
+                st.harmonic_epoch = 1
+            st.harmonic_epoch_closed = False
+        elif (
+            st.harmonic_identity != identity
+            or st.harmonic_epoch_closed
+            or capture_epoch_changed
+            or rewind
+        ):
+            _reset_harmonic_epoch_unlocked(st, identity=identity)
+            reset_epoch = True
+        st.harmonic_capture_epoch = frame.capture_epoch
+        if st.harmonic_origin_bar is None:
+            st.harmonic_origin_bar = int(frame.bar_index)
+        st.harmonic_plugin_instance_id = frame.plugin_instance_id
+        st.harmonic_source_id = frame.source_id
+        st.last_seen_at = _now_iso()
+        st.harmonic_frames.append(frame)
+        st.harmonic_last_ppq = (
+            float(frame.ppq_position)
+            if frame.ppq_position is not None
+            else st.harmonic_last_ppq
+        )
+        st.harmonic_last_bar = int(frame.bar_index)
+        if len(st.harmonic_frames) > _MAX_FRAMES_PER_SESSION:
+            excess = len(st.harmonic_frames) - _MAX_FRAMES_PER_SESSION
+            del st.harmonic_frames[:excess]
+        return reset_epoch
+
+
+def close_source_epoch(
+    session_id: str,
+    *,
+    plugin_instance_id: str,
+    source_id: str,
+    capture_epoch: int | None = None,
+) -> None:
+    """Close only the active source epoch, preserving legacy epoch-less stops."""
+
+    with _LOCK:
+        st = _state_for_unlocked(session_id)
+        identity = (str(plugin_instance_id), str(source_id))
+        if st.source_identity not in {None, identity}:
+            return
+        if (
+            st.source_capture_epoch is not None
+            and capture_epoch is not None
+            and capture_epoch != st.source_capture_epoch
+        ):
+            return
+        st.source_epoch_closed = True
+
+
+def close_harmonic_epoch(
+    session_id: str,
+    *,
+    plugin_instance_id: str,
+    source_id: str,
+    capture_epoch: int | None = None,
+) -> None:
+    """Close only the active harmonic epoch, preserving legacy epoch-less stops."""
+
+    with _LOCK:
+        st = _state_for_unlocked(session_id)
+        identity = (str(plugin_instance_id), str(source_id))
+        if st.harmonic_identity not in {None, identity}:
+            return
+        if (
+            st.harmonic_capture_epoch is not None
+            and capture_epoch is not None
+            and capture_epoch != st.harmonic_capture_epoch
+        ):
+            return
+        st.harmonic_epoch_closed = True
 
 
 def get_bridge_state(session_id: str) -> dict[str, Any]:
-    st = _STATES.get(session_id)
-    if st is None:
+    with _LOCK:
+        st = _STATES.get(session_id)
+        if st is None:
+            return {
+                "connected": False,
+                "plugin_instance_id": None,
+                "session_id": session_id,
+                "source_id": None,
+                "source_plugin_instance_id": None,
+                "harmonic_plugin_instance_id": None,
+                "harmonic_source_id": None,
+                "last_seen_at": None,
+                "frame_count": 0,
+                "harmonic_frame_count": 0,
+                "source_epoch": 0,
+                "harmonic_epoch": 0,
+                "last_transport": None,
+            }
+        plugin_instance_id = (
+            st.plugin_instance_id
+            if st.plugin_instance_id is not None
+            else st.harmonic_plugin_instance_id
+        )
+        source_id = (
+            st.source_id
+            if st.source_id is not None
+            else st.harmonic_source_id
+        )
         return {
-            "connected": False,
-            "plugin_instance_id": None,
+            "connected": plugin_instance_id is not None,
+            "plugin_instance_id": plugin_instance_id,
             "session_id": session_id,
-            "source_id": None,
-            "last_seen_at": None,
-            "frame_count": 0,
-            "harmonic_frame_count": 0,
-            "last_transport": None,
+            "source_id": source_id,
+            "source_plugin_instance_id": st.plugin_instance_id,
+            "harmonic_plugin_instance_id": st.harmonic_plugin_instance_id,
+            "harmonic_source_id": st.harmonic_source_id,
+            "last_seen_at": st.last_seen_at,
+            "frame_count": len(st.feature_frames),
+            "harmonic_frame_count": len(st.harmonic_frames),
+            "source_epoch": st.source_epoch,
+            "harmonic_epoch": st.harmonic_epoch,
+            "last_transport": (
+                dict(st.last_transport)
+                if st.last_transport is not None
+                else None
+            ),
         }
-    return {
-        "connected": st.plugin_instance_id is not None,
-        "plugin_instance_id": st.plugin_instance_id,
-        "session_id": session_id,
-        "source_id": st.source_id,
-        "last_seen_at": st.last_seen_at,
-        "frame_count": len(st.feature_frames),
-        "harmonic_frame_count": len(st.harmonic_frames),
-        "last_transport": st.last_transport,
-    }
 
 
 def clear_bridge_state(session_id: str | None = None) -> None:
-    if session_id is None:
-        _STATES.clear()
-        return
-    _STATES.pop(session_id, None)
+    with _LOCK:
+        if session_id is None:
+            _STATES.clear()
+            return
+        _STATES.pop(session_id, None)
 
 
 def _slot_for_frame(frame: BridgeSourceFeatureFrame, fallback_index: int, fallback_total: int) -> int:
@@ -132,18 +385,38 @@ def _normalize_row_in_place(row: list[float]) -> list[float]:
     return [max(0.0, min(1.0, v / peak)) for v in row]
 
 
-def summarize_frames_to_groove_frames(session_id: str) -> list[GrooveFrame]:
+def summarize_frames_to_groove_frames(
+    session_id: str,
+    *,
+    bar_count: int | None = None,
+) -> list[GrooveFrame]:
     """Compact stored feature frames into one GrooveFrame per bar.
 
-    Simple-by-design: this is the contract spike, not the final analyser.
+    Logic reports absolute project bars, while Session Player parts are
+    loop-local. When ``bar_count`` is provided, the first bar in the current
+    capture epoch becomes loop bar 0 and later host bars wrap inside the
+    session. This also keeps the mapping stable after the bounded frame buffer
+    drops its oldest frames.
     """
-    st = _STATES.get(session_id)
-    if st is None or not st.feature_frames:
-        return []
+    with _LOCK:
+        st = _STATES.get(session_id)
+        if st is None or not st.feature_frames:
+            return []
+        frames = list(st.feature_frames)
+        origin_bar = (
+            int(st.source_origin_bar)
+            if st.source_origin_bar is not None
+            else int(frames[0].bar_index)
+        )
 
     by_bar: dict[int, list[BridgeSourceFeatureFrame]] = {}
-    for f in st.feature_frames:
-        by_bar.setdefault(int(f.bar_index), []).append(f)
+    for f in frames:
+        host_bar = int(f.bar_index)
+        if bar_count is not None and int(bar_count) > 0:
+            loop_bar = (host_bar - origin_bar) % int(bar_count)
+        else:
+            loop_bar = host_bar
+        by_bar.setdefault(loop_bar, []).append(f)
 
     out: list[GrooveFrame] = []
     for bar_index in sorted(by_bar.keys()):
@@ -207,6 +480,8 @@ def summarize_frames_to_groove_frames(session_id: str) -> list[GrooveFrame]:
                 source_metadata={
                     "frame_count": total,
                     "slots_filled": slots_filled,
+                    "capture_origin_host_bar": origin_bar,
+                    "loop_bar_index": bar_index,
                 },
             )
         )
@@ -214,20 +489,37 @@ def summarize_frames_to_groove_frames(session_id: str) -> list[GrooveFrame]:
 
 
 def harmonic_frames_for_session(session_id: str) -> list[BridgeHarmonicFrame]:
-    st = _STATES.get(session_id)
-    if st is None:
-        return []
-    return list(st.harmonic_frames)
+    with _LOCK:
+        st = _STATES.get(session_id)
+        if st is None:
+            return []
+        return list(st.harmonic_frames)
 
 
-def summarize_harmonic_frames(session_id: str) -> dict[str, Any] | None:
-    frames = harmonic_frames_for_session(session_id)
-    if not frames:
-        return None
+def summarize_harmonic_frames(
+    session_id: str,
+    *,
+    bar_count: int | None = None,
+) -> dict[str, Any] | None:
+    with _LOCK:
+        st = _STATES.get(session_id)
+        if st is None or not st.harmonic_frames:
+            return None
+        frames = list(st.harmonic_frames)
+        origin_bar = (
+            int(st.harmonic_origin_bar)
+            if st.harmonic_origin_bar is not None
+            else int(frames[0].bar_index)
+        )
 
     by_bar: dict[int, list[BridgeHarmonicFrame]] = {}
     for frame in frames:
-        by_bar.setdefault(int(frame.bar_index), []).append(frame)
+        host_bar = int(frame.bar_index)
+        if bar_count is not None and int(bar_count) > 0:
+            loop_bar = (host_bar - origin_bar) % int(bar_count)
+        else:
+            loop_bar = host_bar
+        by_bar.setdefault(loop_bar, []).append(frame)
 
     bars: list[dict[str, Any]] = []
     global_chroma = [0.0] * 12
@@ -271,6 +563,8 @@ def summarize_harmonic_frames(session_id: str) -> dict[str, Any] | None:
                 "cadence": last.cadence,
                 "cadence_confidence": float(last.cadence_confidence),
                 "frame_count": len(rows),
+                "capture_origin_host_bar": origin_bar,
+                "host_bar_indices": sorted({int(row.bar_index) for row in rows}),
             }
         )
 

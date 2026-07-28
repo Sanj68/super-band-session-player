@@ -5,16 +5,18 @@ These tests pin:
 - ?mode=clean equals no-mode
 - ?mode=performance returns performance MIDI after full bass generation
 - ?mode=performance returns 404 with reason when unavailable
-- selected-bar regeneration invalidates performance MIDI
+- selected-bar regeneration preserves and splices performance MIDI
 - candidate promotion materializes performance MIDI
-- combined session export remains clean-only and unchanged
+- combined session and ZIP exports prefer performance MIDI with explicit clean override
 - unknown ?mode returns 400
 - non-bass + ?mode=performance returns 400
 """
 
 from __future__ import annotations
 
+import base64
 import io
+import zipfile
 from pathlib import Path
 
 import pretty_midi
@@ -124,6 +126,70 @@ def _read_pm(data: bytes) -> pretty_midi.PrettyMIDI:
     return pretty_midi.PrettyMIDI(io.BytesIO(data))
 
 
+def _bass_midi_with_beat_starts(
+    *,
+    tempo: int,
+    instrument_name: str,
+) -> bytes:
+    seconds_per_beat = 60.0 / float(tempo)
+    midi = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
+    instrument = pretty_midi.Instrument(program=33, name=instrument_name)
+    for pitch, start_beat, duration_beats in (
+        (36, 0.0, 0.125),
+        (37, 15.5, 0.125),
+        (38, 15.75, 0.125),
+        (39, 15.25, 0.5),
+    ):
+        start = start_beat * seconds_per_beat
+        instrument.notes.append(
+            pretty_midi.Note(
+                velocity=90,
+                pitch=pitch,
+                start=start,
+                end=start + (duration_beats * seconds_per_beat),
+            )
+        )
+    midi.instruments.append(instrument)
+    buffer = io.BytesIO()
+    midi.write(buffer)
+    return buffer.getvalue()
+
+
+def _beat_starts_by_pitch(
+    data: bytes,
+    *,
+    tempo: int,
+    instrument_name: str,
+) -> dict[int, float]:
+    seconds_per_beat = 60.0 / float(tempo)
+    midi = _read_pm(data)
+    return {
+        int(note.pitch): round(float(note.start) / seconds_per_beat, 6)
+        for instrument in midi.instruments
+        if instrument.name.lower() == instrument_name.lower()
+        for note in instrument.notes
+    }
+
+
+def _beat_ranges_by_pitch(
+    data: bytes,
+    *,
+    tempo: int,
+    instrument_name: str,
+) -> dict[int, tuple[float, float]]:
+    seconds_per_beat = 60.0 / float(tempo)
+    midi = _read_pm(data)
+    return {
+        int(note.pitch): (
+            round(float(note.start) / seconds_per_beat, 6),
+            round(float(note.end) / seconds_per_beat, 6),
+        )
+        for instrument in midi.instruments
+        if instrument.name.lower() == instrument_name.lower()
+        for note in instrument.notes
+    }
+
+
 def test_no_mode_returns_clean_bass_midi_unchanged(tmp_path: Path) -> None:
     client = _isolated_client(tmp_path)
     session_id = _create_generated_session(client)
@@ -164,6 +230,54 @@ def test_mode_performance_returns_performance_midi_after_full_generation(
     # separable in DAWs.
     perf_inst_names = {inst.name for inst in pm.instruments}
     assert "Bass (Performance)" in perf_inst_names
+
+
+def test_performance_only_rerender_preserves_clean_phrase_and_seed(
+    tmp_path: Path,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_generated_session(client)
+    stored_before = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    seed_before = stored_before.bass_seed
+    clean_before = client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=clean"
+    ).content
+    performance_before = client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=performance"
+    ).content
+
+    patched = client.patch(
+        f"/api/sessions/{session_id}",
+        json={
+            "bass_performance_controls": {
+                "ghost": 0.62,
+                "mute": 0.24,
+                "slide": 0.8,
+                "legato": 0.68,
+                "timing_humanize": 0.58,
+                "velocity_humanize": 0.72,
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    rerendered = client.post(
+        f"/api/sessions/{session_id}/regenerate-selected",
+        json={
+            "lanes": ["bass"],
+            "preserve_bass_phrase": True,
+        },
+    )
+
+    assert rerendered.status_code == 200, rerendered.text
+    assert "phrase preserved" in rerendered.json()["message"]
+    stored_after = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored_after.bass_seed == seed_before
+    assert client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=clean"
+    ).content == clean_before
+    assert client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=performance"
+    ).content != performance_before
 
 
 def test_mode_performance_returns_404_missing_when_lane_not_generated(
@@ -211,7 +325,21 @@ def test_mode_performance_on_non_bass_lane_returns_400(tmp_path: Path) -> None:
     assert res.json()["detail"]["error"] == "performance_midi_unsupported_lane"
 
 
-def test_selected_bar_regeneration_invalidates_performance_midi(tmp_path: Path) -> None:
+def _performance_note_tuples(data: bytes) -> list[tuple[int, float, float, int]]:
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(data))
+    return sorted(
+        (
+            int(note.pitch),
+            round(float(note.start), 6),
+            round(float(note.end), 6),
+            int(note.velocity),
+        )
+        for instrument in pm.instruments
+        for note in instrument.notes
+    )
+
+
+def test_selected_bar_regeneration_preserves_performance_midi(tmp_path: Path) -> None:
     client = _isolated_client(tmp_path)
     session_id = _create_generated_session(client)
 
@@ -223,34 +351,74 @@ def test_selected_bar_regeneration_invalidates_performance_midi(tmp_path: Path) 
         json={"bar_start": 1, "bar_end": 2, "seed": 1234},
     )
     assert spliced.status_code == 200
+    assert spliced.json()["bass_performance_available"] is True
 
-    # Clean lane still works.
+    # Both clean and performance lanes remain playable.
     clean = client.get(f"/api/sessions/{session_id}/midi/bass")
     assert clean.status_code == 200
     assert len(clean.content) > 0
 
-    # Performance lane is now invalidated until the next full regeneration
-    # or candidate promotion.
     post = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
-    assert post.status_code == 404
-    detail = post.json()["detail"]
-    assert detail["error"] == "performance_midi_unavailable"
-    assert detail["reason"] == "invalidated"
+    assert post.status_code == 200
+    before = _performance_note_tuples(pre.content)
+    after = _performance_note_tuples(post.content)
+    selected_start = 1 * 4 * (60.0 / 96.0)
+    selected_end = 2 * 4 * (60.0 / 96.0)
+    # Performance downbeats can be pulled a few milliseconds early. Classify
+    # those notes by their musical bar using the same bounded tolerance as the
+    # performance splice, rather than by their raw timestamp alone.
+    # The feel offset plus the MIDI file's 220 PPQ grid can pull a semantic
+    # downbeat by more than one 11.4 ms tick at 96 BPM.
+    boundary_tolerance = 0.025
+    assert [
+        note
+        for note in before
+        if not (
+            selected_start - boundary_tolerance
+            <= note[1]
+            < selected_end - boundary_tolerance
+        )
+    ] == [
+        note
+        for note in after
+        if not (
+            selected_start - boundary_tolerance
+            <= note[1]
+            < selected_end - boundary_tolerance
+        )
+    ]
+    assert [
+        note
+        for note in before
+        if (
+            selected_start - boundary_tolerance
+            <= note[1]
+            < selected_end - boundary_tolerance
+        )
+    ] != [
+        note
+        for note in after
+        if (
+            selected_start - boundary_tolerance
+            <= note[1]
+            < selected_end - boundary_tolerance
+        )
+    ]
 
 
-def test_candidate_promotion_materializes_performance_midi(tmp_path: Path) -> None:
+def test_candidate_promotion_keeps_performance_midi_available(tmp_path: Path) -> None:
     client = _isolated_client(tmp_path)
     session_id = _create_generated_session(client)
 
-    # After the splice path: invalidate, then prove promotion restores
-    # performance MIDI.
+    # A selected-bar edit keeps performance MIDI available, and promotion
+    # replaces it with the candidate's frozen performance render.
     spliced = client.post(
         f"/api/sessions/{session_id}/lanes/bass/regenerate-bars",
         json={"bar_start": 1, "bar_end": 2, "seed": 4242},
     )
     assert spliced.status_code == 200
-    invalidated = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
-    assert invalidated.status_code == 404
+    after_splice = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
+    assert after_splice.status_code == 200
 
     cands = client.post(
         f"/api/sessions/{session_id}/bass-candidates",
@@ -264,6 +432,7 @@ def test_candidate_promotion_materializes_performance_midi(tmp_path: Path) -> No
         f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
     )
     assert promoted.status_code == 200
+    assert promoted.json()["bass_performance_available"] is True
 
     perf = client.get(f"/api/sessions/{session_id}/midi/bass?mode=performance")
     assert perf.status_code == 200
@@ -304,14 +473,6 @@ def test_candidate_promotion_passes_source_maps_to_performance_renderer(
     generated = client.post(f"/api/sessions/{session_id}/generate")
     assert generated.status_code == 200
 
-    cands = client.post(
-        f"/api/sessions/{session_id}/bass-candidates",
-        json={"take_count": 2, "seed": 7777},
-    )
-    assert cands.status_code == 200
-    run_id = cands.json()["run_id"]
-    take_id = cands.json()["takes"][0]["take_id"]
-
     original_render = session_routes.render_performance_bass_midi
     calls: list[dict[str, object]] = []
 
@@ -321,42 +482,254 @@ def test_candidate_promotion_passes_source_maps_to_performance_renderer(
 
     monkeypatch.setattr(session_routes, "render_performance_bass_midi", spy_render)
 
+    cands = client.post(
+        f"/api/sessions/{session_id}/bass-candidates",
+        json={"take_count": 2, "seed": 7777},
+    )
+    assert cands.status_code == 200
+    run_id = cands.json()["run_id"]
+    take_id = cands.json()["takes"][0]["take_id"]
+    assert calls
+    rendered_during_generation = len(calls)
+    raw_run = bass_candidate_store.get_run_for_session(session_id, run_id)
+    assert raw_run is not None
+    raw_take = next(
+        take for take in raw_run["takes"] if take["take_id"] == take_id
+    )
+
     promoted = client.post(
         f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote"
     )
 
     assert promoted.status_code == 200
-    assert calls
+    assert len(calls) == rendered_during_generation
     kwargs = calls[-1]
     assert kwargs["source_kick_per_bar"] is not None
     assert kwargs["source_snare_per_bar"] is not None
     assert kwargs["source_pressure_per_bar"] is not None
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    assert stored.bass_performance_bytes == base64.b64decode(
+        raw_take["performance_midi_b64"]
+    )
 
 
-def test_combined_session_export_remains_clean_only(tmp_path: Path) -> None:
+def test_combined_session_export_prefers_performance_with_explicit_clean_override(
+    tmp_path: Path,
+) -> None:
     client = _isolated_client(tmp_path)
     session_id = _create_generated_session(client)
 
     bass_clean = client.get(f"/api/sessions/{session_id}/midi/bass")
+    bass_performance = client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=performance"
+    )
     assert bass_clean.status_code == 200
+    assert bass_performance.status_code == 200
 
-    export = client.get(f"/api/sessions/{session_id}/midi")
-    assert export.status_code == 200
-    pm = _read_pm(export.content)
-    inst_names = {inst.name.lower() for inst in pm.instruments}
-    # Combined export must not include the performance instrument.
-    assert "bass (performance)" not in inst_names
-    # Bass instrument note count matches the clean lane.
+    performance_export = client.get(f"/api/sessions/{session_id}/midi")
+    assert performance_export.status_code == 200
+    assert (
+        performance_export.headers["x-session-player-bass-mode"]
+        == "performance"
+    )
+    performance_pm = _read_pm(performance_export.content)
+    performance_names = {inst.name.lower() for inst in performance_pm.instruments}
+    assert "bass (performance)" in performance_names
+
+    clean_export = client.get(
+        f"/api/sessions/{session_id}/midi?bass_mode=clean"
+    )
+    assert clean_export.status_code == 200
+    assert clean_export.headers["x-session-player-bass-mode"] == "clean"
+    clean_pm = _read_pm(clean_export.content)
+    clean_names = {inst.name.lower() for inst in clean_pm.instruments}
+    assert "bass (performance)" not in clean_names
+
     bass_clean_pm = _read_pm(bass_clean.content)
     clean_bass_notes = sum(
         len(inst.notes) for inst in bass_clean_pm.instruments if not inst.is_drum
     )
     export_bass_notes = sum(
         len(inst.notes)
-        for inst in pm.instruments
+        for inst in clean_pm.instruments
         if inst.name.lower() == "bass" and not inst.is_drum
     )
     assert export_bass_notes == clean_bass_notes
+
+
+def test_combined_and_zip_exports_fall_back_to_clean_when_performance_is_missing(
+    tmp_path: Path,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_generated_session(client)
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    stored.bass_performance_bytes = None
+    bass_clean = client.get(f"/api/sessions/{session_id}/midi/bass?mode=clean")
+    assert bass_clean.status_code == 200
+
+    combined = client.get(f"/api/sessions/{session_id}/midi")
+    assert combined.status_code == 200
+    assert combined.headers["x-session-player-bass-mode"] == "clean"
+    assert "bass (performance)" not in {
+        inst.name.lower() for inst in _read_pm(combined.content).instruments
+    }
+
+    archive = client.get(f"/api/sessions/{session_id}/export")
+    assert archive.status_code == 200
+    assert archive.headers["x-session-player-bass-mode"] == "clean"
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        assert bundle.read(f"{session_id}_bass_clean.mid") == bass_clean.content
+
+    explicit_combined = client.get(
+        f"/api/sessions/{session_id}/midi?bass_mode=performance"
+    )
+    explicit_archive = client.get(
+        f"/api/sessions/{session_id}/export?bass_mode=performance"
+    )
+    assert explicit_combined.status_code == 404
+    assert explicit_archive.status_code == 404
+    assert (
+        explicit_combined.json()["detail"]["error"]
+        == "performance_midi_unavailable"
+    )
+
+
+def test_zip_export_bass_mode_matches_standalone_lane_downloads(
+    tmp_path: Path,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_generated_session(client)
+    clean = client.get(f"/api/sessions/{session_id}/midi/bass?mode=clean")
+    performance = client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=performance"
+    )
+    assert clean.status_code == 200
+    assert performance.status_code == 200
+
+    default_archive = client.get(f"/api/sessions/{session_id}/export")
+    assert default_archive.status_code == 200
+    assert (
+        default_archive.headers["x-session-player-bass-mode"]
+        == "performance"
+    )
+    with zipfile.ZipFile(io.BytesIO(default_archive.content)) as bundle:
+        assert (
+            bundle.read(f"{session_id}_bass_performance.mid")
+            == performance.content
+        )
+
+    clean_archive = client.get(
+        f"/api/sessions/{session_id}/export?bass_mode=clean"
+    )
+    assert clean_archive.status_code == 200
+    assert clean_archive.headers["x-session-player-bass-mode"] == "clean"
+    with zipfile.ZipFile(io.BytesIO(clean_archive.content)) as bundle:
+        assert bundle.read(f"{session_id}_bass_clean.mid") == clean.content
+
+
+def test_phase_offset_rotates_every_performance_export_but_not_clean(
+    tmp_path: Path,
+) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_generated_session(client)
+    stored = session_routes._SESSIONS[session_id]  # type: ignore[attr-defined]
+    clean_source = _bass_midi_with_beat_starts(
+        tempo=stored.tempo,
+        instrument_name="Bass",
+    )
+    performance_source = _bass_midi_with_beat_starts(
+        tempo=stored.tempo,
+        instrument_name="Bass (Performance)",
+    )
+    stored.bass_bytes = clean_source
+    stored.bass_performance_bytes = performance_source
+
+    patched = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"bass_phase_offset_beats": 0.5},
+    )
+    assert patched.status_code == 200, patched.text
+
+    expected_source = {36: 0.0, 37: 15.5, 38: 15.75, 39: 15.25}
+    expected_rotated = {36: 0.5, 37: 0.0, 38: 0.25, 39: 15.75}
+
+    clean_lane = client.get(f"/api/sessions/{session_id}/midi/bass?mode=clean")
+    performance_lane = client.get(
+        f"/api/sessions/{session_id}/midi/bass?mode=performance"
+    )
+    assert clean_lane.status_code == 200
+    assert performance_lane.status_code == 200
+    assert clean_lane.content == clean_source
+    assert _beat_starts_by_pitch(
+        clean_lane.content,
+        tempo=stored.tempo,
+        instrument_name="Bass",
+    ) == expected_source
+    assert _beat_starts_by_pitch(
+        performance_lane.content,
+        tempo=stored.tempo,
+        instrument_name="Bass (Performance)",
+    ) == expected_rotated
+    seconds_per_beat = 60.0 / float(stored.tempo)
+    phase_wrapped_ranges = sorted(
+        (
+            round(float(note.start) / seconds_per_beat, 6),
+            round(float(note.end) / seconds_per_beat, 6),
+        )
+        for instrument in _read_pm(performance_lane.content).instruments
+        if instrument.name.lower() == "bass (performance)"
+        for note in instrument.notes
+        if int(note.pitch) == 39
+    )
+    assert phase_wrapped_ranges == [(0.0, 0.25), (15.75, 16.0)]
+
+    performance_combined = client.get(f"/api/sessions/{session_id}/midi")
+    clean_combined = client.get(
+        f"/api/sessions/{session_id}/midi?bass_mode=clean"
+    )
+    assert performance_combined.status_code == 200
+    assert clean_combined.status_code == 200
+    assert _beat_starts_by_pitch(
+        performance_combined.content,
+        tempo=stored.tempo,
+        instrument_name="Bass (Performance)",
+    ) == expected_rotated
+    assert _beat_starts_by_pitch(
+        clean_combined.content,
+        tempo=stored.tempo,
+        instrument_name="Bass",
+    ) == expected_source
+
+    performance_archive = client.get(f"/api/sessions/{session_id}/export")
+    clean_archive = client.get(
+        f"/api/sessions/{session_id}/export?bass_mode=clean"
+    )
+    assert performance_archive.status_code == 200
+    assert clean_archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(performance_archive.content)) as bundle:
+        archived_performance = bundle.read(
+            f"{session_id}_bass_performance.mid"
+        )
+    with zipfile.ZipFile(io.BytesIO(clean_archive.content)) as bundle:
+        archived_clean = bundle.read(f"{session_id}_bass_clean.mid")
+    assert archived_performance == performance_lane.content
+    assert archived_clean == clean_source
+    assert stored.bass_performance_bytes == performance_source
+
+
+def test_combined_export_rejects_unknown_bass_mode(tmp_path: Path) -> None:
+    client = _isolated_client(tmp_path)
+    session_id = _create_generated_session(client)
+
+    combined = client.get(
+        f"/api/sessions/{session_id}/midi?bass_mode=bogus"
+    )
+    archive = client.get(
+        f"/api/sessions/{session_id}/export?bass_mode=bogus"
+    )
+
+    assert combined.status_code == 422
+    assert archive.status_code == 422
 
 
 def test_performance_bytes_differ_from_clean_when_shaping_present(tmp_path: Path) -> None:

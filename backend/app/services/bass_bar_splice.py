@@ -105,6 +105,7 @@ def splice_bass_bars(
     tempo: int,
     bar_start: int,
     bar_end: int,
+    humanize_boundary_seconds: float = 0.0,
 ) -> bytes:
     """Return MIDI with events in [bar_start, bar_end) replaced from a regenerated lane."""
     existing = mido.MidiFile(file=io.BytesIO(existing_midi))
@@ -112,6 +113,22 @@ def splice_bass_bars(
     ticks_per_bar = int(existing.ticks_per_beat) * 4
     start_tick = int(bar_start) * ticks_per_bar
     end_tick = int(bar_end) * ticks_per_bar
+    # Performance MIDI can pull a downbeat a few milliseconds early. Shift
+    # both semantic bar boundaries by the same bounded amount so the early
+    # downbeat belongs to its intended bar rather than the preceding one.
+    boundary_ticks = max(
+        0,
+        int(
+            round(
+                float(humanize_boundary_seconds)
+                * float(max(1, int(tempo)))
+                * float(existing.ticks_per_beat)
+                / 60.0
+            )
+        ),
+    )
+    start_tick = max(0, start_tick - boundary_ticks)
+    end_tick = max(start_tick, end_tick - boundary_ticks)
 
     out = mido.MidiFile(
         type=existing.type,

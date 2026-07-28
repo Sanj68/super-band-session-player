@@ -1,9 +1,9 @@
 """Performance MIDI renderer.
 
-v0.5: ghost/grace shaping (velocity scale + duration shorten). Pass-through for
-all other articulations. Clean MIDI is unaffected by construction — this module
-renders a parallel ``Bass (Performance)`` instrument from captured
-``BassPerformanceNote`` metadata.
+Ghost, grace, mute/dead, and connected-note shaping is rendered into a parallel
+``Bass (Performance)`` instrument from captured ``BassPerformanceNote``
+metadata. ``slide_to`` uses standard channel pitch bend with an explicit RPN
+pitch-bend-range setup; ``hammer`` uses a bounded generic legato overlap.
 
 v0.8: layered "feel" shaping on top of v0.5:
   - role-based velocity & duration shaping (anchor / answer / push / release),
@@ -19,6 +19,7 @@ non-positive durations or excessive overlaps.
 from __future__ import annotations
 
 import io
+import math
 
 import pretty_midi
 
@@ -77,6 +78,16 @@ _SOURCE_KICK_ACCENT_MAX = 7      # +velocity at fully aligned kick slot
 _SOURCE_SNARE_PENALTY_MAX = 6    # -velocity when strong snare without kick
 _SOURCE_PRESSURE_DUR_RANGE = 0.08  # ±8% duration scaling from pressure
 
+# Expressive MIDI contract. Twelve semitones is wide enough for the engine's
+# bounded connected intervals while remaining a conventional, explicitly
+# negotiated pitch-bend range for generic monophonic bass instruments.
+_PERFORMANCE_MIDI_RESOLUTION = 960
+_LEGACY_MIDI_RESOLUTION = 220
+_PITCH_BEND_RANGE_SEMITONES = 12
+_PITCH_BEND_MIN = -8192
+_PITCH_BEND_MAX = 8191
+_SLIDE_CURVE_MAX_POINTS = 12
+
 
 def render_performance_bass_midi(
     notes: tuple[BassPerformanceNote, ...],
@@ -84,6 +95,9 @@ def render_performance_bass_midi(
     tempo: int,
     program: int,
     expression_amount: float = 0.5,
+    articulation_focus: str | None = "natural",
+    timing_humanize: float | None = None,
+    velocity_humanize: float | None = None,
     instrument_family: str | None = None,
     source_kick_per_bar: tuple[tuple[float, ...], ...] | None = None,
     source_snare_per_bar: tuple[tuple[float, ...], ...] | None = None,
@@ -96,7 +110,18 @@ def render_performance_bass_midi(
     that source-pressure layer; role/phrase/micro-timing feel still applies
     when notes include role/bar/slot metadata. Ghost/grace shaping is unchanged.
     """
-    pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
+    needs_expressive_resolution = any(
+        str(note.articulation) in {"slide_to", "hammer"}
+        for note in notes
+    )
+    pm = pretty_midi.PrettyMIDI(
+        initial_tempo=float(tempo),
+        resolution=(
+            _PERFORMANCE_MIDI_RESOLUTION
+            if needs_expressive_resolution
+            else _LEGACY_MIDI_RESOLUTION
+        ),
+    )
     inst = pretty_midi.Instrument(
         program=int(program),
         is_drum=False,
@@ -112,7 +137,25 @@ def render_performance_bass_midi(
     sixteenth = 60.0 / float(max(1, int(tempo))) / 4.0
     amount = max(0.0, min(1.0, float(expression_amount)))
     feel_scale = min(1.5, amount * 2.0)
-    connected_scale = max(0.0, min(1.0, (amount - 0.5) * 2.0))
+    # ``None`` is the compatibility contract: keep the existing
+    # Character-driven timing and velocity scaling semantics.
+    timing_humanize_scale = _independent_humanize_scale(
+        timing_humanize,
+        fallback=feel_scale,
+    )
+    velocity_humanize_scale = _independent_humanize_scale(
+        velocity_humanize,
+        fallback=feel_scale,
+    )
+    # Natural keeps the legacy threshold/strength exactly. An explicit
+    # Connected selection must be audible at the default Character midpoint,
+    # so its generic legato renderer follows the full 0..1 amount instead.
+    normalized_focus = str(articulation_focus or "natural").strip().lower()
+    connected_scale = (
+        amount
+        if normalized_focus == "connected"
+        else max(0.0, min(1.0, (amount - 0.5) * 2.0))
+    )
     instrument = bass_instrument_profile(instrument_family)
     ordered = tuple(
         sorted(
@@ -121,7 +164,7 @@ def render_performance_bass_midi(
         )
     )
 
-    rendered_notes: list[pretty_midi.Note] = []
+    rendered_pairs: list[tuple[BassPerformanceNote, pretty_midi.Note]] = []
     for idx, note in enumerate(ordered):
         next_note = ordered[idx + 1] if idx + 1 < len(ordered) else None
         rendered = _shape_note(
@@ -132,22 +175,40 @@ def render_performance_bass_midi(
             source_snare_per_bar=source_snare_per_bar,
             source_pressure_per_bar=source_pressure_per_bar,
             feel_scale=feel_scale,
+            velocity_humanize_scale=velocity_humanize_scale,
+            timing_humanize_scale=timing_humanize_scale,
             connected_scale=connected_scale,
             sustain_multiplier=instrument.sustain_multiplier,
             timing_scale=instrument.timing_scale,
         )
-        rendered_notes.append(rendered)
+        rendered_pairs.append((note, rendered))
 
-    # Sort by (start, pitch) so the next-note overlap guard is meaningful.
-    rendered_notes.sort(key=lambda n: (float(n.start), int(n.pitch), float(n.end)))
+    # Humanization can reorder unusually close onsets. Keep each rendered note
+    # paired with its source metadata through that sort so slide/hammer intent
+    # can never migrate to a different pitch.
+    rendered_pairs.sort(
+        key=lambda pair: (
+            float(pair[1].start),
+            int(pair[1].pitch),
+            float(pair[1].end),
+        )
+    )
+    rendered_sources = tuple(pair[0] for pair in rendered_pairs)
+    rendered_notes = [pair[1] for pair in rendered_pairs]
     _apply_connected_note_intent(
         rendered_notes,
-        ordered,
+        rendered_sources,
         sixteenth=sixteenth,
         connected_scale=connected_scale,
     )
     _enforce_no_excessive_overlap(rendered_notes)
     inst.notes.extend(rendered_notes)
+    _render_slide_pitch_bends(
+        inst,
+        rendered_notes,
+        rendered_sources,
+        tempo=tempo,
+    )
 
     buf = io.BytesIO()
     pm.write(buf)
@@ -163,6 +224,8 @@ def _shape_note(
     source_snare_per_bar: tuple[tuple[float, ...], ...] | None,
     source_pressure_per_bar: tuple[tuple[float, ...], ...] | None,
     feel_scale: float,
+    velocity_humanize_scale: float,
+    timing_humanize_scale: float,
     connected_scale: float,
     sustain_multiplier: float,
     timing_scale: float,
@@ -201,14 +264,21 @@ def _shape_note(
         velocity = _clamp_int(round(velocity * (1.0 - 0.16 * connected_scale)), 1, 127)
 
     # 2) v0.8 feel layer: applied to normal/slide/hammer notes only.
-    vel_delta = int(round(_ROLE_VEL_DELTA.get(role, 0) * feel_scale))
+    vel_delta = int(
+        round(_ROLE_VEL_DELTA.get(role, 0) * velocity_humanize_scale)
+    )
     dur_mult = (
         1.0 + (_ROLE_DUR_MULT.get(role, 1.0) - 1.0) * feel_scale
     ) * max(0.5, min(1.5, float(sustain_multiplier)))
 
     # 4-bar phrase arc on velocity (bar % 4).
     if bar is not None:
-        vel_delta += int(round(_PHRASE_ARC_VEL_DELTA[int(bar) % 4] * feel_scale))
+        vel_delta += int(
+            round(
+                _PHRASE_ARC_VEL_DELTA[int(bar) % 4]
+                * velocity_humanize_scale
+            )
+        )
 
     # Source-pressure response (optional).
     src_kick = _grid_value(source_kick_per_bar, bar, slot)
@@ -216,10 +286,22 @@ def _shape_note(
     src_pressure = _grid_value(source_pressure_per_bar, bar, slot)
 
     if src_kick is not None and src_kick > 0.0:
-        vel_delta += int(round(_SOURCE_KICK_ACCENT_MAX * min(1.0, src_kick) * feel_scale))
+        vel_delta += int(
+            round(
+                _SOURCE_KICK_ACCENT_MAX
+                * min(1.0, src_kick)
+                * velocity_humanize_scale
+            )
+        )
     if src_snare is not None and src_kick is not None:
         if src_snare >= 0.5 and src_kick < 0.25:
-            vel_delta -= int(round(_SOURCE_SNARE_PENALTY_MAX * min(1.0, src_snare) * feel_scale))
+            vel_delta -= int(
+                round(
+                    _SOURCE_SNARE_PENALTY_MAX
+                    * min(1.0, src_snare)
+                    * velocity_humanize_scale
+                )
+            )
     if src_pressure is not None:
         # High pressure => slightly drives note (longer); low pressure => slightly
         # opens space (shorter). Bounded.
@@ -238,7 +320,7 @@ def _shape_note(
     # 4) Bounded deterministic micro-timing offset (no rng; hash-based).
     offset = (
         _micro_timing_offset(role=role, bar=bar, slot=slot, pitch=pitch)
-        * feel_scale
+        * timing_humanize_scale
         * max(0.0, min(1.0, float(timing_scale)))
     )
     if offset != 0.0:
@@ -266,24 +348,160 @@ def _apply_connected_note_intent(
     sixteenth: float,
     connected_scale: float,
 ) -> None:
-    """Create a tiny generic legato overlap for slide/hammer destinations.
+    """Create a tiny generic legato overlap for hammer destinations.
 
-    Instrument profiles can later translate the same intent to keyswitches,
-    CCs, or pitch bend. The generic fallback remains useful with ordinary
-    monophonic bass patches and stays below the renderer's overlap guard.
+    ``slide_to`` uses a true pre-bent target-note curve below. Overlapping its
+    source note would make channel pitch bend detune two voices at once, so
+    only hammer-on intent retains this generic monophonic-legato trigger.
     """
 
     if connected_scale <= 0.0 or len(rendered) != len(source):
         return
     overlap = min(0.0035, max(0.001, sixteenth * 0.03 * connected_scale))
     for idx in range(1, len(rendered)):
-        if source[idx].articulation not in ("slide_to", "hammer"):
+        if source[idx].articulation != "hammer":
             continue
         previous = rendered[idx - 1]
         current = rendered[idx]
         if abs(int(current.pitch) - int(previous.pitch)) > 7:
             continue
         previous.end = max(float(previous.end), float(current.start) + overlap)
+
+
+def _independent_humanize_scale(
+    value: float | None,
+    *,
+    fallback: float,
+) -> float:
+    if value is None:
+        return float(fallback)
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(amount):
+        return 0.0
+    return max(0.0, min(1.0, amount)) * 1.5
+
+
+def _pitch_bend_value(semitones: int) -> int:
+    normalized = float(semitones) / float(_PITCH_BEND_RANGE_SEMITONES)
+    raw = int(round(normalized * 8192.0))
+    return max(_PITCH_BEND_MIN, min(_PITCH_BEND_MAX, raw))
+
+
+def _append_pitch_bend_range_setup(
+    instrument: pretty_midi.Instrument,
+    *,
+    tick_seconds: float,
+) -> None:
+    """Negotiate a ±12-semitone bend range with standard RPN 0,0."""
+
+    # Keep the six messages on distinct ticks. PrettyMIDI otherwise sorts CCs
+    # at one tick by controller number, which would corrupt RPN ordering.
+    setup = (
+        (101, 0),  # RPN MSB
+        (100, 0),  # RPN LSB: pitch-bend sensitivity
+        (6, _PITCH_BEND_RANGE_SEMITONES),  # Data Entry MSB: semitones
+        (38, 0),  # Data Entry LSB: cents
+        (101, 127),  # RPN null
+        (100, 127),
+    )
+    for index, (number, value) in enumerate(setup):
+        instrument.control_changes.append(
+            pretty_midi.ControlChange(
+                number=int(number),
+                value=int(value),
+                time=max(0.0, float(index) * tick_seconds),
+            )
+        )
+
+
+def _render_slide_pitch_bends(
+    instrument: pretty_midi.Instrument,
+    rendered: list[pretty_midi.Note],
+    source: tuple[BassPerformanceNote, ...],
+    *,
+    tempo: int,
+) -> None:
+    """Render ``slide_to`` as a pre-bent target resolving to center.
+
+    Pitch bend is channel-wide, so the source note is released at least one
+    MIDI tick before the target onset. The target begins bent to the source
+    pitch, then follows a bounded monotonic curve to its written pitch.
+    """
+
+    if len(rendered) != len(source) or len(rendered) < 2:
+        return
+    tick_seconds = 60.0 / (
+        float(max(1, int(tempo))) * float(_PERFORMANCE_MIDI_RESOLUTION)
+    )
+    sixteenth = 60.0 / float(max(1, int(tempo))) / 4.0
+    curves: list[tuple[int, float, float]] = []
+
+    for index in range(1, len(rendered)):
+        if source[index].articulation != "slide_to":
+            continue
+        previous = rendered[index - 1]
+        target = rendered[index]
+        source_offset = int(previous.pitch) - int(target.pitch)
+        if not 1 <= abs(source_offset) <= _PITCH_BEND_RANGE_SEMITONES:
+            continue
+
+        safe_previous_end = float(target.start) - tick_seconds
+        if float(previous.end) > safe_previous_end:
+            if safe_previous_end <= float(previous.start) + _MIN_NOTE_DURATION:
+                continue
+            previous.end = safe_previous_end
+
+        target_duration = float(target.end) - float(target.start)
+        if target_duration <= tick_seconds:
+            continue
+        desired_curve = max(0.04, sixteenth * 0.75)
+        curve_duration = min(desired_curve, target_duration * 0.5)
+        curve_duration = max(tick_seconds * 2.0, curve_duration)
+        curve_end = min(float(target.end), float(target.start) + curve_duration)
+        if curve_end <= float(target.start) + tick_seconds:
+            continue
+        curves.append(
+            (
+                _pitch_bend_value(source_offset),
+                float(target.start),
+                float(curve_end),
+            )
+        )
+
+    if not curves:
+        return
+
+    _append_pitch_bend_range_setup(instrument, tick_seconds=tick_seconds)
+    for initial_bend, curve_start, curve_end in curves:
+        available_ticks = max(
+            2,
+            int(round((curve_end - curve_start) / tick_seconds)),
+        )
+        steps = min(_SLIDE_CURVE_MAX_POINTS, available_ticks)
+        for step in range(steps + 1):
+            progress = float(step) / float(steps)
+            value = int(round(float(initial_bend) * (1.0 - progress)))
+            instrument.pitch_bends.append(
+                pretty_midi.PitchBend(
+                    pitch=max(_PITCH_BEND_MIN, min(_PITCH_BEND_MAX, value)),
+                    time=max(
+                        0.0,
+                        curve_start + ((curve_end - curve_start) * progress),
+                    ),
+                )
+            )
+
+    instrument.pitch_bends.sort(key=lambda bend: (float(bend.time), int(bend.pitch)))
+    # Every generated lane leaves channel bend centered, even if later event
+    # transforms clamp or reorder coincident curve points.
+    final_time = max(float(curve_end) for _bend, _start, curve_end in curves)
+    if not instrument.pitch_bends or int(instrument.pitch_bends[-1].pitch) != 0:
+        instrument.pitch_bends.append(
+            pretty_midi.PitchBend(pitch=0, time=max(0.0, final_time))
+        )
 
 
 def _grid_value(

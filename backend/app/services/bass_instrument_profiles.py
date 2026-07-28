@@ -102,6 +102,14 @@ _ALIASES: Final[dict[str, str]] = {
     "synth_bass": "sub_bass",
 }
 
+_ARTICULATION_FOCUS_LABELS: Final[dict[str, str]] = {
+    "natural": "Natural",
+    "clean": "Clean",
+    "ghosted": "Ghosted",
+    "muted": "Muted",
+    "connected": "Connected",
+}
+
 
 def normalize_bass_instrument_family(value: str | None) -> BassInstrumentFamily:
     raw = str(value or "finger_bass").strip().lower()
@@ -134,6 +142,50 @@ def public_bass_instrument_profiles() -> tuple[BassInstrumentProfile, ...]:
     )
 
 
+def resolve_bass_articulation_focus(
+    value: str | None,
+    instrument_family: str | None,
+) -> tuple[str, str, str | None]:
+    """Return requested/effective touch plus an honest capability notice.
+
+    The requested value remains stable in session state so changing bass
+    family does not discard the producer's intent. Unsupported touches render
+    clean rather than introducing a different articulation behind their back.
+    """
+
+    requested = str(value or "natural").strip().lower()
+    if requested not in _ARTICULATION_FOCUS_LABELS:
+        requested = "natural"
+    profile = bass_instrument_profile(instrument_family)
+    supported = {
+        "natural": True,
+        "clean": True,
+        "ghosted": profile.allow_ghost,
+        "muted": profile.allow_dead,
+        "connected": profile.allow_grace or profile.connected_bias > 0.0,
+    }
+    if supported[requested]:
+        return requested, requested, None
+    requested_label = _ARTICULATION_FOCUS_LABELS[requested]
+    notice = (
+        f"{requested_label} touch is not available for {profile.label}; "
+        "this take is rendered Clean."
+    )
+    return requested, "clean", notice
+
+
+def supported_bass_articulation_focuses(
+    instrument_family: str | None,
+) -> tuple[str, ...]:
+    """Return public Touch choices supported by one bass family."""
+
+    return tuple(
+        focus
+        for focus in _ARTICULATION_FOCUS_LABELS
+        if resolve_bass_articulation_focus(focus, instrument_family)[1] == focus
+    )
+
+
 __all__ = [
     "BassInstrumentFamily",
     "BassInstrumentProfile",
@@ -141,4 +193,6 @@ __all__ = [
     "constrain_instrument_controls",
     "normalize_bass_instrument_family",
     "public_bass_instrument_profiles",
+    "resolve_bass_articulation_focus",
+    "supported_bass_articulation_focuses",
 ]

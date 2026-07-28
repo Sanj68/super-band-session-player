@@ -329,6 +329,22 @@ def build_groove_profile(source: SourceAnalysis, *, context: SessionAnchorContex
     )
 
 
+def session_harmony_is_confirmed(session: Any) -> bool:
+    """Return whether session-level harmony outranks analyser suggestions."""
+
+    return bool(
+        getattr(session, "harmony_key_confirmed_by_user", False)
+        or list(getattr(session, "chord_progression", []) or [])
+        or getattr(session, "harmony_map_source", "none") == "confirmed_user"
+        or (
+            bool(getattr(session, "reference_audio_path", None))
+            and not bool(
+                getattr(session, "harmony_confirmation_required", False)
+            )
+        )
+    )
+
+
 def build_harmony_plan(session: Any, _source: SourceAnalysis) -> HarmonyPlan:
     key = str(getattr(session, "key", "C") or "C")
     scale = str(getattr(session, "scale", "major") or "major")
@@ -363,7 +379,11 @@ def build_harmony_plan(session: Any, _source: SourceAnalysis) -> HarmonyPlan:
             bars=out,
         )
     live_harmonic = (_source.source_metadata or {}).get("bridge_harmonic")
-    if isinstance(live_harmonic, dict) and isinstance(live_harmonic.get("bars"), list):
+    if (
+        not session_harmony_is_confirmed(session)
+        and isinstance(live_harmonic, dict)
+        and isinstance(live_harmonic.get("bars"), list)
+    ):
         out: list[HarmonyPlanBar] = []
         last_root = int(_source.tonal_center_pc_guess)
         last_scale = str(_source.scale_mode_guess or scale)

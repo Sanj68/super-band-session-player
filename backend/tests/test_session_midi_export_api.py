@@ -96,8 +96,9 @@ def test_session_midi_export_reflects_promoted_bass_candidate(tmp_path: Path) ->
     promoted = client.post(f"/api/sessions/{session_id}/bass-candidates/{run_id}/{take_id}/promote")
     assert promoted.status_code == 200
 
-    exported = client.get(f"/api/sessions/{session_id}/midi")
+    exported = client.get(f"/api/sessions/{session_id}/midi?bass_mode=clean")
     assert exported.status_code == 200
+    assert exported.headers["x-session-player-bass-mode"] == "clean"
     exported_bass_notes = _bass_notes(exported.content)
 
     assert len(exported_bass_notes) == len(candidate_notes)

@@ -77,6 +77,9 @@ const LEAD_INSTRUMENTS = [
 
 const BASS_INSTRUMENTS = [
   { value: "finger_bass", label: "Finger bass (default)" },
+  { value: "fretless_bass", label: "Fretless bass" },
+  { value: "upright_bass", label: "Upright bass" },
+  { value: "sub_bass", label: "Sub / synth bass" },
   { value: "slap_bass", label: "Slap bass" },
   { value: "synth_bass", label: "Synth bass" },
 ];

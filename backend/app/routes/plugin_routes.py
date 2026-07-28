@@ -12,21 +12,86 @@ part. The producer's working session is, in practice, the newest one.
 
 from __future__ import annotations
 
+import copy
 import io
 from dataclasses import asdict
-from typing import Literal
+from typing import Annotated, Literal
 
 import pretty_midi
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.models.session import BassInstrument, LaneName, RegenerateSelectedBody
+from app.models.session import (
+    BassArticulationFocus,
+    BassInstrument,
+    BassPerformanceControls,
+    BassPlayer,
+    BassStyle,
+    LaneName,
+)
 from app.routes import session_routes
 from app.services import bass_history_store
-from app.services.bass_instrument_profiles import public_bass_instrument_profiles
+from app.services.bass_instrument_profiles import (
+    public_bass_instrument_profiles,
+    resolve_bass_articulation_focus,
+)
 from app.services.bass_journey_advisor import build_bass_journey_advice
+from app.services.bass_performance_controls import (
+    resolve_bass_performance_controls,
+)
 
 router = APIRouter()
+
+
+def _history_unavailable(exc: bass_history_store.BassHistoryStoreError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": "bass_history_unavailable",
+            "message": (
+                "Bass idea history could not be read safely. The original file "
+                "was preserved for recovery; retry the action to start fresh."
+            ),
+        },
+    )
+
+
+def _capture_history_or_503(
+    session: session_routes.StoredSession,
+    *,
+    kept: bool = False,
+) -> dict[str, object]:
+    try:
+        return bass_history_store.capture(
+            session_routes._durable_session_view(session),  # noqa: SLF001
+            kept=kept,
+        )
+    except bass_history_store.BassHistoryStoreError as exc:
+        raise _history_unavailable(exc) from exc
+
+
+def _history_state_or_503(
+    session: session_routes.StoredSession,
+) -> dict[str, object]:
+    try:
+        return bass_history_store.history_state(
+            session_routes._durable_session_view(session)  # noqa: SLF001
+        )
+    except bass_history_store.BassHistoryStoreError as exc:
+        raise _history_unavailable(exc) from exc
+
+
+def _commit_recalled_bass(
+    destination: session_routes.StoredSession,
+    recalled: session_routes.StoredSession,
+) -> session_routes.StoredSession:
+    """Publish the fully recalled durable revision in one mapping swap."""
+
+    session_routes._discard_live_bridge_overlay(recalled)  # noqa: SLF001
+    return session_routes._publish_staged_session(  # noqa: SLF001
+        destination,
+        recalled,
+    )
 
 
 def _latest_bass_session() -> session_routes.StoredSession | None:
@@ -58,7 +123,38 @@ class PluginNote(BaseModel):
     dur_beats: float
 
 
+class PluginPitchBend(BaseModel):
+    type: Literal["pitch_bend"] = "pitch_bend"
+    channel: Literal[1] = 1
+    beat: float
+    value: int = Field(ge=-8192, le=8191)
+
+
+class PluginControlChange(BaseModel):
+    type: Literal["control_change"] = "control_change"
+    channel: Literal[1] = 1
+    beat: float
+    controller: int = Field(ge=0, le=127)
+    value: int = Field(ge=0, le=127)
+
+
+PluginAutomationEvent = Annotated[
+    PluginPitchBend | PluginControlChange,
+    Field(discriminator="type"),
+]
+
+_PITCH_RANGE_CC_ORDER = {
+    101: 0,  # RPN MSB
+    100: 1,  # RPN LSB
+    99: 2,  # NRPN MSB
+    98: 3,  # NRPN LSB
+    6: 4,  # data entry MSB
+    38: 5,  # data entry LSB
+}
+
+
 class PluginBassPart(BaseModel):
+    version: Literal[2] = 2
     session_id: str
     tempo: int
     key: str
@@ -68,12 +164,23 @@ class PluginBassPart(BaseModel):
     source: str = Field(description="clean or performance render")
     preview: str
     lock_to_groove: float | None
+    groove_source_ready: bool
+    groove_source_frame_count: int = Field(ge=0)
+    groove_source_notice: str | None
+    bass_articulation_focus: str
+    bass_articulation_effective: str
+    bass_articulation_notice: str | None
     bass_expression: float
+    bass_density_bias: float
+    bass_performance_controls: BassPerformanceControls
+    bass_performance_controls_effective: BassPerformanceControls
+    bass_performance_controls_notice: str | None
     bass_style: str
     bass_instrument: str
     bass_player: str | None
     phase_offset_beats: float = 0.0
     notes: list[PluginNote]
+    automation: list[PluginAutomationEvent] = Field(default_factory=list)
 
 
 def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
@@ -85,6 +192,7 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
     pm = pretty_midi.PrettyMIDI(io.BytesIO(raw))
     spb = 60.0 / float(max(1, s.tempo))
     notes: list[PluginNote] = []
+    automation: list[PluginAutomationEvent] = []
     for inst in pm.instruments:
         for n in inst.notes:
             notes.append(
@@ -95,7 +203,55 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
                     dur_beats=round(max(0.01, float(n.end) - float(n.start)) / spb, 6),
                 )
             )
+        for cc in inst.control_changes:
+            automation.append(
+                PluginControlChange(
+                    beat=round(float(cc.time) / spb, 6),
+                    controller=int(cc.number),
+                    value=int(cc.value),
+                )
+            )
+        for bend in inst.pitch_bends:
+            automation.append(
+                PluginPitchBend(
+                    beat=round(float(bend.time) / spb, 6),
+                    value=int(bend.pitch),
+                )
+            )
     notes.sort(key=lambda n: n.start_beats)
+    # pretty_midi keeps CC and pitch-bend streams separately, so their
+    # cross-stream order at an identical timestamp is not recoverable. Emit
+    # RPN/NRPN selection and data-entry setup before the bend value. Python's
+    # stable sort preserves source order for ordinary same-time controllers.
+    automation.sort(
+        key=lambda event: (
+            event.beat,
+            0 if event.type == "control_change" else 1,
+            (
+                _PITCH_RANGE_CC_ORDER.get(event.controller, 6)
+                if isinstance(event, PluginControlChange)
+                else 0
+            ),
+        )
+    )
+    requested_touch, effective_touch, articulation_notice = (
+        resolve_bass_articulation_focus(
+            s.bass_articulation_focus,
+            s.bass_instrument,
+        )
+    )
+    performance_controls = resolve_bass_performance_controls(
+        s.bass_performance_controls,
+        focus=s.bass_articulation_focus,
+        expression_amount=s.bass_expression,
+        style=s.bass_style,
+        instrument_family=s.bass_instrument,
+    )
+    (
+        groove_source_ready,
+        groove_source_frame_count,
+        groove_source_notice,
+    ) = session_routes._groove_source_status(s.id)  # noqa: SLF001
     return PluginBassPart(
         session_id=s.id,
         tempo=int(s.tempo),
@@ -105,12 +261,27 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
         source=source,
         preview=s.bass_preview or "",
         lock_to_groove=s.bass_lock_to_groove,
+        groove_source_ready=groove_source_ready,
+        groove_source_frame_count=groove_source_frame_count,
+        groove_source_notice=groove_source_notice,
+        bass_articulation_focus=requested_touch,
+        bass_articulation_effective=effective_touch,
+        bass_articulation_notice=articulation_notice,
         bass_expression=float(s.bass_expression),
+        bass_density_bias=float(s.bass_density_bias),
+        bass_performance_controls=BassPerformanceControls.model_validate(
+            performance_controls.requested
+        ),
+        bass_performance_controls_effective=BassPerformanceControls.model_validate(
+            performance_controls.effective
+        ),
+        bass_performance_controls_notice=performance_controls.notice,
         bass_style=s.bass_style,
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         phase_offset_beats=float(s.bass_phase_offset_beats),
         notes=notes,
+        automation=automation,
     )
 
 
@@ -127,16 +298,65 @@ class PluginRegenerateBody(BaseModel):
         default=None,
         description="Persistent session binding owned by this plugin instance.",
     )
-    bass_style: str | None = Field(default=None)
+    force_new_phrase: bool = Field(
+        default=False,
+        description=(
+            "Bypass performance-only re-rendering and write a new clean bass "
+            "phrase with a fresh seed."
+        ),
+    )
+    host_tempo: float | None = Field(
+        default=None,
+        ge=40.0,
+        le=240.0,
+        description=(
+            "Current DAW tempo. Applied only with force_new_phrase so beat "
+            "positions and the regenerated MIDI stay coherent."
+        ),
+    )
+    bass_style: BassStyle | None = Field(default=None)
     bass_instrument: BassInstrument | None = Field(default=None)
-    bass_player: str | None = Field(default=None, description="Legacy internal profile id.")
+    bass_player: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Legacy internal profile id.",
+    )
     lock_to_groove: float | None = Field(default=None, ge=0.0, le=1.0)
+    bass_articulation_focus: BassArticulationFocus | None = Field(default=None)
     bass_expression: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
         description="0 clean/restrained, 0.5 natural, 1 bold style-aware expression.",
     )
+    bass_density_bias: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="-1 more space, 0 balanced, 1 busier.",
+    )
+    bass_performance_controls: BassPerformanceControls | None = Field(
+        default=None,
+        description=(
+            "Independent performance mix: ghosts, mutes, slides, legato, "
+            "timing feel, and dynamics."
+        ),
+    )
+
+    @field_validator("bass_player")
+    @classmethod
+    def _validate_bass_player(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized in {"", "none"}:
+            return "none"
+        allowed = {player.value for player in BassPlayer}
+        if normalized not in allowed:
+            raise ValueError(
+                "bass_player must be 'none' or a supported Bass Player profile"
+            )
+        return normalized
 
 
 # Persona -> engine routing. The two bass engines deliberately stay separate
@@ -151,6 +371,34 @@ _PHRASE_V2_PERSONAS = {None, "pino", "paul_chambers"}
 
 def _engine_for_player(player: str | None) -> str:
     return "phrase_v2" if player in _PHRASE_V2_PERSONAS else "baseline"
+
+
+def _bass_structure_signature(
+    session: session_routes.StoredSession,
+) -> tuple[object, ...]:
+    """Settings that are allowed to rewrite the structural bass phrase."""
+
+    lock = session.bass_lock_to_groove
+    return (
+        session.bass_style,
+        session.bass_instrument,
+        session.bass_player,
+        session.bass_engine,
+        None if lock is None else round(float(lock), 4),
+        round(float(session.bass_density_bias), 4),
+        round(float(session.bass_expression), 4),
+    )
+
+
+def _require_unlocked_bass(session: session_routes.StoredSession) -> None:
+    if session.bass_locked:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "bass_lane_locked",
+                "message": "Unlock the Bass lane before requesting a new take.",
+            },
+        )
 
 
 class PluginCommandBody(BaseModel):
@@ -197,27 +445,37 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
             part=None,
         )
 
+    _require_unlocked_bass(s)
     # Commands may surprise musically, never destructively.
-    bass_history_store.capture(s)
+    _capture_history_or_503(s)
+    staged = copy.deepcopy(s)
     if plan.density_delta:
-        s.bass_density_bias = float(max(-1.0, min(1.0, s.bass_density_bias + plan.density_delta)))
+        staged.bass_density_bias = float(
+            max(-1.0, min(1.0, staged.bass_density_bias + plan.density_delta))
+        )
     if plan.lock_set is not None:
-        s.bass_lock_to_groove = float(plan.lock_set)
+        staged.bass_lock_to_groove = float(plan.lock_set)
     elif plan.lock_delta:
-        current = s.bass_lock_to_groove if s.bass_lock_to_groove is not None else 0.5
-        s.bass_lock_to_groove = float(max(0.0, min(1.0, current + plan.lock_delta)))
+        current = (
+            staged.bass_lock_to_groove
+            if staged.bass_lock_to_groove is not None
+            else 0.5
+        )
+        staged.bass_lock_to_groove = float(
+            max(0.0, min(1.0, current + plan.lock_delta))
+        )
     if plan.player is not None:
-        s.bass_player = None if plan.player == "none" else plan.player
-        s.bass_engine = _engine_for_player(s.bass_player)
+        staged.bass_player = None if plan.player == "none" else plan.player
+        staged.bass_engine = _engine_for_player(staged.bass_player)
     if plan.style is not None:
-        s.bass_style = plan.style
+        staged.bass_style = plan.style
 
     if plan.bar_ranges:
         from app.models.session import RegenerateBassBarsBody
 
         for start, end in plan.bar_ranges:
-            session_routes.regenerate_bass_bars(
-                s.id,
+            session_routes._regenerate_bass_bars_on_stored_session(  # noqa: SLF001
+                staged,
                 RegenerateBassBarsBody(
                     bar_start=start,
                     bar_end=end,
@@ -225,14 +483,23 @@ def plugin_command(body: PluginCommandBody) -> PluginCommandResult:
                 ),
             )
     else:
-        session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
+        session_routes._regenerate_lane_on_stored_session(  # noqa: SLF001
+            staged,
+            LaneName.bass,
+            context=session_routes._context_for_lane_regeneration(  # noqa: SLF001
+                staged,
+                LaneName.bass,
+            ),
+        )
+    session_routes._promote_live_bridge_overlay(staged)  # noqa: SLF001
+    session_routes._SESSIONS[s.id] = staged  # noqa: SLF001
 
     return PluginCommandResult(
         ok=True,
         applied=plan.applied,
         unrecognized=plan.unrecognized,
         message=" · ".join(plan.applied),
-        part=_bass_part_for_session(s),
+        part=_bass_part_for_session(staged),
     )
 
 
@@ -241,21 +508,63 @@ def plugin_regenerate(body: PluginRegenerateBody) -> PluginBassPart:
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    _require_unlocked_bass(s)
     # Preserve the exact playable part before changing controls or MIDI.
-    bass_history_store.capture(s)
+    _capture_history_or_503(s)
+    staged = copy.deepcopy(s)
+    prior_structure = _bass_structure_signature(staged)
     if body.bass_style is not None:
-        s.bass_style = body.bass_style
+        staged.bass_style = body.bass_style.value
     if body.bass_instrument is not None:
-        s.bass_instrument = body.bass_instrument.value
+        staged.bass_instrument = body.bass_instrument.value
     if body.bass_player is not None:
-        s.bass_player = None if body.bass_player.strip().lower() in ("", "none") else body.bass_player
+        staged.bass_player = (
+            None
+            if body.bass_player.strip().lower() in ("", "none")
+            else body.bass_player
+        )
     if body.lock_to_groove is not None:
-        s.bass_lock_to_groove = float(body.lock_to_groove)
+        staged.bass_lock_to_groove = float(body.lock_to_groove)
+    if body.bass_articulation_focus is not None:
+        staged.bass_articulation_focus = body.bass_articulation_focus.value
     if body.bass_expression is not None:
-        s.bass_expression = float(body.bass_expression)
-    s.bass_engine = _engine_for_player(s.bass_player)
-    session_routes.regenerate_selected(s.id, RegenerateSelectedBody(lanes=[LaneName.bass]))
-    return _bass_part_for_session(s)
+        staged.bass_expression = float(body.bass_expression)
+    if body.bass_density_bias is not None:
+        staged.bass_density_bias = float(body.bass_density_bias)
+    if body.bass_performance_controls is not None:
+        staged.bass_performance_controls = (
+            body.bass_performance_controls.model_dump(mode="python")
+        )
+    if body.force_new_phrase and body.host_tempo is not None:
+        staged.tempo = int(round(float(body.host_tempo)))
+    staged.bass_engine = _engine_for_player(staged.bass_player)
+    raw_context = session_routes._context_for_lane_regeneration(  # noqa: SLF001
+        staged,
+        LaneName.bass,
+    )
+    if (
+        not body.force_new_phrase
+        and _bass_structure_signature(staged) == prior_structure
+        and staged.bass_seed is not None
+        and staged.bass_bytes
+    ):
+        session_routes._rerender_current_bass_performance(  # noqa: SLF001
+            staged,
+            context=(
+                raw_context
+                if isinstance(raw_context, session_routes.SessionAnchorContext)
+                else None
+            ),
+        )
+    else:
+        session_routes._regenerate_lane_on_stored_session(  # noqa: SLF001
+            staged,
+            LaneName.bass,
+            context=raw_context,
+        )
+    session_routes._promote_live_bridge_overlay(staged)  # noqa: SLF001
+    session_routes._SESSIONS[s.id] = staged  # noqa: SLF001
+    return _bass_part_for_session(staged)
 
 
 class PluginHistoryEntry(BaseModel):
@@ -303,7 +612,7 @@ def plugin_history(session_id: str | None = None) -> PluginHistoryState:
     s = _bass_session(session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
-    return PluginHistoryState.model_validate(bass_history_store.history_state(s))
+    return PluginHistoryState.model_validate(_history_state_or_503(s))
 
 
 @router.post("/keep", response_model=PluginHistoryActionResult)
@@ -311,11 +620,11 @@ def plugin_keep(body: PluginHistoryBody) -> PluginHistoryActionResult:
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
-    bass_history_store.capture(s, kept=True)
+    _capture_history_or_503(s, kept=True)
     return PluginHistoryActionResult(
         message="Idea kept. You can explore and return to it.",
         history=PluginHistoryState.model_validate(
-            bass_history_store.history_state(s)
+            _history_state_or_503(s)
         ),
         part=_bass_part_for_session(s),
     )
@@ -328,8 +637,11 @@ def plugin_history_navigate(
     s = _bass_session(body.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
+    staged = session_routes._durable_session_view(s)  # noqa: SLF001
     try:
-        bass_history_store.navigate(s, body.direction)
+        bass_history_store.navigate(staged, body.direction)
+    except bass_history_store.BassHistoryStoreError as exc:
+        raise _history_unavailable(exc) from exc
     except IndexError as exc:
         raise HTTPException(
             status_code=409,
@@ -339,6 +651,7 @@ def plugin_history_navigate(
                 "message": f"No {body.direction} bass idea is available.",
             },
         ) from exc
+    s = _commit_recalled_bass(s, staged)
     return PluginHistoryActionResult(
         message=(
             "Recalled earlier bass idea."
@@ -346,7 +659,7 @@ def plugin_history_navigate(
             else "Recalled later bass idea."
         ),
         history=PluginHistoryState.model_validate(
-            bass_history_store.history_state(s)
+            _history_state_or_503(s)
         ),
         part=_bass_part_for_session(s),
     )
@@ -360,9 +673,12 @@ def plugin_history_recall(
     if s is None:
         raise HTTPException(status_code=404, detail={"error": "no_bass_part"})
     # Preserve an unlisted current state before jumping to a specific idea.
-    bass_history_store.capture(s)
+    _capture_history_or_503(s)
+    staged = session_routes._durable_session_view(s)  # noqa: SLF001
     try:
-        bass_history_store.recall(s, body.snapshot_id)
+        bass_history_store.recall(staged, body.snapshot_id)
+    except bass_history_store.BassHistoryStoreError as exc:
+        raise _history_unavailable(exc) from exc
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
@@ -379,10 +695,11 @@ def plugin_history_recall(
                 "snapshot_id": body.snapshot_id,
             },
         ) from exc
+    s = _commit_recalled_bass(s, staged)
     return PluginHistoryActionResult(
         message="Recalled kept bass idea.",
         history=PluginHistoryState.model_validate(
-            bass_history_store.history_state(s)
+            _history_state_or_503(s)
         ),
         part=_bass_part_for_session(s),
     )

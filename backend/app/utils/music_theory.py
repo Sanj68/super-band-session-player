@@ -223,9 +223,25 @@ def progression_degrees_for_bars(bar_count: int, scale: str) -> list[int]:
     return [pattern[b % len(pattern)] for b in range(bar_count)]
 
 
-def describe_scale(scale: str) -> str:
+def normalize_scale(scale: str) -> str:
+    """Return a supported canonical scale name or reject the input."""
+
     s = scale.strip().lower().replace(" ", "_")
     s = _SCALE_ALIASES.get(s, s)
     if s in _SCALE_INTERVALS:
         return s
+    raise ValueError(
+        f"Unknown scale: {scale!r}. Supported scales: "
+        + ", ".join(sorted(_SCALE_INTERVALS))
+        + "."
+    )
+
+
+def describe_scale(scale: str) -> str:
+    """Canonicalize a scale, retaining the engine's legacy major fallback."""
+
+    try:
+        return normalize_scale(scale)
+    except ValueError:
+        pass
     return _FALLBACK_SCALE

@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
+import hashlib
 import io
+import json
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Literal
 
 import pretty_midi
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.models.session import (
     AddPartToSuitBody,
     BassCandidateRun,
     BassCandidateTake,
+    BassPerformanceControls,
     EngineData,
     GenerateBassCandidatesBody,
     GenerateAroundAnchorBody,
@@ -36,11 +40,16 @@ from app.models.session import (
     SessionCreated,
     SessionPatch,
     SessionState,
+    SourceAnalysis,
     lane_styles_for_session_preset,
 )
 from app.routes.midi_routes import get_audition_player
-from app.services import generator
-from app.services import bass_candidate_store
+from app.services import (
+    bass_candidate_store,
+    bass_history_store,
+    bridge_store,
+    generator,
+)
 from app.services.bass_bar_splice import splice_bass_bars
 from app.services.bass_candidate_roles import (
     ROLE_ORDER,
@@ -49,14 +58,26 @@ from app.services.bass_candidate_roles import (
 )
 from app.services.bass_loop_boundary import normalize_bass_loop_bytes
 from app.services.bass_vocabulary.candidates import generate_vocabulary_candidates
-from app.services.bass_performance import BassPerformanceNote
+from app.services.bass_performance import (
+    BassPerformanceNote,
+    infer_bass_articulations,
+)
+from app.services.bass_performance_controls import (
+    resolve_bass_performance_controls,
+)
 from app.services.bass_performance_render import render_performance_bass_midi
+from app.services.bass_instrument_profiles import resolve_bass_articulation_focus
 from app.services.conditioning import UnifiedConditioning, build_unified_conditioning
 from app.services.audio_source_analysis import analyze_reference_audio
 from app.services.bass_quality import analyze_bass_take, count_unsupported_structural_notes
 from app.services.midi_note_extract import extract_lane_notes
 from app.services.lead_generator import normalize_lead_style
-from app.services.midi_export import lane_midi_response, merge_lane_midis, zip_all_lanes
+from app.services.midi_export import (
+    apply_loop_phase_offset,
+    lane_midi_response,
+    merge_lane_midis,
+    zip_all_lanes,
+)
 from app.services.midi_audition import MidiOutputUnavailable
 from app.services.source_analysis import build_groove_profile, build_harmony_plan, build_source_analysis
 from app.services.source_analysis_fusion import fuse_source_and_groove
@@ -98,6 +119,7 @@ _DEFAULT_CHORD_INSTRUMENT = "piano"
 _DEFAULT_DRUM_KIT = "standard"
 _REFERENCE_AUDIO_ROOT = Path(__file__).resolve().parents[2] / "data" / "reference_audio"
 _ALLOWED_REFERENCE_EXTS: Final[set[str]] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
+_CANDIDATE_GENERATION_CONTEXT_VERSION: Final[int] = 4
 
 
 def _new_bass_seed() -> int:
@@ -123,7 +145,9 @@ class StoredSession:
     bass_player: str | None = None
     bass_engine: str = "baseline"
     bass_lock_to_groove: float | None = None
+    bass_articulation_focus: str = "natural"
     bass_expression: float = 0.5
+    bass_performance_controls: dict[str, float] | None = None
     bass_phase_offset_beats: float = 0.0
     bass_density_bias: float = 0.0
     bass_seed: int | None = None
@@ -165,6 +189,201 @@ class StoredSession:
     harmony_map_source: str = "none"
     current_bass_candidate_run_id: str | None = None
     current_bass_candidate_take_id: str | None = None
+    # Live Logic analyser evidence is an in-memory overlay. These fields keep
+    # the durable base available for persistence and candidate-staleness
+    # checks until /commit-source-groove explicitly promotes the overlay.
+    bridge_live_overlay_active: bool = False
+    bridge_live_base_source_analysis_override: object | None = None
+    bridge_live_base_key: str | None = None
+    bridge_live_base_scale: str | None = None
+
+
+def _durable_source_analysis(s: StoredSession) -> object | None:
+    if s.bridge_live_overlay_active:
+        return s.bridge_live_base_source_analysis_override
+    return s.source_analysis_override
+
+
+def _durable_key_scale(s: StoredSession) -> tuple[str, str]:
+    if not s.bridge_live_overlay_active:
+        return s.key, s.scale
+    return (
+        s.bridge_live_base_key or s.key,
+        s.bridge_live_base_scale or s.scale,
+    )
+
+
+def _discard_live_bridge_overlay(s: StoredSession) -> None:
+    """Restore the durable base and clear transient analyser evidence."""
+
+    if not s.bridge_live_overlay_active:
+        return
+    s.source_analysis_override = s.bridge_live_base_source_analysis_override
+    if s.bridge_live_base_key is not None:
+        s.key = s.bridge_live_base_key
+    if s.bridge_live_base_scale is not None:
+        s.scale = s.bridge_live_base_scale
+    s.bridge_live_overlay_active = False
+    s.bridge_live_base_source_analysis_override = None
+    s.bridge_live_base_key = None
+    s.bridge_live_base_scale = None
+
+
+def _durable_session_view(s: StoredSession) -> StoredSession:
+    """Copy a session as it would be restored from the durable snapshot."""
+
+    view = deepcopy(s)
+    _discard_live_bridge_overlay(view)
+    return view
+
+
+def _promote_live_bridge_overlay(s: StoredSession) -> None:
+    """Make the effective live context durable after successful consumption."""
+
+    if not s.bridge_live_overlay_active:
+        return
+    s.bridge_live_overlay_active = False
+    s.bridge_live_base_source_analysis_override = None
+    s.bridge_live_base_key = None
+    s.bridge_live_base_scale = None
+
+
+def _publish_staged_session(
+    current: StoredSession,
+    staged: StoredSession,
+) -> StoredSession:
+    """Atomically replace one complete session revision in the live mapping."""
+
+    if staged.id != current.id:
+        raise ValueError("Cannot publish a staged session under a different id")
+    _SESSIONS[current.id] = staged
+    return staged
+
+
+def _stable_candidate_value(value: object | None) -> object | None:
+    """Return a deterministic JSON-compatible view of stored analysis overrides."""
+    if value is None:
+        return None
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (dict, list, tuple, str, int, float, bool)):
+        return value
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        return attrs
+    return str(value)
+
+
+def _midi_context_digest(data: bytes | None) -> str | None:
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
+def _candidate_generation_context_fingerprint(s: StoredSession) -> str:
+    """Hash durable structural inputs that make a take safe to promote."""
+    anchor_lane = normalize_anchor_lane(s.anchor_lane)
+    durable_key, durable_scale = _durable_key_scale(s)
+    payload = {
+        "version": _CANDIDATE_GENERATION_CONTEXT_VERSION,
+        "musical_settings": {
+            "tempo": s.tempo,
+            "key": durable_key,
+            "scale": durable_scale,
+            "bar_count": s.bar_count,
+            "session_preset": s.session_preset,
+            "chord_progression": list(s.chord_progression or []),
+            "bass_style": s.bass_style,
+            "bass_instrument": s.bass_instrument,
+            "bass_player": s.bass_player,
+            "bass_engine": s.bass_engine,
+            "bass_lock_to_groove": s.bass_lock_to_groove,
+            "bass_articulation_focus": s.bass_articulation_focus,
+            "bass_density_bias": s.bass_density_bias,
+            "bass_expression": s.bass_expression,
+            "bass_performance_controls": (
+                dict(s.bass_performance_controls)
+                if s.bass_performance_controls is not None
+                else None
+            ),
+            "anchor_lane": anchor_lane,
+        },
+        "lane_midi": {
+            "drums": _midi_context_digest(s.drum_bytes),
+            # Bass MIDI is an upstream input only when bass itself is the anchor.
+            "bass_anchor": (
+                _midi_context_digest(s.bass_bytes)
+                if anchor_lane == LaneName.bass.value
+                else None
+            ),
+            "chords": _midi_context_digest(s.chords_bytes),
+            "lead": _midi_context_digest(s.lead_bytes),
+        },
+        "reference_audio": {
+            "path": s.reference_audio_path,
+            "filename": s.reference_audio_filename,
+            "uploaded_at": s.reference_audio_uploaded_at,
+            "duration_seconds": s.reference_audio_duration_seconds,
+            "head_trim_seconds": s.reference_audio_head_trim_seconds,
+            "analysis": _stable_candidate_value(
+                _durable_source_analysis(s)
+            ),
+        },
+        "groove_reference_audio": {
+            "path": s.groove_reference_audio_path,
+            "filename": s.groove_reference_audio_filename,
+            "uploaded_at": s.groove_reference_audio_uploaded_at,
+            "duration_seconds": s.groove_reference_audio_duration_seconds,
+            "head_trim_seconds": s.groove_reference_audio_head_trim_seconds,
+            "analysis": _stable_candidate_value(
+                s.groove_reference_analysis_override
+            ),
+        },
+        "harmony_gate": {
+            "confirmation_required": s.harmony_confirmation_required,
+            "key_confirmed_by_user": s.harmony_key_confirmed_by_user,
+            "map_confirmation_required": s.harmony_map_confirmation_required,
+            "suggested_progression": list(s.suggested_chord_progression or []),
+            "suggested_confidence": list(s.suggested_chord_confidence or []),
+            "map_source": s.harmony_map_source,
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _candidate_generation_evidence_payload(
+    s: StoredSession,
+) -> dict[str, object | None]:
+    """Freeze the exact tonal/analysis evidence used to render a run."""
+
+    return {
+        "key": s.key,
+        "scale": s.scale,
+        "source_analysis_override": _stable_candidate_value(
+            s.source_analysis_override
+        ),
+        "groove_reference_analysis_override": _stable_candidate_value(
+            s.groove_reference_analysis_override
+        ),
+    }
+
+
+def _candidate_generation_evidence_fingerprint(
+    payload: dict[str, object | None],
+) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 _SESSIONS: dict[str, StoredSession] = {}
@@ -227,7 +446,33 @@ def _lane_states(s: StoredSession) -> dict[str, LaneState]:
     }
 
 
+def _groove_source_status(
+    session_id: str,
+) -> tuple[bool, int, str | None]:
+    """Describe live beat evidence without confusing it with harmony capture."""
+
+    bridge_state = bridge_store.get_bridge_state(session_id)
+    try:
+        frame_count = max(0, int(bridge_state.get("frame_count", 0)))
+    except (TypeError, ValueError):
+        frame_count = 0
+    if frame_count:
+        return True, frame_count, None
+    return (
+        False,
+        0,
+        (
+            "No beat captured - put Session Player Bridge on the beat/drum "
+            "track and play it. NEW BEAT / RESET can make a fresh phrase, "
+            "but it cannot match that beat yet."
+        ),
+    )
+
+
 def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
+    # Legacy harmony-gate hydration is a derived presentation concern. Never
+    # let a GET or response serializer mutate the published durable object.
+    s = replace(s)
     _sync_harmony_map_gate(s)
     ctx = build_session_context(s)
     musical_src = s.source_analysis_override if s.source_analysis_override is not None else build_source_analysis(s, context=ctx)
@@ -260,6 +505,24 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
             head_trim_seconds=float(max(0.0, s.groove_reference_audio_head_trim_seconds)),
             analyzed=s.groove_reference_analysis_override is not None,
         )
+    requested_touch, effective_touch, articulation_notice = (
+        resolve_bass_articulation_focus(
+            s.bass_articulation_focus,
+            s.bass_instrument,
+        )
+    )
+    performance_controls = resolve_bass_performance_controls(
+        s.bass_performance_controls,
+        focus=requested_touch,
+        expression_amount=s.bass_expression,
+        style=s.bass_style,
+        instrument_family=s.bass_instrument,
+    )
+    (
+        groove_source_ready,
+        groove_source_frame_count,
+        groove_source_notice,
+    ) = _groove_source_status(s.id)
     return SessionState(
         id=s.id,
         tempo=s.tempo,
@@ -278,8 +541,23 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_player=s.bass_player,
         bass_engine=s.bass_engine,
         bass_lock_to_groove=s.bass_lock_to_groove,
+        groove_source_ready=groove_source_ready,
+        groove_source_frame_count=groove_source_frame_count,
+        groove_source_notice=groove_source_notice,
+        bass_articulation_focus=requested_touch,
+        bass_articulation_effective=effective_touch,
+        bass_articulation_notice=articulation_notice,
         bass_expression=s.bass_expression,
+        bass_performance_controls=BassPerformanceControls.model_validate(
+            performance_controls.requested
+        ),
+        bass_performance_controls_effective=BassPerformanceControls.model_validate(
+            performance_controls.effective
+        ),
+        bass_performance_controls_notice=performance_controls.notice,
+        bass_density_bias=s.bass_density_bias,
         bass_phase_offset_beats=s.bass_phase_offset_beats,
+        bass_performance_available=s.bass_performance_bytes is not None,
         bass_seed=s.bass_seed,
         drum_player=s.drum_player,
         chord_instrument=s.chord_instrument,
@@ -350,8 +628,9 @@ def _sync_harmony_map_gate(s: StoredSession) -> None:
 
 
 def _require_confirmed_harmony(s: StoredSession) -> None:
-    _sync_harmony_map_gate(s)
-    if s.harmony_confirmation_required:
+    gate_view = replace(s)
+    _sync_harmony_map_gate(gate_view)
+    if gate_view.harmony_confirmation_required:
         raise HTTPException(
             status_code=409,
             detail={
@@ -359,7 +638,7 @@ def _require_confirmed_harmony(s: StoredSession) -> None:
                 "message": "Confirm or correct the tentative key and scale before generating harmonic parts.",
             },
         )
-    if s.harmony_map_confirmation_required:
+    if gate_view.harmony_map_confirmation_required:
         raise HTTPException(
             status_code=409,
             detail={
@@ -368,7 +647,9 @@ def _require_confirmed_harmony(s: StoredSession) -> None:
                     "Confirm or correct the tentative bar-level chord map before "
                     "generating harmonic parts from uploaded audio."
                 ),
-                "suggested_chord_progression": list(s.suggested_chord_progression or []),
+                "suggested_chord_progression": list(
+                    gate_view.suggested_chord_progression or []
+                ),
             },
         )
 
@@ -394,12 +675,50 @@ def _bass_program_from_clean_bytes(clean_bytes: bytes) -> int:
     return _DEFAULT_BASS_PROGRAM
 
 
+def _resolved_bass_performance_controls(
+    s: "StoredSession",
+) -> dict[str, float]:
+    return resolve_bass_performance_controls(
+        s.bass_performance_controls,
+        focus=s.bass_articulation_focus,
+        expression_amount=s.bass_expression,
+        style=s.bass_style,
+        instrument_family=s.bass_instrument,
+    ).effective
+
+
+def _explicit_bass_performance_controls(
+    s: "StoredSession",
+) -> dict[str, float | None]:
+    """Return independent amounts without changing legacy Touch/Character.
+
+    A session with no explicit performance mix must continue to use the
+    generator and renderer's established planners. Once the producer moves any
+    independent control, all six performance axes become explicit.
+    """
+
+    if s.bass_performance_controls is None:
+        return {
+            "ghost": None,
+            "mute": None,
+            "slide": None,
+            "legato": None,
+            "timing_humanize": None,
+            "velocity_humanize": None,
+        }
+    resolved = _resolved_bass_performance_controls(s)
+    return dict(resolved)
+
+
 def _render_bass_performance_bytes(
     *,
     clean_bytes: bytes,
     perf_notes: tuple[BassPerformanceNote, ...],
     tempo: int,
     expression_amount: float = 0.5,
+    articulation_focus: str | None = "natural",
+    timing_humanize: float | None = None,
+    velocity_humanize: float | None = None,
     instrument_family: str | None = None,
     conditioning: UnifiedConditioning | None = None,
 ) -> bytes:
@@ -409,6 +728,9 @@ def _render_bass_performance_bytes(
         tempo=int(tempo),
         program=program,
         expression_amount=expression_amount,
+        articulation_focus=articulation_focus,
+        timing_humanize=timing_humanize,
+        velocity_humanize=velocity_humanize,
         instrument_family=instrument_family,
         source_kick_per_bar=conditioning.source_kick_weight if conditioning else None,
         source_snare_per_bar=conditioning.source_snare_weight if conditioning else None,
@@ -445,6 +767,10 @@ def _normalize_bass_bytes_for_session(
 
 def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
     """Deep-copy settings and lane MIDI bytes/previews into a new StoredSession."""
+    # A variation starts from the durable musical state. Live analyser
+    # evidence may still change or disappear, and candidate run ids are scoped
+    # to the source session id rather than portable provenance.
+    src = _durable_session_view(src)
     return StoredSession(
         id=new_id,
         tempo=src.tempo,
@@ -463,8 +789,15 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
         bass_player=src.bass_player,
         bass_engine=src.bass_engine,
         bass_lock_to_groove=src.bass_lock_to_groove,
+        bass_articulation_focus=src.bass_articulation_focus,
         bass_expression=src.bass_expression,
+        bass_performance_controls=(
+            dict(src.bass_performance_controls)
+            if src.bass_performance_controls is not None
+            else None
+        ),
         bass_phase_offset_beats=src.bass_phase_offset_beats,
+        bass_density_bias=src.bass_density_bias,
         bass_seed=src.bass_seed,
         drum_player=src.drum_player,
         chord_instrument=src.chord_instrument,
@@ -510,8 +843,8 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
             else None
         ),
         harmony_map_source=src.harmony_map_source,
-        current_bass_candidate_run_id=src.current_bass_candidate_run_id,
-        current_bass_candidate_take_id=src.current_bass_candidate_take_id,
+        current_bass_candidate_run_id=None,
+        current_bass_candidate_take_id=None,
     )
 
 
@@ -580,13 +913,28 @@ def create_session(body: SessionCreate) -> SessionCreated:
         bass_player=bp_ins,
         bass_engine=be_ins,
         bass_lock_to_groove=body.bass_lock_to_groove,
+        bass_articulation_focus=body.bass_articulation_focus.value,
         bass_expression=body.bass_expression,
+        bass_performance_controls=(
+            body.bass_performance_controls.model_dump(mode="python")
+            if body.bass_performance_controls is not None
+            else None
+        ),
         bass_phase_offset_beats=body.bass_phase_offset_beats,
+        bass_density_bias=body.bass_density_bias,
         drum_player=dp_ins,
         chord_instrument=ci_ins,
         chord_player=cp_ins,
         drum_kit=dk_ins,
         anchor_lane=anchor_ins,
+        # SessionCreate requires an explicit key/scale, so that harmony is
+        # authoritative user input rather than a tentative analyser guess.
+        harmony_key_confirmed_by_user=True,
+        harmony_map_source=(
+            "confirmed_user"
+            if body.chord_progression
+            else "none"
+        ),
     )
     _SESSIONS[sid] = s
     return SessionCreated(session=_to_state(s, message="Session created. Call /generate to build lanes."))
@@ -621,18 +969,21 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
     blob_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
     target = target_dir / blob_name
     target.write_bytes(payload)
-    s.reference_audio_path = str(target)
-    s.reference_audio_filename = filename
-    s.reference_audio_uploaded_at = datetime.now(timezone.utc).isoformat()
-    s.reference_audio_duration_seconds = 0.0
-    s.reference_audio_head_trim_seconds = 0.0
-    s.source_analysis_override = None
-    s.harmony_confirmation_required = True
-    s.harmony_key_confirmed_by_user = False
-    s.harmony_map_confirmation_required = True
-    s.suggested_chord_progression = None
-    s.suggested_chord_confidence = None
-    s.harmony_map_source = "none"
+    staged = replace(s)
+    _discard_live_bridge_overlay(staged)
+    staged.reference_audio_path = str(target)
+    staged.reference_audio_filename = filename
+    staged.reference_audio_uploaded_at = datetime.now(timezone.utc).isoformat()
+    staged.reference_audio_duration_seconds = 0.0
+    staged.reference_audio_head_trim_seconds = 0.0
+    staged.source_analysis_override = None
+    staged.harmony_confirmation_required = True
+    staged.harmony_key_confirmed_by_user = False
+    staged.harmony_map_confirmation_required = True
+    staged.suggested_chord_progression = None
+    staged.suggested_chord_confidence = None
+    staged.harmony_map_source = "none"
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message="Reference audio uploaded. Call /analyze-audio to run DSP analysis.")
 
 
@@ -650,13 +1001,14 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
             status_code=400,
             detail={"error": "reference_audio_not_found", "message": "Stored reference audio file is missing."},
         )
+    analysis_key, analysis_scale = _durable_key_scale(s)
     try:
         result = analyze_reference_audio(
             audio_path=audio_path,
             session_tempo=s.tempo,
             bar_count=s.bar_count,
-            session_key=s.key,
-            session_scale=s.scale,
+            session_key=analysis_key,
+            session_scale=analysis_scale,
             source_filename=s.reference_audio_filename,
             trust_session_bar_count=False,
         )
@@ -679,38 +1031,41 @@ def analyze_reference_audio_for_session(session_id: str) -> SessionState:
         and not s.harmony_map_confirmation_required
     )
 
-    s.source_analysis_override = result.source_analysis
+    staged = replace(s)
+    _discard_live_bridge_overlay(staged)
+    staged.source_analysis_override = result.source_analysis
     filename_key = result.source_analysis.source_metadata.get("filename_hints", {}).get("key")
     if preserve_confirmed_key:
         # Reanalysis refreshes evidence, not an explicit user decision.
-        s.harmony_confirmation_required = False
-        s.harmony_key_confirmed_by_user = True
+        staged.harmony_confirmation_required = False
+        staged.harmony_key_confirmed_by_user = True
     else:
-        s.harmony_confirmation_required = (
+        staged.harmony_confirmation_required = (
             not bool(filename_key)
             and float(result.source_analysis.tonal_center_confidence) < 0.5
         )
     suggestion = result.source_analysis.source_metadata.get("harmony_suggestions", {})
     suggested_chords = suggestion.get("chords", []) if isinstance(suggestion, dict) else []
     suggested_confidence = suggestion.get("confidence", []) if isinstance(suggestion, dict) else []
-    s.suggested_chord_progression = (
+    staged.suggested_chord_progression = (
         [str(chord) for chord in suggested_chords if str(chord).strip()]
         if isinstance(suggested_chords, list)
         else None
     )
-    s.suggested_chord_confidence = (
+    staged.suggested_chord_confidence = (
         [max(0.0, min(1.0, float(value))) for value in suggested_confidence]
         if isinstance(suggested_confidence, list)
         else None
     )
     if preserve_confirmed_map:
-        s.harmony_map_confirmation_required = False
-        s.harmony_map_source = "confirmed_user"
+        staged.harmony_map_confirmation_required = False
+        staged.harmony_map_source = "confirmed_user"
     else:
-        s.harmony_map_confirmation_required = True
-        s.harmony_map_source = "uploaded_audio_chroma_tentative"
-    s.reference_audio_duration_seconds = result.duration_seconds
-    s.reference_audio_head_trim_seconds = result.head_trim_seconds
+        staged.harmony_map_confirmation_required = True
+        staged.harmony_map_source = "uploaded_audio_chroma_tentative"
+    staged.reference_audio_duration_seconds = result.duration_seconds
+    staged.reference_audio_head_trim_seconds = result.head_trim_seconds
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message="Reference audio analyzed and source analysis updated.")
 
 
@@ -738,12 +1093,14 @@ async def upload_groove_reference_audio(session_id: str, file: UploadFile = File
     blob_name = f"groove_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
     target = target_dir / blob_name
     target.write_bytes(payload)
-    s.groove_reference_audio_path = str(target)
-    s.groove_reference_audio_filename = filename
-    s.groove_reference_audio_uploaded_at = datetime.now(timezone.utc).isoformat()
-    s.groove_reference_audio_duration_seconds = 0.0
-    s.groove_reference_audio_head_trim_seconds = 0.0
-    s.groove_reference_analysis_override = None
+    staged = replace(s)
+    staged.groove_reference_audio_path = str(target)
+    staged.groove_reference_audio_filename = filename
+    staged.groove_reference_audio_uploaded_at = datetime.now(timezone.utc).isoformat()
+    staged.groove_reference_audio_duration_seconds = 0.0
+    staged.groove_reference_audio_head_trim_seconds = 0.0
+    staged.groove_reference_analysis_override = None
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message="Groove reference uploaded. Analyse it to extract kick, snare and pocket.")
 
 
@@ -775,11 +1132,13 @@ def analyze_groove_reference_for_session(session_id: str) -> SessionState:
             status_code=422,
             detail={"error": "groove_analysis_failed", "message": str(exc)},
         ) from exc
-    s.groove_reference_analysis_override = result.source_analysis.model_copy(
+    staged = replace(s)
+    staged.groove_reference_analysis_override = result.source_analysis.model_copy(
         update={"source_lane": "groove_reference_audio"}
     )
-    s.groove_reference_audio_duration_seconds = result.duration_seconds
-    s.groove_reference_audio_head_trim_seconds = result.head_trim_seconds
+    staged.groove_reference_audio_duration_seconds = result.duration_seconds
+    staged.groove_reference_audio_head_trim_seconds = result.head_trim_seconds
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message="Groove reference analysed. Bass can now follow its pocket.")
 
 
@@ -817,98 +1176,118 @@ def duplicate_session(session_id: str) -> SessionState:
 def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     """Update session fields (no automatic lane regeneration)."""
     s = _get_session_or_404(session_id)
+    staged = replace(s)
+    if any(
+        value is not None
+        for value in (body.tempo, body.key, body.scale, body.bar_count)
+    ):
+        _discard_live_bridge_overlay(staged)
     parts: list[str] = []
     if body.tempo is not None:
-        s.tempo = int(body.tempo)
+        staged.tempo = int(body.tempo)
         parts.append("Tempo updated")
     if body.key is not None:
         try:
-            s.key = mt.normalize_key(body.key)
+            staged.key = mt.normalize_key(body.key)
         except ValueError as e:
             raise HTTPException(status_code=422, detail={"error": "invalid_key", "message": str(e)}) from e
         parts.append("Key updated")
     if body.scale is not None:
-        s.scale = mt.describe_scale(body.scale)
+        staged.scale = mt.describe_scale(body.scale)
         parts.append("Scale updated")
     if body.key is not None or body.scale is not None:
-        s.harmony_confirmation_required = False
-        s.harmony_key_confirmed_by_user = True
+        staged.harmony_confirmation_required = False
+        staged.harmony_key_confirmed_by_user = True
     if body.bar_count is not None:
-        s.bar_count = int(body.bar_count)
+        staged.bar_count = int(body.bar_count)
         parts.append("Bar count updated")
     if body.session_preset is not None:
-        s.session_preset = body.session_preset.value
+        staged.session_preset = body.session_preset.value
         ds, bs, cs, ls = lane_styles_for_session_preset(body.session_preset)
-        s.drum_style, s.bass_style, s.chord_style, s.lead_style = ds, bs, cs, normalize_lead_style(ls)
+        staged.drum_style, staged.bass_style, staged.chord_style, staged.lead_style = ds, bs, cs, normalize_lead_style(ls)
         parts.append(
             f"Session preset updated to {body.session_preset.value}; lane styles set to preset defaults"
         )
     if body.lead_style is not None:
-        s.lead_style = normalize_lead_style(body.lead_style.value)
+        staged.lead_style = normalize_lead_style(body.lead_style.value)
         parts.append("Lead style updated")
     if "lead_player" in body.model_dump(exclude_unset=True):
-        s.lead_player = body.lead_player.value if body.lead_player is not None else None
+        staged.lead_player = body.lead_player.value if body.lead_player is not None else None
         parts.append("Lead player updated")
     if body.bass_style is not None:
-        s.bass_style = body.bass_style.value
+        staged.bass_style = body.bass_style.value
         parts.append("Bass style updated")
     if body.chord_style is not None:
-        s.chord_style = body.chord_style.value
+        staged.chord_style = body.chord_style.value
         parts.append("Chord style updated")
     if "chord_progression" in body.model_dump(exclude_unset=True):
-        s.chord_progression = list(body.chord_progression) if body.chord_progression else None
-        if s.chord_progression:
-            s.harmony_map_confirmation_required = False
-            s.harmony_map_source = "confirmed_user"
+        staged.chord_progression = list(body.chord_progression) if body.chord_progression else None
+        if staged.chord_progression:
+            staged.harmony_map_confirmation_required = False
+            staged.harmony_map_source = "confirmed_user"
             parts.append("Bar-level harmony map confirmed")
         else:
-            s.harmony_map_confirmation_required = bool(s.reference_audio_path)
-            s.harmony_map_source = (
+            staged.harmony_map_confirmation_required = bool(staged.reference_audio_path)
+            staged.harmony_map_source = (
                 "uploaded_audio_chroma_tentative"
-                if s.suggested_chord_progression
+                if staged.suggested_chord_progression
                 else "none"
             )
             parts.append("Chord progression cleared")
     if "chord_player" in body.model_dump(exclude_unset=True):
-        s.chord_player = body.chord_player.value if body.chord_player is not None else None
+        staged.chord_player = body.chord_player.value if body.chord_player is not None else None
         parts.append("Chord player updated")
     if body.drum_style is not None:
-        s.drum_style = body.drum_style.value
+        staged.drum_style = body.drum_style.value
         parts.append("Drum style updated")
     if body.lead_instrument is not None:
-        s.lead_instrument = body.lead_instrument.value
+        staged.lead_instrument = body.lead_instrument.value
         parts.append("Lead instrument updated")
     if body.bass_instrument is not None:
-        s.bass_instrument = body.bass_instrument.value
+        staged.bass_instrument = body.bass_instrument.value
         parts.append("Bass instrument updated")
     if "bass_player" in body.model_dump(exclude_unset=True):
-        s.bass_player = body.bass_player.value if body.bass_player is not None else None
+        staged.bass_player = body.bass_player.value if body.bass_player is not None else None
         parts.append("Bass player updated")
     if body.bass_engine is not None:
-        s.bass_engine = body.bass_engine.value
+        staged.bass_engine = body.bass_engine.value
         parts.append("Bass engine updated")
     if "bass_lock_to_groove" in body.model_dump(exclude_unset=True):
-        s.bass_lock_to_groove = body.bass_lock_to_groove
+        staged.bass_lock_to_groove = body.bass_lock_to_groove
         parts.append("Bass lock-to-groove updated")
+    if body.bass_articulation_focus is not None:
+        staged.bass_articulation_focus = body.bass_articulation_focus.value
+        parts.append("Bass touch updated")
     if body.bass_expression is not None:
-        s.bass_expression = float(body.bass_expression)
+        staged.bass_expression = float(body.bass_expression)
         parts.append("Bass expression updated")
+    if "bass_performance_controls" in body.model_fields_set:
+        staged.bass_performance_controls = (
+            body.bass_performance_controls.model_dump(mode="python")
+            if body.bass_performance_controls is not None
+            else None
+        )
+        parts.append("Bass performance mix updated")
+    if body.bass_density_bias is not None:
+        staged.bass_density_bias = float(body.bass_density_bias)
+        parts.append("Bass activity updated")
     if body.bass_phase_offset_beats is not None:
-        s.bass_phase_offset_beats = float(body.bass_phase_offset_beats)
+        staged.bass_phase_offset_beats = float(body.bass_phase_offset_beats)
         parts.append("Bass phase offset updated")
     if "drum_player" in body.model_dump(exclude_unset=True):
-        s.drum_player = body.drum_player.value if body.drum_player is not None else None
+        staged.drum_player = body.drum_player.value if body.drum_player is not None else None
         parts.append("Drum player updated")
     if body.chord_instrument is not None:
-        s.chord_instrument = body.chord_instrument.value
+        staged.chord_instrument = body.chord_instrument.value
         parts.append("Chord instrument updated")
     if body.drum_kit is not None:
-        s.drum_kit = body.drum_kit.value
+        staged.drum_kit = body.drum_kit.value
         parts.append("Drum kit updated")
     if "anchor_lane" in body.model_dump(exclude_unset=True):
-        s.anchor_lane = body.anchor_lane.value if body.anchor_lane is not None else None
+        staged.anchor_lane = body.anchor_lane.value if body.anchor_lane is not None else None
         parts.append("Anchor lane updated")
     msg = ". ".join(parts) + ". Regenerate affected lane(s) to rebuild MIDI."
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message=msg)
 
 
@@ -916,22 +1295,30 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
 def patch_lane_locks(session_id: str, body: LaneLocksPatch) -> SessionState:
     """Update which lanes are locked against multi-lane regenerate (partial body allowed)."""
     s = _get_session_or_404(session_id)
+    staged = replace(s)
     if body.drums is not None:
-        s.drum_locked = body.drums
+        staged.drum_locked = body.drums
     if body.bass is not None:
-        s.bass_locked = body.bass
+        staged.bass_locked = body.bass
     if body.chords is not None:
-        s.chords_locked = body.chords
+        staged.chords_locked = body.chords
     if body.lead is not None:
-        s.lead_locked = body.lead
+        staged.lead_locked = body.lead
+    s = _publish_staged_session(s, staged)
     return _to_state(s, message="Lane locks updated.")
 
 
 @router.post("/{session_id}/generate", response_model=GenerateResult)
 def generate_session(session_id: str) -> GenerateResult:
     s = _get_session_or_404(session_id)
-    _require_confirmed_harmony(s)
-    _generate_all_lanes(s)
+    staged = replace(s)
+    _require_confirmed_harmony(staged)
+    _generate_all_lanes(staged)
+    s = _commit_regenerated_lanes(
+        s,
+        staged,
+        list(_LANE_REGENERATION_ORDER),
+    )
     return GenerateResult(session=_to_state(s, message="All lanes generated."))
 
 
@@ -974,27 +1361,63 @@ def _regenerate_lane_on_stored_session(
         s.drum_bytes = d_bytes
         s.drum_preview = d_prev
     elif lane == LaneName.bass:
-        seed = _new_bass_seed()
-        b_bytes, b_prev, perf_notes = generator.generate_bass(
-            tempo=s.tempo,
-            bar_count=s.bar_count,
-            key=s.key,
-            scale=s.scale,
-            bass_style=s.bass_style,
-            bass_instrument=s.bass_instrument,
-            bass_player=s.bass_player,
-            bass_engine=s.bass_engine,
-            lock_to_groove=s.bass_lock_to_groove,
-            density_bias=s.bass_density_bias,
-            expression_amount=s.bass_expression,
-            chord_progression=s.chord_progression,
-            session_preset=s.session_preset,
-            context=context,
-            conditioning=cond,
-            seed=seed,
-            return_performance_notes=True,
+        base_seed = _new_bass_seed()
+        performance_controls = _explicit_bass_performance_controls(s)
+        strict_harmonic_guard = bool(
+            s.bass_engine == "phrase_v2"
+            and s.chord_progression
+            and cond is not None
         )
-        b_bytes = _normalize_bass_bytes_for_session(b_bytes, s)
+        max_attempts = 6 if strict_harmonic_guard else 1
+        rejected = 0
+        for attempt in range(max_attempts):
+            seed = base_seed + attempt
+            b_bytes, b_prev, perf_notes = generator.generate_bass(
+                tempo=s.tempo,
+                bar_count=s.bar_count,
+                key=s.key,
+                scale=s.scale,
+                bass_style=s.bass_style,
+                bass_instrument=s.bass_instrument,
+                bass_player=s.bass_player,
+                bass_engine=s.bass_engine,
+                lock_to_groove=s.bass_lock_to_groove,
+                density_bias=s.bass_density_bias,
+                expression_amount=s.bass_expression,
+                bass_articulation_focus=s.bass_articulation_focus,
+                ghost_amount=performance_controls["ghost"],
+                mute_amount=performance_controls["mute"],
+                slide_amount=performance_controls["slide"],
+                legato_amount=performance_controls["legato"],
+                chord_progression=s.chord_progression,
+                session_preset=s.session_preset,
+                context=context,
+                conditioning=cond,
+                seed=seed,
+                return_performance_notes=True,
+            )
+            b_bytes = _normalize_bass_bytes_for_session(b_bytes, s)
+            unsupported = count_unsupported_structural_notes(
+                extract_lane_notes(b_bytes),
+                tempo=s.tempo,
+                conditioning=cond,
+                style=s.bass_style,
+            )
+            if not strict_harmonic_guard or unsupported == 0:
+                break
+            rejected += 1
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "bass_harmonic_guard_rejected",
+                    "message": (
+                        "Phrase-v2 could not produce a bass take supported by "
+                        "the confirmed chord progression."
+                    ),
+                    "attempts": rejected,
+                },
+            )
         s.bass_bytes = b_bytes
         s.bass_preview = b_prev
         s.bass_seed = seed
@@ -1003,6 +1426,9 @@ def _regenerate_lane_on_stored_session(
             perf_notes=perf_notes,
             tempo=s.tempo,
             expression_amount=s.bass_expression,
+            articulation_focus=s.bass_articulation_focus,
+            timing_humanize=performance_controls["timing_humanize"],
+            velocity_humanize=performance_controls["velocity_humanize"],
             instrument_family=s.bass_instrument,
             conditioning=cond,
         )
@@ -1018,6 +1444,7 @@ def _regenerate_lane_on_stored_session(
             chord_style=s.chord_style,
             chord_instrument=s.chord_instrument,
             chord_player=s.chord_player,
+            chord_progression=s.chord_progression,
             session_preset=s.session_preset,
             context=context,
         )
@@ -1065,25 +1492,159 @@ def _context_for_lane_regeneration(s: StoredSession, lane: LaneName) -> object |
     return build_session_context(s)
 
 
+def _lane_note_signature(data: bytes | None) -> tuple[tuple[int, float, float, int], ...]:
+    return tuple(
+        (
+            int(note.pitch),
+            round(float(note.start), 6),
+            round(float(note.end), 6),
+            int(note.velocity),
+        )
+        for note in extract_lane_notes(data)
+    )
+
+
+def _rerender_current_bass_performance(
+    s: StoredSession,
+    *,
+    context: SessionAnchorContext | None,
+) -> None:
+    """Rebuild expression directly from clean MIDI, freezing written notes."""
+
+    if not s.bass_bytes:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "bass_phrase_missing",
+                "message": (
+                    "Generate a bass idea before applying a performance-only change."
+                ),
+            },
+        )
+    conditioning = _conditioning_for_generation(s, context=context)
+    try:
+        clean_midi = pretty_midi.PrettyMIDI(io.BytesIO(s.bass_bytes))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "bass_phrase_invalid",
+                "message": "The current clean bass MIDI could not be re-rendered.",
+            },
+        ) from exc
+
+    seconds_per_beat = 60.0 / float(max(1, int(s.tempo)))
+    bar_seconds = seconds_per_beat * 4.0
+    sixteenth = seconds_per_beat / 4.0
+    phrase_roles = ("anchor", "answer", "push", "release")
+    source = "phrase_v2" if s.bass_engine == "phrase_v2" else "baseline"
+    clean_notes: list[BassPerformanceNote] = []
+    for instrument in clean_midi.instruments:
+        if instrument.is_drum:
+            continue
+        for note in instrument.notes:
+            bar_index = max(0, int(float(note.start) / bar_seconds))
+            bar_start = float(bar_index) * bar_seconds
+            slot_index = int(round((float(note.start) - bar_start) / sixteenth))
+            if slot_index >= 16:
+                bar_index += slot_index // 16
+                slot_index %= 16
+            clean_notes.append(
+                BassPerformanceNote(
+                    pitch=int(note.pitch),
+                    start=float(note.start),
+                    end=float(note.end),
+                    velocity=int(note.velocity),
+                    role=phrase_roles[bar_index % len(phrase_roles)],
+                    bar_index=bar_index,
+                    slot_index=max(0, min(15, slot_index)),
+                    source=source,
+                )
+            )
+    clean_notes.sort(key=lambda note: (note.start, note.pitch, note.end))
+    if not clean_notes:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "bass_phrase_empty",
+                "message": "The current clean bass phrase contains no notes.",
+            },
+        )
+
+    performance_controls = _explicit_bass_performance_controls(s)
+    performance_notes = infer_bass_articulations(
+        tuple(clean_notes),
+        tempo=int(s.tempo),
+        style=s.bass_style,
+        source=source,
+        expression_amount=s.bass_expression,
+        instrument_family=s.bass_instrument,
+        bass_articulation_focus=s.bass_articulation_focus,
+        ghost_amount=performance_controls["ghost"],
+        mute_amount=performance_controls["mute"],
+        slide_amount=performance_controls["slide"],
+        legato_amount=performance_controls["legato"],
+    )
+    rendered = _render_bass_performance_bytes(
+        clean_bytes=s.bass_bytes,
+        perf_notes=performance_notes,
+        tempo=s.tempo,
+        expression_amount=s.bass_expression,
+        articulation_focus=s.bass_articulation_focus,
+        timing_humanize=performance_controls["timing_humanize"],
+        velocity_humanize=performance_controls["velocity_humanize"],
+        instrument_family=s.bass_instrument,
+        conditioning=conditioning,
+    )
+    s.bass_performance_bytes = _normalize_bass_bytes_for_session(rendered, s)
+    s.current_bass_candidate_run_id = None
+    s.current_bass_candidate_take_id = None
+
+
+def _commit_regenerated_lanes(
+    destination: StoredSession,
+    staged: StoredSession,
+    lanes: list[LaneName],
+) -> StoredSession:
+    """Publish one coherent staged revision after all requested work succeeds."""
+
+    if staged.id != destination.id:
+        raise ValueError("Cannot commit a staged session under a different id")
+    if (
+        any(lane != LaneName.drums for lane in lanes)
+        and staged.bridge_live_overlay_active
+    ):
+        # The new MIDI was conditioned by the live context. Commit that exact
+        # context alongside the output so a save/restart cannot pair the new
+        # notes with an older key or groove map.
+        _promote_live_bridge_overlay(staged)
+    # Mapping replacement is atomic under CPython. Concurrent GET/plugin polls
+    # therefore see either the complete prior revision or complete new one,
+    # never clean MIDI from one take and performance/preview from another.
+    _SESSIONS[destination.id] = staged
+    return staged
+
+
 @router.post("/{session_id}/generate-around-anchor", response_model=SessionState)
 def generate_around_anchor(session_id: str, body: GenerateAroundAnchorBody = GenerateAroundAnchorBody()) -> SessionState:
     """Regenerate non-anchor lanes using timing/density context from the anchor lane (respects lane locks)."""
     s = _get_session_or_404(session_id)
+    staged = replace(s)
     if body.anchor_lane is not None:
-        s.anchor_lane = body.anchor_lane.value
-    av = normalize_anchor_lane(s.anchor_lane)
+        staged.anchor_lane = body.anchor_lane.value
+    av = normalize_anchor_lane(staged.anchor_lane)
     if not av:
         raise HTTPException(
             status_code=400,
             detail={"error": "anchor_not_set", "message": "Set anchor_lane (PATCH session) or send anchor_lane in the request body."},
         )
     anchor_lane = LaneName(av)
-    if not _lane_has_midi(s, anchor_lane):
+    if not _lane_has_midi(staged, anchor_lane):
         raise HTTPException(
             status_code=400,
             detail={"error": "anchor_not_generated", "lane": av, "message": "Generate the anchor lane first."},
         )
-    ctx = build_session_context(s)
+    ctx = build_session_context(staged)
     if ctx is None:
         raise HTTPException(
             status_code=400,
@@ -1094,11 +1655,15 @@ def generate_around_anchor(session_id: str, body: GenerateAroundAnchorBody = Gen
     for lane in _LANE_REGENERATION_ORDER:
         if lane == anchor_lane:
             continue
-        if _lane_locked(s, lane):
+        if _lane_locked(staged, lane):
             skipped_locked.append(lane)
             continue
-        _regenerate_lane_on_stored_session(s, lane, context=ctx)
         regen.append(lane)
+    if any(lane != LaneName.drums for lane in regen):
+        _require_confirmed_harmony(staged)
+    for lane in regen:
+        _regenerate_lane_on_stored_session(staged, lane, context=ctx)
+    s = _commit_regenerated_lanes(s, staged, regen)
     parts: list[str] = []
     if regen:
         parts.append("Regenerated around anchor (" + av + "): " + ", ".join(x.value for x in regen) + ".")
@@ -1114,6 +1679,17 @@ def regenerate_selected(session_id: str, body: RegenerateSelectedBody) -> Sessio
     """Regenerate multiple lanes using stored session styles/instruments; other lanes unchanged."""
     s = _get_session_or_404(session_id)
     ordered = _requested_lanes_stable(body.lanes)
+    if body.preserve_bass_phrase and ordered != [LaneName.bass]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_performance_rerender_scope",
+                "message": (
+                    "preserve_bass_phrase can only be used when Bass is the "
+                    "sole requested lane."
+                ),
+            },
+        )
     to_run: list[LaneName] = []
     skipped_locked: list[LaneName] = []
     for lane in ordered:
@@ -1121,10 +1697,54 @@ def regenerate_selected(session_id: str, body: RegenerateSelectedBody) -> Sessio
             skipped_locked.append(lane)
         else:
             to_run.append(lane)
-    for lane in to_run:
-        _regenerate_lane_on_stored_session(s, lane, context=_context_for_lane_regeneration(s, lane))
+    staged = replace(s)
+    if any(lane != LaneName.drums for lane in to_run):
+        _require_confirmed_harmony(staged)
+    anchor_v = normalize_anchor_lane(staged.anchor_lane)
+    done: set[LaneName] = set()
+    preserved_bass_phrase = (
+        body.preserve_bass_phrase and to_run == [LaneName.bass]
+    )
+    if preserved_bass_phrase:
+        raw_context = _context_for_lane_regeneration(staged, LaneName.bass)
+        _rerender_current_bass_performance(
+            staged,
+            context=(
+                raw_context
+                if isinstance(raw_context, SessionAnchorContext)
+                else None
+            ),
+        )
+    elif anchor_v:
+        anchor_lane = LaneName(anchor_v)
+        if anchor_lane in to_run:
+            _regenerate_lane_on_stored_session(
+                staged,
+                anchor_lane,
+                context=None,
+            )
+            done.add(anchor_lane)
+        ctx = build_session_context(staged)
+        for lane in to_run:
+            if lane in done:
+                continue
+            _regenerate_lane_on_stored_session(
+                staged,
+                lane,
+                context=ctx,
+            )
+    else:
+        for lane in to_run:
+            _regenerate_lane_on_stored_session(
+                staged,
+                lane,
+                context=None,
+            )
+    s = _commit_regenerated_lanes(s, staged, to_run)
     parts: list[str] = []
-    if to_run:
+    if preserved_bass_phrase:
+        parts.append("Re-rendered Bass performance; written phrase preserved.")
+    elif to_run:
         parts.append("Regenerated lanes: " + ", ".join(lane.value for lane in to_run) + ".")
     if skipped_locked:
         parts.append("Skipped locked lanes: " + ", ".join(lane.value for lane in skipped_locked) + ".")
@@ -1137,30 +1757,34 @@ def regenerate_selected(session_id: str, body: RegenerateSelectedBody) -> Sessio
 def regenerate_unlocked(session_id: str) -> SessionState:
     """Regenerate every lane that is not locked; locked lanes unchanged."""
     s = _get_session_or_404(session_id)
+    staged = replace(s)
     to_run: list[LaneName] = []
     kept_locked: list[LaneName] = []
     for lane in _LANE_REGENERATION_ORDER:
-        if _lane_locked(s, lane):
+        if _lane_locked(staged, lane):
             kept_locked.append(lane)
         else:
             to_run.append(lane)
-    anchor_v = normalize_anchor_lane(s.anchor_lane)
+    if not to_run:
+        return _to_state(s, message="All lanes are locked. No lanes were regenerated.")
+    if any(lane != LaneName.drums for lane in to_run):
+        _require_confirmed_harmony(staged)
+    anchor_v = normalize_anchor_lane(staged.anchor_lane)
     done: set[LaneName] = set()
     if anchor_v:
         anchor_lane = LaneName(anchor_v)
         if anchor_lane in to_run:
-            _regenerate_lane_on_stored_session(s, anchor_lane, context=None)
+            _regenerate_lane_on_stored_session(staged, anchor_lane, context=None)
             done.add(anchor_lane)
-        ctx = build_session_context(s)
+        ctx = build_session_context(staged)
         for lane in _LANE_REGENERATION_ORDER:
             if lane not in to_run or lane in done:
                 continue
-            _regenerate_lane_on_stored_session(s, lane, context=ctx)
+            _regenerate_lane_on_stored_session(staged, lane, context=ctx)
     else:
         for lane in to_run:
-            _regenerate_lane_on_stored_session(s, lane, context=None)
-    if not to_run:
-        return _to_state(s, message="All lanes are locked. No lanes were regenerated.")
+            _regenerate_lane_on_stored_session(staged, lane, context=None)
+    s = _commit_regenerated_lanes(s, staged, to_run)
     regen = "Regenerated unlocked lanes: " + ", ".join(lane.value for lane in to_run) + "."
     if kept_locked:
         kept = " Locked lanes kept: " + ", ".join(lane.value for lane in kept_locked) + "."
@@ -1172,25 +1796,31 @@ def regenerate_unlocked(session_id: str) -> SessionState:
 def add_part_to_suit(session_id: str, body: AddPartToSuitBody) -> SessionState:
     """Replace the lead lane with a new context-aware idea (ignores lead lock)."""
     s = _get_session_or_404(session_id)
+    staged = replace(s)
+    _require_confirmed_harmony(staged)
     mode_v = body.mode.value
     l_bytes, l_prev = generator.generate_lead(
-        tempo=s.tempo,
-        bar_count=s.bar_count,
-        key=s.key,
-        scale=s.scale,
-        lead_style=s.lead_style,
-        lead_instrument=s.lead_instrument,
-        lead_player=s.lead_player,
+        tempo=staged.tempo,
+        bar_count=staged.bar_count,
+        key=staged.key,
+        scale=staged.scale,
+        lead_style=staged.lead_style,
+        lead_instrument=staged.lead_instrument,
+        lead_player=staged.lead_player,
         suit_mode=mode_v,
-        suit_bass_density=_notes_per_bar(s.bass_bytes, s.bar_count),
-        suit_chord_density=_notes_per_bar(s.chords_bytes, s.bar_count),
-        suit_lead_density=_notes_per_bar(s.lead_bytes, s.bar_count),
-        suit_chord_style=s.chord_style,
-        suit_bass_style=s.bass_style,
-        session_preset=s.session_preset,
+        suit_bass_density=_notes_per_bar(staged.bass_bytes, staged.bar_count),
+        suit_chord_density=_notes_per_bar(staged.chords_bytes, staged.bar_count),
+        suit_lead_density=_notes_per_bar(staged.lead_bytes, staged.bar_count),
+        suit_chord_style=staged.chord_style,
+        suit_bass_style=staged.bass_style,
+        session_preset=staged.session_preset,
     )
-    s.lead_bytes = l_bytes
-    s.lead_preview = l_prev
+    staged.lead_bytes = l_bytes
+    staged.lead_preview = l_prev
+    if staged.bridge_live_overlay_active:
+        _promote_live_bridge_overlay(staged)
+    _SESSIONS[s.id] = staged
+    s = staged
     msg = _SUIT_PART_MESSAGES.get(mode_v, "Generated a new lead to suit the current session.")
     return _to_state(s, message=msg)
 
@@ -1198,13 +1828,22 @@ def add_part_to_suit(session_id: str, body: AddPartToSuitBody) -> SessionState:
 @router.post("/{session_id}/lanes/{lane}/regenerate", response_model=RegenerateLaneResult)
 def regenerate_lane(session_id: str, lane: LaneName) -> RegenerateLaneResult:
     s = _get_session_or_404(session_id)
-    _regenerate_lane_on_stored_session(s, lane, context=_context_for_lane_regeneration(s, lane))
+    staged = replace(s)
+    _regenerate_lane_on_stored_session(
+        staged,
+        lane,
+        context=_context_for_lane_regeneration(staged, lane),
+    )
+    s = _commit_regenerated_lanes(s, staged, [lane])
     return RegenerateLaneResult(session=_to_state(s, message=f"Lane {lane.value} regenerated."), lane=lane)
 
 
-@router.post("/{session_id}/lanes/bass/regenerate-bars", response_model=SessionState)
-def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> SessionState:
-    s = _get_session_or_404(session_id)
+def _regenerate_bass_bars_on_stored_session(
+    s: StoredSession,
+    body: RegenerateBassBarsBody,
+) -> None:
+    """Regenerate a bass range on the provided session object."""
+
     _require_confirmed_harmony(s)
     if body.bar_start < 0:
         raise HTTPException(
@@ -1235,7 +1874,8 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
     seed = int(body.seed) if body.seed is not None else _new_bass_seed()
     ctx = _context_for_lane_regeneration(s, LaneName.bass)
     cond = _conditioning_for_generation(s, context=ctx)
-    replacement_bytes, replacement_preview = generator.generate_bass(
+    performance_controls = _explicit_bass_performance_controls(s)
+    replacement_bytes, replacement_preview, replacement_performance_notes = generator.generate_bass(
         tempo=s.tempo,
         bar_count=s.bar_count,
         key=s.key,
@@ -1247,11 +1887,33 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         lock_to_groove=s.bass_lock_to_groove,
         density_bias=s.bass_density_bias,
         expression_amount=s.bass_expression,
+        bass_articulation_focus=s.bass_articulation_focus,
+        ghost_amount=performance_controls["ghost"],
+        mute_amount=performance_controls["mute"],
+        slide_amount=performance_controls["slide"],
+        legato_amount=performance_controls["legato"],
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=ctx,
         conditioning=cond,
         seed=seed,
+        return_performance_notes=True,
+    )
+    replacement_bytes = _normalize_bass_bytes_for_session(replacement_bytes, s)
+    replacement_performance = _render_bass_performance_bytes(
+        clean_bytes=replacement_bytes,
+        perf_notes=replacement_performance_notes,
+        tempo=s.tempo,
+        expression_amount=s.bass_expression,
+        articulation_focus=s.bass_articulation_focus,
+        timing_humanize=performance_controls["timing_humanize"],
+        velocity_humanize=performance_controls["velocity_humanize"],
+        instrument_family=s.bass_instrument,
+        conditioning=cond,
+    )
+    replacement_performance = _normalize_bass_bytes_for_session(
+        replacement_performance,
+        s,
     )
     if body.operation == "turnaround":
         from app.services.bass_turnaround import apply_bass_turnaround
@@ -1273,6 +1935,12 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
             bar_index=body.bar_start,
             next_root_pc=next_root_pc,
         )
+        replacement_performance = apply_bass_turnaround(
+            replacement_performance,
+            tempo=s.tempo,
+            bar_index=body.bar_start,
+            next_root_pc=next_root_pc,
+        )
         replacement_preview += f" Explicit turnaround applied to bar {body.bar_start + 1}."
     spliced = splice_bass_bars(
         existing_midi=s.bass_bytes,
@@ -1280,16 +1948,36 @@ def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> Sessi
         tempo=s.tempo,
         bar_start=body.bar_start,
         bar_end=body.bar_end,
+        # Clean phrases carry generator micro-timing too. Classify their early
+        # downbeats by musical bar, just as the performance lane does below.
+        humanize_boundary_seconds=0.02,
     )
     s.bass_bytes = _normalize_bass_bytes_for_session(spliced, s)
-    # Performance MIDI is rendered from a coherent full-take articulation
-    # plan; partial-bar splices invalidate that plan. Force regeneration of
-    # the full lane (or candidate promotion) to recover performance MIDI.
-    s.bass_performance_bytes = None
+    if s.bass_performance_bytes is not None:
+        spliced_performance = splice_bass_bars(
+            existing_midi=s.bass_performance_bytes,
+            replacement_midi=replacement_performance,
+            tempo=s.tempo,
+            bar_start=body.bar_start,
+            bar_end=body.bar_end,
+            humanize_boundary_seconds=0.02,
+        )
+        s.bass_performance_bytes = _normalize_bass_bytes_for_session(
+            spliced_performance,
+            s,
+        )
     s.bass_preview = replacement_preview
     s.bass_seed = seed
     s.current_bass_candidate_run_id = None
     s.current_bass_candidate_take_id = None
+
+
+@router.post("/{session_id}/lanes/bass/regenerate-bars", response_model=SessionState)
+def regenerate_bass_bars(session_id: str, body: RegenerateBassBarsBody) -> SessionState:
+    s = _get_session_or_404(session_id)
+    staged = replace(s)
+    _regenerate_bass_bars_on_stored_session(staged, body)
+    s = _commit_regenerated_lanes(s, staged, [LaneName.bass])
     return _to_state(
         s,
         message=f"Regenerated bass bars {body.bar_start}-{body.bar_end - 1}.",
@@ -1303,8 +1991,9 @@ def _render_bass_take_with_seed(
     conditioning: UnifiedConditioning | None,
     context: SessionAnchorContext | None,
     candidate_role: str | None = None,
-) -> tuple[bytes, str]:
-    raw_bytes, preview = generator.generate_bass(
+) -> tuple[bytes, bytes, str]:
+    performance_controls = _explicit_bass_performance_controls(s)
+    raw_bytes, preview, performance_notes = generator.generate_bass(
         tempo=s.tempo,
         bar_count=s.bar_count,
         key=s.key,
@@ -1316,17 +2005,108 @@ def _render_bass_take_with_seed(
         lock_to_groove=s.bass_lock_to_groove,
         density_bias=s.bass_density_bias,
         expression_amount=s.bass_expression,
+        bass_articulation_focus=s.bass_articulation_focus,
+        ghost_amount=performance_controls["ghost"],
+        mute_amount=performance_controls["mute"],
+        slide_amount=performance_controls["slide"],
+        legato_amount=performance_controls["legato"],
         candidate_role=candidate_role,
         chord_progression=s.chord_progression,
         session_preset=s.session_preset,
         context=context,
         conditioning=conditioning,
         seed=int(seed),
+        return_performance_notes=True,
     )
-    return _normalize_bass_bytes_for_session(raw_bytes, s), preview
+    clean = _normalize_bass_bytes_for_session(raw_bytes, s)
+    performance = _render_bass_performance_bytes(
+        clean_bytes=clean,
+        perf_notes=performance_notes,
+        tempo=s.tempo,
+        expression_amount=s.bass_expression,
+        articulation_focus=s.bass_articulation_focus,
+        timing_humanize=performance_controls["timing_humanize"],
+        velocity_humanize=performance_controls["velocity_humanize"],
+        instrument_family=s.bass_instrument,
+        conditioning=conditioning,
+    )
+    return (
+        clean,
+        _normalize_bass_bytes_for_session(performance, s),
+        preview,
+    )
 
 
-def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
+def _unpack_candidate_render(
+    result: tuple[bytes, bytes, str] | tuple[bytes, str],
+) -> tuple[bytes, bytes, str]:
+    """Accept legacy two-value test/adapter renderers as clean-only takes."""
+
+    if len(result) == 2:
+        clean, preview = result
+        return clean, clean, preview
+    clean, performance, preview = result
+    return clean, performance, preview
+
+
+def _candidate_store_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": "candidate_store_unavailable",
+            "message": (
+                "Bass candidate history could not be read or written safely. "
+                "The existing store was left untouched."
+            ),
+        },
+    )
+
+
+def _append_candidate_run_or_503(run: dict[str, object]) -> None:
+    try:
+        bass_candidate_store.append_run(run)
+    except bass_candidate_store.CandidateStoreError as exc:
+        raise _candidate_store_unavailable() from exc
+
+
+def _candidate_runs_for_session_or_503(
+    session_id: str,
+) -> list[dict[str, object]]:
+    try:
+        return bass_candidate_store.list_runs_for_session(session_id)
+    except bass_candidate_store.CandidateStoreError as exc:
+        raise _candidate_store_unavailable() from exc
+
+
+def _candidate_run_for_session_or_503(
+    session_id: str,
+    run_id: str,
+) -> dict[str, object] | None:
+    try:
+        return bass_candidate_store.get_run_for_session(session_id, run_id)
+    except bass_candidate_store.CandidateStoreError as exc:
+        raise _candidate_store_unavailable() from exc
+
+
+def _invalid_candidate_metadata(
+    raw: dict[str, object],
+) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "candidate_run_metadata_invalid",
+            "run_id": str(raw.get("run_id", "")),
+            "message": (
+                "Stored candidate metadata is invalid. Generate a fresh "
+                "candidate run."
+            ),
+        },
+    )
+
+
+def _public_candidate_run_unchecked(
+    raw: dict[str, object],
+) -> BassCandidateRun:
     takes_raw = raw.get("takes")
     takes: list[BassCandidateTake] = []
     if isinstance(takes_raw, list):
@@ -1339,6 +2119,13 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
                     seed=int(t.get("seed", 0)),
                     note_count=int(t.get("note_count", 0)),
                     byte_length=int(t.get("byte_length", 0)),
+                    midi_sha256=str(t.get("midi_sha256", "") or ""),
+                    performance_byte_length=int(
+                        t.get("performance_byte_length", 0) or 0
+                    ),
+                    performance_midi_sha256=str(
+                        t.get("performance_midi_sha256", "") or ""
+                    ),
                     preview=str(t.get("preview", "") or ""),
                     label=(str(t.get("label")) if t.get("label") is not None else None),
                     template_id=(str(t.get("template_id")) if t.get("template_id") is not None else None),
@@ -1361,15 +2148,45 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
                     ),
                 )
             )
+    raw_performance_controls = raw.get("bass_performance_controls")
+    if isinstance(raw_performance_controls, dict):
+        public_performance_controls = {
+            str(key): float(value)
+            for key, value in raw_performance_controls.items()
+        }
+    else:
+        # Legacy candidate runs remain inspectable. Promotion still fails
+        # closed through the generation-context version check.
+        public_performance_controls = resolve_bass_performance_controls(
+            None,
+            focus=str(raw.get("bass_articulation_focus", "natural")),
+            expression_amount=float(raw.get("bass_expression", 0.5)),
+            style=str(raw.get("bass_style", "supportive")),
+            instrument_family=str(
+                raw.get("bass_instrument", "finger_bass")
+            ),
+        ).requested
+
     return BassCandidateRun(
         run_id=str(raw.get("run_id", "")),
         session_id=str(raw.get("session_id", "")),
         created_at=str(raw.get("created_at", "")),
+        generation_context_version=int(raw.get("generation_context_version", 0) or 0),
+        generation_context_fingerprint=str(raw.get("generation_context_fingerprint", "") or ""),
+        generation_evidence_fingerprint=str(
+            raw.get("generation_evidence_fingerprint", "") or ""
+        ),
         take_count=int(raw.get("take_count", len(takes))),
         bass_style=str(raw.get("bass_style", "supportive")),
         bass_engine=str(raw.get("bass_engine", "baseline")),
         bass_player=(str(raw.get("bass_player")) if raw.get("bass_player") is not None else None),
         bass_instrument=str(raw.get("bass_instrument", "finger_bass")),
+        bass_articulation_focus=str(
+            raw.get("bass_articulation_focus", "natural")
+        ),
+        bass_expression=float(raw.get("bass_expression", 0.5)),
+        bass_performance_controls=public_performance_controls,
+        bass_density_bias=float(raw.get("bass_density_bias", 0.0)),
         variation_mode=str(raw.get("variation_mode", "ranked")),
         clip_id=(str(raw.get("clip_id")) if raw.get("clip_id") is not None else None),
         conditioning_tempo=int(raw.get("conditioning_tempo", 120)),
@@ -1379,6 +2196,13 @@ def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
         conditioning_harmonic_bar_count=int(raw.get("conditioning_harmonic_bar_count", 0)),
         takes=takes,
     )
+
+
+def _public_candidate_run(raw: dict[str, object]) -> BassCandidateRun:
+    try:
+        return _public_candidate_run_unchecked(raw)
+    except (TypeError, ValueError, OverflowError, ValidationError) as exc:
+        raise _invalid_candidate_metadata(raw) from exc
 
 
 def _find_take_payload(raw_run: dict[str, object], take_id: str) -> dict[str, object] | None:
@@ -1392,20 +2216,198 @@ def _find_take_payload(raw_run: dict[str, object], take_id: str) -> dict[str, ob
     return None
 
 
-def _take_bytes_or_400(raw_take: dict[str, object]) -> bytes:
-    b64 = raw_take.get("midi_b64")
+def _require_current_candidate_context(
+    s: StoredSession,
+    raw_run: dict[str, object],
+) -> None:
+    try:
+        run_version = int(
+            raw_run.get("generation_context_version", 0) or 0
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _invalid_candidate_metadata(raw_run) from exc
+    run_fingerprint = str(raw_run.get("generation_context_fingerprint", "") or "")
+    current_fingerprint = _candidate_generation_context_fingerprint(s)
+    if (
+        run_version == _CANDIDATE_GENERATION_CONTEXT_VERSION
+        and run_fingerprint
+        and run_fingerprint == current_fingerprint
+    ):
+        return
+    unverifiable = not run_fingerprint or run_version != _CANDIDATE_GENERATION_CONTEXT_VERSION
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "stale_candidate_generation_context",
+            "message": (
+                "This candidate run no longer matches the session's generation context. "
+                "Generate a fresh candidate run before promotion."
+            ),
+            "reason": "legacy_or_unverifiable" if unverifiable else "session_context_changed",
+            "run_context_version": run_version,
+            "current_context_version": _CANDIDATE_GENERATION_CONTEXT_VERSION,
+        },
+    )
+
+
+def _candidate_payload_bytes(
+    raw_take: dict[str, object],
+    *,
+    b64_field: str,
+    digest_field: str,
+    length_field: str,
+    required: bool,
+) -> bytes | None:
+    b64 = raw_take.get(b64_field)
+    if not required and (b64 is None or b64 == ""):
+        return None
     if not isinstance(b64, str) or not b64:
         raise HTTPException(
             status_code=400,
             detail={"error": "candidate_take_payload_missing", "message": "Candidate take MIDI payload missing."},
         )
     try:
-        return base64.b64decode(b64.encode("ascii"))
+        data = base64.b64decode(b64.encode("ascii"), validate=True)
     except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail={"error": "candidate_take_payload_invalid", "message": str(exc)},
         ) from exc
+    expected_digest = raw_take.get(digest_field)
+    actual_digest = hashlib.sha256(data).hexdigest()
+    if (
+        not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+        or expected_digest != actual_digest
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_take_integrity_failed",
+                "field": b64_field,
+                "message": "Candidate MIDI failed its stored SHA-256 integrity check.",
+            },
+        )
+    expected_length = raw_take.get(length_field)
+    if (
+        isinstance(expected_length, bool)
+        or not isinstance(expected_length, int)
+        or expected_length != len(data)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_take_integrity_failed",
+                "field": length_field,
+                "message": "Candidate MIDI byte length does not match its stored metadata.",
+            },
+        )
+    return data
+
+
+def _take_bytes_or_400(raw_take: dict[str, object]) -> bytes:
+    data = _candidate_payload_bytes(
+        raw_take,
+        b64_field="midi_b64",
+        digest_field="midi_sha256",
+        length_field="byte_length",
+        required=True,
+    )
+    assert data is not None
+    return data
+
+
+def _take_performance_bytes_or_400(
+    raw_take: dict[str, object],
+) -> bytes | None:
+    return _candidate_payload_bytes(
+        raw_take,
+        b64_field="performance_midi_b64",
+        digest_field="performance_midi_sha256",
+        length_field="performance_byte_length",
+        required=False,
+    )
+
+
+def _candidate_take_bytes_for_mode(
+    raw_take: dict[str, object],
+    mode: Literal["clean", "performance"],
+) -> tuple[bytes, Literal["clean", "performance"]]:
+    """Resolve a candidate preview payload without breaking legacy runs.
+
+    Candidate downloads historically exposed clean composition MIDI. Keep
+    that endpoint default, while allowing callers to request the exact frozen
+    performance that promotion will install. Older runs without a frozen
+    performance safely fall back to their verified clean payload.
+    """
+
+    if mode == "performance":
+        performance = _take_performance_bytes_or_400(raw_take)
+        if performance is not None:
+            return performance, "performance"
+    return _take_bytes_or_400(raw_take), "clean"
+
+
+def _candidate_midi_payload(
+    clean: bytes,
+    performance: bytes,
+) -> dict[str, object]:
+    return {
+        "midi_b64": base64.b64encode(clean).decode("ascii"),
+        "midi_sha256": hashlib.sha256(clean).hexdigest(),
+        "performance_midi_b64": base64.b64encode(performance).decode("ascii"),
+        "performance_midi_sha256": hashlib.sha256(performance).hexdigest(),
+        "performance_byte_length": len(performance),
+    }
+
+
+def _validated_candidate_generation_evidence(
+    raw_run: dict[str, object],
+) -> tuple[str, str, SourceAnalysis | None, SourceAnalysis | None]:
+    raw_evidence = raw_run.get("generation_evidence")
+    expected = raw_run.get("generation_evidence_fingerprint")
+    if not isinstance(raw_evidence, dict) or not isinstance(expected, str):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_generation_evidence_unverifiable",
+                "message": "Candidate generation evidence is missing; generate a fresh run.",
+            },
+        )
+    actual = _candidate_generation_evidence_fingerprint(raw_evidence)
+    if len(expected) != 64 or expected != actual:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_generation_evidence_integrity_failed",
+                "message": "Candidate generation evidence failed its integrity check.",
+            },
+        )
+    try:
+        key = mt.normalize_key(str(raw_evidence.get("key", "")))
+        mt.key_root_pc(key)
+        scale = mt.normalize_scale(str(raw_evidence.get("scale", "")))
+        source_raw = raw_evidence.get("source_analysis_override")
+        groove_raw = raw_evidence.get("groove_reference_analysis_override")
+        source = (
+            SourceAnalysis.model_validate(source_raw)
+            if source_raw is not None
+            else None
+        )
+        groove = (
+            SourceAnalysis.model_validate(groove_raw)
+            if groove_raw is not None
+            else None
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_generation_evidence_invalid",
+                "message": str(exc),
+            },
+        ) from exc
+    return key, scale, source, groove
 
 
 def _is_guarded_vocabulary_take(raw_take: dict[str, object]) -> bool:
@@ -1485,6 +2487,9 @@ def _generate_controlled_role_bass_candidates(
     body: GenerateBassCandidatesBody,
     context: SessionAnchorContext,
     conditioning: UnifiedConditioning,
+    generation_context_fingerprint: str,
+    generation_evidence: dict[str, object | None],
+    generation_evidence_fingerprint: str,
     base_seed: int,
     run_id: str,
     created_at: str,
@@ -1527,12 +2532,14 @@ def _generate_controlled_role_bass_candidates(
             seed_i = int(base_seed) + seed_cursor
             seed_cursor += 1
             private_take_id = f"{run_id}_{role}_{seed_i}"
-            data, preview = _render_bass_take_with_seed(
-                s,
-                seed=seed_i,
-                conditioning=conditioning,
-                context=context,
-                candidate_role=role,
+            data, performance_data, preview = _unpack_candidate_render(
+                _render_bass_take_with_seed(
+                    s,
+                    seed=seed_i,
+                    conditioning=conditioning,
+                    context=context,
+                    candidate_role=role,
+                )
             )
             notes = extract_lane_notes(data)
             if strict_harmonic_guard and count_unsupported_structural_notes(
@@ -1559,6 +2566,11 @@ def _generate_controlled_role_bass_candidates(
                 seed=seed_i,
                 note_count=len(notes),
                 byte_length=len(data),
+                midi_sha256=hashlib.sha256(data).hexdigest(),
+                performance_byte_length=len(performance_data),
+                performance_midi_sha256=hashlib.sha256(
+                    performance_data
+                ).hexdigest(),
                 preview=preview,
                 quality_total=quality.total,
                 quality_scores=quality.scores,
@@ -1581,7 +2593,7 @@ def _generate_controlled_role_bass_candidates(
                 "candidate_role": role,
                 "candidate_role_label": spec.label,
                 "candidate_role_description": spec.description,
-                "midi_b64": base64.b64encode(data).decode("ascii"),
+                **_candidate_midi_payload(data, performance_data),
             }
             pools[role].append((quality.total, quality.signature, take, row))
 
@@ -1687,11 +2699,26 @@ def _generate_controlled_role_bass_candidates(
         run_id=run_id,
         session_id=s.id,
         created_at=created_at,
+        generation_context_version=_CANDIDATE_GENERATION_CONTEXT_VERSION,
+        generation_context_fingerprint=generation_context_fingerprint,
+        generation_evidence_fingerprint=generation_evidence_fingerprint,
         take_count=len(takes),
         bass_style=s.bass_style,
         bass_engine=s.bass_engine,
         bass_player=s.bass_player,
         bass_instrument=s.bass_instrument,
+        bass_articulation_focus=s.bass_articulation_focus,
+        bass_expression=s.bass_expression,
+        bass_performance_controls=BassPerformanceControls.model_validate(
+            resolve_bass_performance_controls(
+                s.bass_performance_controls,
+                focus=s.bass_articulation_focus,
+                expression_amount=s.bass_expression,
+                style=s.bass_style,
+                instrument_family=s.bass_instrument,
+            ).requested
+        ),
+        bass_density_bias=s.bass_density_bias,
         variation_mode="controlled_roles",
         clip_id=body.clip_id,
         conditioning_tempo=conditioning.tempo,
@@ -1703,7 +2730,8 @@ def _generate_controlled_role_bass_candidates(
     )
     run_payload = run.model_dump(mode="json")
     run_payload["takes"] = take_rows
-    bass_candidate_store.append_run(run_payload)
+    run_payload["generation_evidence"] = generation_evidence
+    _append_candidate_run_or_503(run_payload)
     return run
 
 
@@ -1715,6 +2743,11 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     """
     s = _get_session_or_404(session_id)
     _require_confirmed_harmony(s)
+    generation_context_fingerprint = _candidate_generation_context_fingerprint(s)
+    generation_evidence = _candidate_generation_evidence_payload(s)
+    generation_evidence_fingerprint = (
+        _candidate_generation_evidence_fingerprint(generation_evidence)
+    )
     ctx = build_session_context(s)
     cond = _conditioning_for_generation(s, context=ctx)
     base_seed = int(body.seed) if body.seed is not None else _new_bass_seed()
@@ -1726,6 +2759,9 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             body=body,
             context=ctx,
             conditioning=cond,
+            generation_context_fingerprint=generation_context_fingerprint,
+            generation_evidence=generation_evidence,
+            generation_evidence_fingerprint=generation_evidence_fingerprint,
             base_seed=base_seed,
             run_id=run_id,
             created_at=created_at,
@@ -1739,11 +2775,13 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     for i in range(hidden_count):
         seed_i = base_seed + i
         take_id = f"{run_id}_p{i + 1}"
-        data, preview = _render_bass_take_with_seed(
-            s,
-            seed=seed_i,
-            conditioning=cond,
-            context=ctx,
+        data, performance_data, preview = _unpack_candidate_render(
+            _render_bass_take_with_seed(
+                s,
+                seed=seed_i,
+                conditioning=cond,
+                context=ctx,
+            )
         )
         notes = extract_lane_notes(data)
         if strict_harmonic_guard and count_unsupported_structural_notes(
@@ -1770,6 +2808,11 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             seed=seed_i,
             note_count=len(notes),
             byte_length=len(data),
+            midi_sha256=hashlib.sha256(data).hexdigest(),
+            performance_byte_length=len(performance_data),
+            performance_midi_sha256=hashlib.sha256(
+                performance_data
+            ).hexdigest(),
             preview=preview,
             quality_total=quality.total,
             quality_scores=quality.scores,
@@ -1785,21 +2828,26 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             "quality_scores": quality.scores,
             "quality_reason": quality.reason,
             "motif_family": family,
-            "midi_b64": base64.b64encode(data).decode("ascii"),
+            **_candidate_midi_payload(data, performance_data),
         }
         scored_pool.append((quality.total, quality.signature, family, take, row))
 
     scored_pool.sort(key=lambda item: (item[0], -item[3].note_count), reverse=True)
     vocabulary_pool: list[tuple[float, tuple[tuple[int, ...], ...], str, BassCandidateTake, dict[str, object]]] = []
-    for vocab in generate_vocabulary_candidates(
-        tempo=s.tempo,
-        bar_count=s.bar_count,
-        bass_style=s.bass_style,
-        chord_progression=s.chord_progression,
-        conditioning=cond,
-        context=ctx,
-        seed=base_seed,
-    ):
+    vocabulary_candidates = (
+        generate_vocabulary_candidates(
+            tempo=s.tempo,
+            bar_count=s.bar_count,
+            bass_style=s.bass_style,
+            chord_progression=s.chord_progression,
+            conditioning=cond,
+            context=ctx,
+            seed=base_seed,
+        )
+        if s.bass_articulation_focus == "natural"
+        else ()
+    )
+    for vocab in vocabulary_candidates:
         vocab_bytes = _normalize_bass_bytes_for_session(vocab.midi_bytes, s)
         notes = extract_lane_notes(vocab_bytes)
         if strict_harmonic_guard and count_unsupported_structural_notes(
@@ -1827,6 +2875,11 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             seed=vocab.seed,
             note_count=len(notes),
             byte_length=len(vocab_bytes),
+            midi_sha256=hashlib.sha256(vocab_bytes).hexdigest(),
+            performance_byte_length=len(vocab_bytes),
+            performance_midi_sha256=hashlib.sha256(
+                vocab_bytes
+            ).hexdigest(),
             preview=vocab.preview,
             label=vocab.label,
             template_id=vocab.template_id,
@@ -1846,7 +2899,7 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
             "quality_scores": quality.scores,
             "quality_reason": quality.reason,
             "motif_family": family,
-            "midi_b64": base64.b64encode(vocab_bytes).decode("ascii"),
+            **_candidate_midi_payload(vocab_bytes, vocab_bytes),
         }
         vocabulary_pool.append((quality.total, quality.signature, family, take, row))
 
@@ -2008,11 +3061,26 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
         run_id=run_id,
         session_id=s.id,
         created_at=created_at,
+        generation_context_version=_CANDIDATE_GENERATION_CONTEXT_VERSION,
+        generation_context_fingerprint=generation_context_fingerprint,
+        generation_evidence_fingerprint=generation_evidence_fingerprint,
         take_count=len(takes),
         bass_style=s.bass_style,
         bass_engine=s.bass_engine,
         bass_player=s.bass_player,
         bass_instrument=s.bass_instrument,
+        bass_articulation_focus=s.bass_articulation_focus,
+        bass_expression=s.bass_expression,
+        bass_performance_controls=BassPerformanceControls.model_validate(
+            resolve_bass_performance_controls(
+                s.bass_performance_controls,
+                focus=s.bass_articulation_focus,
+                expression_amount=s.bass_expression,
+                style=s.bass_style,
+                instrument_family=s.bass_instrument,
+            ).requested
+        ),
+        bass_density_bias=s.bass_density_bias,
         variation_mode="ranked",
         clip_id=body.clip_id,
         conditioning_tempo=cond.tempo if cond is not None else s.tempo,
@@ -2024,110 +3092,137 @@ def generate_bass_candidates(session_id: str, body: GenerateBassCandidatesBody =
     )
     run_payload = run.model_dump(mode="json")
     run_payload["takes"] = take_rows
-    bass_candidate_store.append_run(run_payload)
+    run_payload["generation_evidence"] = generation_evidence
+    _append_candidate_run_or_503(run_payload)
     return run
 
 
 @router.get("/{session_id}/bass-candidates", response_model=list[BassCandidateRun])
 def list_bass_candidates(session_id: str) -> list[BassCandidateRun]:
     _ = _get_session_or_404(session_id)
-    rows = bass_candidate_store.list_runs_for_session(session_id)
+    rows = _candidate_runs_for_session_or_503(session_id)
     return [_public_candidate_run(r) for r in rows]
 
 
 @router.get("/{session_id}/bass-candidates/{run_id}/{take_id}")
-def download_bass_candidate_take(session_id: str, run_id: str, take_id: str):
+def download_bass_candidate_take(
+    session_id: str,
+    run_id: str,
+    take_id: str,
+    mode: Literal["clean", "performance"] = "clean",
+):
     _ = _get_session_or_404(session_id)
-    run = bass_candidate_store.get_run_for_session(session_id, run_id)
+    run = _candidate_run_for_session_or_503(session_id, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_run_not_found", "run_id": run_id})
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
-    data = _take_bytes_or_400(take)
-    return lane_midi_response(data, f"{session_id}_{run_id}_{take_id}_bass.mid")
+    data, served_mode = _candidate_take_bytes_for_mode(take, mode)
+    suffix = "_bass_performance.mid" if served_mode == "performance" else "_bass.mid"
+    response = lane_midi_response(data, f"{session_id}_{run_id}_{take_id}{suffix}")
+    response.headers["X-Bass-Candidate-Requested-Mode"] = mode
+    response.headers["X-Bass-Candidate-Mode"] = served_mode
+    return response
 
 
 @router.get("/{session_id}/bass-candidates/{run_id}/{take_id}/notes", response_model=list[LaneNote])
-def get_bass_candidate_take_notes(session_id: str, run_id: str, take_id: str) -> list[LaneNote]:
+def get_bass_candidate_take_notes(
+    session_id: str,
+    run_id: str,
+    take_id: str,
+    response: Response,
+    mode: Literal["clean", "performance"] = "clean",
+) -> list[LaneNote]:
     _ = _get_session_or_404(session_id)
-    run = bass_candidate_store.get_run_for_session(session_id, run_id)
+    run = _candidate_run_for_session_or_503(session_id, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_run_not_found", "run_id": run_id})
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
-    data = _take_bytes_or_400(take)
+    data, served_mode = _candidate_take_bytes_for_mode(take, mode)
+    response.headers["X-Bass-Candidate-Requested-Mode"] = mode
+    response.headers["X-Bass-Candidate-Mode"] = served_mode
     return extract_lane_notes(data)
 
 
 @router.post("/{session_id}/bass-candidates/{run_id}/{take_id}/promote", response_model=SessionState)
 def promote_bass_candidate_take(session_id: str, run_id: str, take_id: str) -> SessionState:
     s = _get_session_or_404(session_id)
-    run = bass_candidate_store.get_run_for_session(session_id, run_id)
+    run = _candidate_run_for_session_or_503(session_id, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_run_not_found", "run_id": run_id})
     take = _find_take_payload(run, take_id)
     if take is None:
         raise HTTPException(status_code=404, detail={"error": "candidate_take_not_found", "take_id": take_id})
+    _require_current_candidate_context(s, run)
+    evidence_key, evidence_scale, evidence_source, evidence_groove = (
+        _validated_candidate_generation_evidence(run)
+    )
     data = _take_bytes_or_400(take)
-    normalized_take = _normalize_bass_bytes_for_session(bytes(data), s)
-    s.bass_bytes = normalized_take
-    s.bass_preview = str(take.get("preview", "") or f"Promoted candidate take {take_id}.")
-    s.bass_seed = int(take["seed"]) if take.get("seed") is not None else None
-    s.current_bass_candidate_run_id = str(run_id)
-    s.current_bass_candidate_take_id = str(take_id)
-    if _is_guarded_vocabulary_take(take):
-        # Keep labelled vocabulary promotions pitch-stable across clean/performance paths.
-        s.bass_performance_bytes = normalized_take
-        return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
-    # Re-render performance MIDI from the candidate seed so the promoted
-    # lane has an audition path. Candidate clean bytes remain authoritative
-    # in s.bass_bytes; the performance overlay is a parallel render derived
-    # from the same seed under current session settings.
-    s.bass_performance_bytes = None
-    if s.bass_seed is not None:
-        ctx = _context_for_lane_regeneration(s, LaneName.bass)
-        cond = _conditioning_for_generation(s, context=ctx)
-        try:
-            _, _, perf_notes = generator.generate_bass(
-                tempo=s.tempo,
-                bar_count=s.bar_count,
-                key=s.key,
-                scale=s.scale,
-                bass_style=s.bass_style,
-                bass_instrument=s.bass_instrument,
-                bass_player=s.bass_player,
-                bass_engine=s.bass_engine,
-                lock_to_groove=s.bass_lock_to_groove,
-                density_bias=s.bass_density_bias,
-                expression_amount=s.bass_expression,
-                chord_progression=s.chord_progression,
-                session_preset=s.session_preset,
-                context=ctx,
-                conditioning=cond,
-                seed=int(s.bass_seed),
-                return_performance_notes=True,
-                candidate_role=(
-                    str(take.get("candidate_role"))
-                    if take.get("candidate_role") is not None
-                    else None
+    performance_data = _take_performance_bytes_or_400(take)
+    if performance_data is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "candidate_performance_payload_unverifiable",
+                "message": (
+                    "This candidate predates frozen performance rendering. "
+                    "Generate a fresh candidate run before promotion."
                 ),
-            )
-            perf_bytes = _render_bass_performance_bytes(
-                clean_bytes=s.bass_bytes,
-                perf_notes=perf_notes,
-                tempo=s.tempo,
-                expression_amount=s.bass_expression,
-                instrument_family=s.bass_instrument,
-                conditioning=cond,
-            )
-            s.bass_performance_bytes = _normalize_bass_bytes_for_session(perf_bytes, s)
-        except Exception:
-            # If re-render fails for any reason, leave performance bytes
-            # absent rather than poison the promotion. Clean MIDI is
-            # unaffected.
-            s.bass_performance_bytes = None
+            },
+        )
+    raw_seed = take.get("seed")
+    if raw_seed is None:
+        candidate_seed = None
+    elif isinstance(raw_seed, int) and not isinstance(raw_seed, bool):
+        candidate_seed = raw_seed
+    else:
+        exc = ValueError("Candidate seed must be an integer or null")
+        raise _invalid_candidate_metadata(run) from exc
+    normalized_take = _normalize_bass_bytes_for_session(bytes(data), s)
+    normalized_performance = _normalize_bass_bytes_for_session(
+        bytes(performance_data),
+        s,
+    )
+    if s.bass_bytes:
+        try:
+            bass_history_store.capture(_durable_session_view(s))
+        except bass_history_store.BassHistoryStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "bass_history_unavailable",
+                    "message": (
+                        "The current bass idea could not be saved safely, so the "
+                        "candidate was not promoted."
+                    ),
+                    "reason": str(exc),
+                },
+            ) from exc
+    staged = replace(s)
+    staged.key = evidence_key
+    staged.scale = evidence_scale
+    staged.source_analysis_override = evidence_source
+    staged.groove_reference_analysis_override = evidence_groove
+    staged.bridge_live_overlay_active = False
+    staged.bridge_live_base_source_analysis_override = None
+    staged.bridge_live_base_key = None
+    staged.bridge_live_base_scale = None
+    staged.bass_bytes = normalized_take
+    staged.bass_performance_bytes = normalized_performance
+    staged.bass_preview = str(
+        take.get("preview", "") or f"Promoted candidate take {take_id}."
+    )
+    staged.bass_seed = candidate_seed
+    staged.current_bass_candidate_run_id = str(run_id)
+    staged.current_bass_candidate_take_id = str(take_id)
+    s = _commit_regenerated_lanes(
+        s,
+        staged,
+        [LaneName.bass],
+    )
     return _to_state(s, message=f"Promoted bass candidate {take_id} into session bass lane.")
 
 
@@ -2141,15 +3236,11 @@ def audition_bass(session_id: str, body: AuditionBassBody) -> AuditionBassRespon
         )
 
     mode = body.mode or ("performance" if s.bass_performance_bytes else "clean")
-    if mode == "performance":
-        if not s.bass_performance_bytes:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "performance_midi_unavailable", "reason": "invalidated"},
-            )
-        midi_bytes = s.bass_performance_bytes
-    else:
-        midi_bytes = s.bass_bytes
+    midi_bytes, _resolved_mode = _bass_midi_for_export(
+        s,
+        mode,
+        allow_clean_fallback=False,
+    )
 
     try:
         started = get_audition_player().start(
@@ -2170,6 +3261,38 @@ def audition_bass(session_id: str, body: AuditionBassBody) -> AuditionBassRespon
         mode=mode,
         output=started.output,
         duration_seconds=started.duration_seconds,
+    )
+
+
+def _bass_midi_for_export(
+    s: StoredSession,
+    requested_mode: Literal["performance", "clean"],
+    *,
+    allow_clean_fallback: bool = False,
+) -> tuple[bytes | None, Literal["performance", "clean"]]:
+    """Select export bass and apply the MIDI FX phase only to performance."""
+    if requested_mode == "clean":
+        return s.bass_bytes, "clean"
+    if not s.bass_performance_bytes:
+        if allow_clean_fallback:
+            return s.bass_bytes, "clean"
+        reason = "invalidated" if s.bass_bytes else "missing"
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "performance_midi_unavailable",
+                "reason": reason,
+            },
+        )
+    assert s.bass_performance_bytes is not None
+    return (
+        apply_loop_phase_offset(
+            s.bass_performance_bytes,
+            tempo=s.tempo,
+            bar_count=s.bar_count,
+            phase_offset_beats=s.bass_phase_offset_beats,
+        ),
+        "performance",
     )
 
 
@@ -2197,8 +3320,10 @@ def download_lane_midi(session_id: str, lane: LaneName, mode: str | None = None)
                 status_code=404,
                 detail={"error": "performance_midi_unavailable", "reason": reason},
             )
+        performance_bytes, _ = _bass_midi_for_export(s, "performance")
+        assert performance_bytes is not None
         return lane_midi_response(
-            s.bass_performance_bytes,
+            performance_bytes,
             f"{session_id}_bass_performance.mid",
         )
     if lane == LaneName.drums:
@@ -2218,11 +3343,19 @@ def download_lane_midi(session_id: str, lane: LaneName, mode: str | None = None)
 
 
 @router.get("/{session_id}/midi")
-def download_session_midi(session_id: str):
+def download_session_midi(
+    session_id: str,
+    bass_mode: Literal["performance", "clean"] | None = None,
+):
     s = _get_session_or_404(session_id)
+    bass_bytes, selected_bass_mode = _bass_midi_for_export(
+        s,
+        bass_mode or "performance",
+        allow_clean_fallback=bass_mode is None,
+    )
     lanes = {
         "drums": s.drum_bytes,
-        "bass": s.bass_bytes,
+        "bass": bass_bytes,
         "chords": s.chords_bytes,
         "lead": s.lead_bytes,
     }
@@ -2237,21 +3370,34 @@ def download_session_midi(session_id: str):
             status_code=400,
             detail={"error": "session_midi_empty", "message": "Session MIDI export produced no data."},
         )
-    return lane_midi_response(data, f"session_{session_id}.mid")
+    response = lane_midi_response(data, f"session_{session_id}.mid")
+    response.headers["X-Session-Player-Bass-Mode"] = selected_bass_mode
+    return response
 
 
 @router.get("/{session_id}/export")
-def export_all_midi(session_id: str):
+def export_all_midi(
+    session_id: str,
+    bass_mode: Literal["performance", "clean"] | None = None,
+):
     s = _get_session_or_404(session_id)
-    if not (s.drum_bytes and s.bass_bytes and s.chords_bytes and s.lead_bytes):
+    bass_bytes, selected_bass_mode = _bass_midi_for_export(
+        s,
+        bass_mode or "performance",
+        allow_clean_fallback=bass_mode is None,
+    )
+    if not (s.drum_bytes and bass_bytes and s.chords_bytes and s.lead_bytes):
         raise HTTPException(
             status_code=400,
             detail={"error": "incomplete_session", "message": "Generate all lanes before export."},
         )
-    return zip_all_lanes(
+    response = zip_all_lanes(
         session_id=s.id,
         drums=s.drum_bytes,
-        bass=s.bass_bytes,
+        bass=bass_bytes,
+        bass_mode=selected_bass_mode,
         chords=s.chords_bytes,
         lead=s.lead_bytes,
     )
+    response.headers["X-Session-Player-Bass-Mode"] = selected_bass_mode
+    return response

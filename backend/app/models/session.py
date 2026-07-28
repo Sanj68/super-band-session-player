@@ -46,6 +46,27 @@ class BassStyle(str, Enum):
     fusion = "fusion"
 
 
+class BassArticulationFocus(str, Enum):
+    """High-level performance touch for the bass articulation renderer."""
+
+    natural = "natural"
+    clean = "clean"
+    ghosted = "ghosted"
+    muted = "muted"
+    connected = "connected"
+
+
+class BassPerformanceControls(BaseModel):
+    """Independent performance axes applied after bass composition."""
+
+    ghost: float = Field(default=0.0, ge=0.0, le=1.0)
+    mute: float = Field(default=0.0, ge=0.0, le=1.0)
+    slide: float = Field(default=0.0, ge=0.0, le=1.0)
+    legato: float = Field(default=0.0, ge=0.0, le=1.0)
+    timing_humanize: float = Field(default=0.5, ge=0.0, le=1.0)
+    velocity_humanize: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class ChordStyle(str, Enum):
     simple = "simple"
     jazzy = "jazzy"
@@ -272,6 +293,13 @@ class SessionPatch(BaseModel):
             "reference kick. Send null to return to the engine default."
         ),
     )
+    bass_articulation_focus: BassArticulationFocus | None = Field(
+        default=None,
+        description=(
+            "Performance touch applied on the next bass generation: natural, "
+            "clean, ghosted, muted, or connected."
+        ),
+    )
     bass_expression: float | None = Field(
         default=None,
         ge=0.0,
@@ -279,6 +307,23 @@ class SessionPatch(BaseModel):
         description=(
             "Performance character: 0 = clean and restrained, 0.5 = natural "
             "default, 1 = bold style-aware expression."
+        ),
+    )
+    bass_performance_controls: BassPerformanceControls | None = Field(
+        default=None,
+        description=(
+            "Optional independent ghost, mute, slide, legato, timing, and "
+            "velocity performance amounts. When omitted, the legacy Touch "
+            "and Character controls derive a compatible mix."
+        ),
+    )
+    bass_density_bias: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description=(
+            "Bass activity bias: -1 = more space, 0 = balanced, 1 = busier. "
+            "Regenerate bass to apply."
         ),
     )
     bass_phase_offset_beats: float | None = Field(
@@ -304,6 +349,22 @@ class SessionPatch(BaseModel):
         description="Lane to treat as rhythmic/harmonic anchor for complementary generation; send null to clear.",
     )
 
+    @field_validator("key")
+    @classmethod
+    def validate_key(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        normalized = mt.normalize_key(v)
+        mt.key_root_pc(normalized)
+        return normalized
+
+    @field_validator("scale")
+    @classmethod
+    def validate_scale(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return mt.normalize_scale(v)
+
     @field_validator("chord_progression")
     @classmethod
     def validate_chord_progression(cls, v: list[str] | None) -> list[str] | None:
@@ -320,7 +381,9 @@ class SessionPatch(BaseModel):
             raise ValueError(
                 "Provide at least one of: tempo, key, scale, bar_count, lead_style, lead_player, bass_style, bass_player, "
                 "chord_style, chord_progression, chord_player, drum_style, drum_player, session_preset, "
-                "lead_instrument, bass_instrument, chord_instrument, drum_kit, anchor_lane, bass_engine"
+                "lead_instrument, bass_instrument, chord_instrument, drum_kit, anchor_lane, bass_engine, "
+                "bass_articulation_focus, bass_expression, bass_density_bias, bass_lock_to_groove, "
+                "bass_performance_controls, bass_phase_offset_beats"
             )
         return self
 
@@ -388,6 +451,12 @@ class SessionCreate(BaseModel):
         le=1.0,
         description="Reference lock-to-groove (phrase_v2); omit for engine default.",
     )
+    bass_articulation_focus: BassArticulationFocus = Field(
+        default=BassArticulationFocus.natural,
+        description=(
+            "Bass performance touch: natural, clean, ghosted, muted, or connected."
+        ),
+    )
     bass_expression: float = Field(
         default=0.5,
         ge=0.0,
@@ -396,6 +465,19 @@ class SessionCreate(BaseModel):
             "Performance character: 0 = clean and restrained, 0.5 = natural "
             "default, 1 = bold style-aware expression."
         ),
+    )
+    bass_performance_controls: BassPerformanceControls | None = Field(
+        default=None,
+        description=(
+            "Optional independent bass performance mix. Omit to derive it "
+            "from Touch, Character, Style, and bass family."
+        ),
+    )
+    bass_density_bias: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        description="Bass activity bias: -1 = more space, 0 = balanced, 1 = busier.",
     )
     bass_phase_offset_beats: float = Field(
         default=0.0,
@@ -419,6 +501,18 @@ class SessionCreate(BaseModel):
         default=None,
         description="Optional anchor lane (drums, bass, chords, lead) for anchor-first / context-aware generation.",
     )
+
+    @field_validator("key")
+    @classmethod
+    def validate_key(cls, v: str) -> str:
+        normalized = mt.normalize_key(v)
+        mt.key_root_pc(normalized)
+        return normalized
+
+    @field_validator("scale")
+    @classmethod
+    def validate_scale(cls, v: str) -> str:
+        return mt.normalize_scale(v)
 
     @field_validator("chord_progression")
     @classmethod
@@ -660,6 +754,40 @@ class SessionState(BaseModel):
             "reference evidence is strong)."
         ),
     )
+    groove_source_ready: bool = Field(
+        default=False,
+        description=(
+            "True only when the live Logic beat bridge has captured source "
+            "feature frames for this session."
+        ),
+    )
+    groove_source_frame_count: int = Field(
+        default=0,
+        ge=0,
+        description="Live beat-source feature frames currently available.",
+    )
+    groove_source_notice: str | None = Field(
+        default=None,
+        description=(
+            "Honest setup guidance when no live beat-source frames are available."
+        ),
+    )
+    bass_articulation_focus: str = Field(
+        default="natural",
+        description="Requested bass performance touch.",
+    )
+    bass_articulation_effective: str = Field(
+        default="natural",
+        description=(
+            "Touch actually rendered after applying bass-family capabilities."
+        ),
+    )
+    bass_articulation_notice: str | None = Field(
+        default=None,
+        description=(
+            "Non-empty when the selected bass family cannot perform the requested touch."
+        ),
+    )
     bass_expression: float = Field(
         default=0.5,
         ge=0.0,
@@ -669,11 +797,37 @@ class SessionState(BaseModel):
             "default, 1 = bold style-aware expression."
         ),
     )
+    bass_performance_controls: BassPerformanceControls = Field(
+        default_factory=BassPerformanceControls,
+        description="Requested bass performance mix used for the next render.",
+    )
+    bass_performance_controls_effective: BassPerformanceControls = Field(
+        default_factory=BassPerformanceControls,
+        description=(
+            "Performance mix after applying the selected bass-family capabilities."
+        ),
+    )
+    bass_performance_controls_notice: str | None = Field(
+        default=None,
+        description="Capability limits applied to one or more performance axes.",
+    )
+    bass_density_bias: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        description="Bass activity bias: -1 = more space, 0 = balanced, 1 = busier.",
+    )
     bass_phase_offset_beats: float = Field(
         default=0.0,
         ge=0.0,
         le=4.0,
         description="Whole-part playback phase delay in quarter-note beats.",
+    )
+    bass_performance_available: bool = Field(
+        default=False,
+        description=(
+            "True when a frozen performance render exists for audition/export."
+        ),
     )
     bass_seed: int | None = Field(
         default=None,
@@ -806,6 +960,13 @@ class RegenerateSelectedBody(BaseModel):
             "The server regenerates in fixed order: drums, bass, chords, lead."
         ),
     )
+    preserve_bass_phrase: bool = Field(
+        default=False,
+        description=(
+            "When regenerating only Bass, keep the current seed and structural "
+            "notes and rebuild only its performance render."
+        ),
+    )
 
     @field_validator("lanes", mode="after")
     @classmethod
@@ -856,6 +1017,9 @@ class BassCandidateTake(BaseModel):
     seed: int
     note_count: int = Field(ge=0)
     byte_length: int = Field(ge=0)
+    midi_sha256: str = ""
+    performance_byte_length: int = Field(default=0, ge=0)
+    performance_midi_sha256: str = ""
     preview: str = ""
     label: str | None = None
     template_id: str | None = None
@@ -881,11 +1045,20 @@ class BassCandidateRun(BaseModel):
     run_id: str
     session_id: str
     created_at: str
+    generation_context_version: int = Field(default=0, ge=0)
+    generation_context_fingerprint: str = ""
+    generation_evidence_fingerprint: str = ""
     take_count: int = Field(ge=1)
     bass_style: str
     bass_engine: str
     bass_player: str | None = None
     bass_instrument: str
+    bass_articulation_focus: str = "natural"
+    bass_expression: float = Field(default=0.5, ge=0.0, le=1.0)
+    bass_performance_controls: BassPerformanceControls = Field(
+        default_factory=BassPerformanceControls
+    )
+    bass_density_bias: float = Field(default=0.0, ge=-1.0, le=1.0)
     variation_mode: Literal["ranked", "controlled_roles"] = "ranked"
     clip_id: str | None = None
     conditioning_tempo: int = Field(ge=40, le=240)

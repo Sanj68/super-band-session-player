@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -27,6 +28,7 @@ struct HarmonicFrame
     float cadenceConfidence = 0.0f;
     std::array<float, 12> chroma {};
     int barIndex = 0;
+    std::uint64_t captureEpoch = 0;
     bool playing = false;
     juce::String sessionId;
 };
@@ -108,6 +110,7 @@ private:
 
     void resetAnalysisState(double sampleRate);
     void resetCaptureWindow();
+    void clearBarAnalysisWindow();
     void pushAnalysisSample(float sample);
     void maybeEmitBarFrame(const juce::AudioPlayHead::PositionInfo& position);
     HarmonicFrame analyseCurrentWindow(double tempo, int barIndex);
@@ -129,7 +132,11 @@ private:
     int validSamples = 0;
     int lastEmittedBar = -1;
     int fallbackBarIndex = 0;
+    int activeBarIndex = -1;
+    std::uint64_t captureEpoch = 0;
     bool wasTransportRunning = false;
+    double lastPpqPosition = -1.0;
+    double lastPlayingCallbackMs = 0.0;
 
     mutable juce::CriticalSection keyLock;
     juce::String currentKeyText = "No estimate yet";

@@ -12,6 +12,41 @@ constexpr auto pluginVersion = "0.1.0";
 constexpr double frameDurationSeconds = 0.125;
 constexpr double defaultTempo = 120.0;
 constexpr double fourFourBeatsPerBar = 4.0;
+constexpr double maxPlayingCallbackGapMs = 500.0;
+constexpr double backwardPpqJitterBeats = 0.25;
+constexpr double minimumForwardSeekBeats = 2.0;
+
+constexpr bool isPreRollPpq(double ppqPosition)
+{
+    return ppqPosition < 0.0;
+}
+
+constexpr bool isMeaningfulPpqDiscontinuity(
+    double previousPpq,
+    double observedPpq,
+    double blockBeats)
+{
+    const auto positiveBlockBeats = blockBeats > 0.0 ? blockBeats : 0.0;
+    const auto blockScaledForwardLimit = positiveBlockBeats * 2.0 + backwardPpqJitterBeats;
+    const auto forwardLimit = blockScaledForwardLimit > minimumForwardSeekBeats
+        ? blockScaledForwardLimit
+        : minimumForwardSeekBeats;
+    const auto observedDelta = observedPpq - previousPpq;
+    return (
+        observedDelta < -backwardPpqJitterBeats
+        || observedDelta > forwardLimit
+    );
+}
+
+static_assert(isPreRollPpq(-0.5));
+static_assert(! isPreRollPpq(0.0));
+static_assert(! isPreRollPpq(0.5));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 8.0, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 7.99, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 8.5, 0.025));
+static_assert(isMeaningfulPpqDiscontinuity(8.0, 7.5, 0.025));
+static_assert(isMeaningfulPpqDiscontinuity(8.0, 10.5, 0.025));
+static_assert(! isMeaningfulPpqDiscontinuity(8.0, 10.4, 1.2));
 
 double coefficientForCutoff(double cutoffHz, double sampleRate)
 {
@@ -65,12 +100,15 @@ void BridgeClient::stop()
 
 bool BridgeClient::pushFrame(const FeatureFrame& frame)
 {
+    if (! frame.playing)
+        return false;
+
     const auto scope = fifo.write(1);
     if (scope.blockSize1 <= 0)
         return false;
 
     frames[static_cast<size_t>(scope.startIndex1)] = frame;
-    fifo.finishedWrite(1);
+    // ScopedWrite commits the slot when it leaves scope.
     return true;
 }
 
@@ -100,15 +138,16 @@ void BridgeClient::run()
 
         std::vector<FeatureFrame> batch;
         batch.reserve(32);
-        const auto available = juce::jmin(32, fifo.getNumReady());
-        const auto scope = fifo.read(available);
+        {
+            const auto available = juce::jmin(32, fifo.getNumReady());
+            const auto scope = fifo.read(available);
 
-        for (int i = 0; i < scope.blockSize1; ++i)
-            batch.push_back(frames[static_cast<size_t>(scope.startIndex1 + i)]);
-        for (int i = 0; i < scope.blockSize2; ++i)
-            batch.push_back(frames[static_cast<size_t>(scope.startIndex2 + i)]);
-
-        fifo.finishedRead(static_cast<int>(batch.size()));
+            for (int i = 0; i < scope.blockSize1; ++i)
+                batch.push_back(frames[static_cast<size_t>(scope.startIndex1 + i)]);
+            for (int i = 0; i < scope.blockSize2; ++i)
+                batch.push_back(frames[static_cast<size_t>(scope.startIndex2 + i)]);
+            // ScopedRead consumes exactly these slots when it leaves scope.
+        }
 
         if (! batch.empty())
             postFrames(config, batch);
@@ -215,6 +254,7 @@ juce::String BridgeClient::frameToJson(const BridgeConfig& config, const juce::S
         + "\"plugin_instance_id\":\"" + jsonEscape(pluginId) + "\","
         + "\"session_id\":\"" + jsonEscape(config.sessionId) + "\","
         + "\"source_id\":\"" + jsonEscape(config.sourceId) + "\","
+        + "\"capture_epoch\":" + juce::String(static_cast<juce::int64>(frame.captureEpoch)) + ","
         + "\"sample_rate\":" + juce::String(frame.sampleRate, 1) + ","
         + "\"host_tempo\":" + juce::String(frame.hostTempo, 3) + ","
         + "\"tempo\":" + juce::String(frame.hostTempo, 3) + ","
@@ -306,6 +346,58 @@ void SessionPlayerBridgeAudioProcessor::processBlock(juce::AudioBuffer<float>& b
         if (auto pos = playHead->getPosition())
             position = *pos;
 
+    if (! position.getIsPlaying())
+    {
+        // Never queue stopped-transport buffers. Drop any partial analysis
+        // window so a new take cannot begin with energy captured while idle.
+        wasTransportRunning = false;
+        lastPpqPosition = -1.0;
+        lastPlayingCallbackMs = 0.0;
+        resetCaptureWindow();
+        return;
+    }
+
+    const auto hostPpq = position.getPpqPosition();
+    if (hostPpq.hasValue() && isPreRollPpq(*hostPpq))
+    {
+        // Logic can report transport-playing count-in blocks before PPQ zero.
+        // Exclude them completely; PPQ zero will establish a fresh epoch.
+        wasTransportRunning = false;
+        lastPpqPosition = -1.0;
+        lastPlayingCallbackMs = 0.0;
+        resetCaptureWindow();
+        return;
+    }
+
+    auto tempo = defaultTempo;
+    if (auto bpm = position.getBpm(); bpm.hasValue())
+        tempo = juce::jlimit(20.0, 400.0, *bpm);
+    const auto blockBeats = (tempo / 60.0)
+        * (static_cast<double>(numSamples) / currentSampleRate);
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    bool startsNewCapture = ! wasTransportRunning;
+    if (
+        wasTransportRunning
+        && lastPlayingCallbackMs > 0.0
+        && nowMs - lastPlayingCallbackMs > maxPlayingCallbackGapMs
+    )
+        startsNewCapture = true;
+    if (wasTransportRunning && hostPpq.hasValue() && lastPpqPosition >= 0.0)
+    {
+        // Logic may repeat a coarse PPQ value across many callbacks, then
+        // advance it in a larger step. Judge only the observed musical delta:
+        // tolerate repeats/jitter/coarse updates and reset on an actual seek.
+        if (isMeaningfulPpqDiscontinuity(
+                lastPpqPosition, *hostPpq, blockBeats))
+            startsNewCapture = true;
+    }
+    if (startsNewCapture)
+    {
+        ++captureEpoch;
+        resetCaptureWindow();
+    }
+    wasTransportRunning = true;
+
     for (int sample = 0; sample < numSamples; ++sample)
     {
         float mono = 0.0f;
@@ -320,6 +412,8 @@ void SessionPlayerBridgeAudioProcessor::processBlock(juce::AudioBuffer<float>& b
         if (accumulatedSamples >= frameHopSamples)
             emitFrameFromAccumulator(accumulatedSamples, position);
     }
+    lastPpqPosition = hostPpq.hasValue() ? *hostPpq : -1.0;
+    lastPlayingCallbackMs = nowMs;
 }
 
 juce::AudioProcessorEditor* SessionPlayerBridgeAudioProcessor::createEditor()
@@ -392,12 +486,20 @@ void SessionPlayerBridgeAudioProcessor::resetAnalysisState(double sampleRate)
 {
     currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     frameHopSamples = juce::jmax(1, static_cast<int>(std::round(currentSampleRate * frameDurationSeconds)));
+    wasTransportRunning = false;
+    lastPpqPosition = -1.0;
+    lastPlayingCallbackMs = 0.0;
+    resetCaptureWindow();
+    lowCoeff = coefficientForCutoff(200.0, currentSampleRate);
+    highCoeff = coefficientForCutoff(2000.0, currentSampleRate);
+}
+
+void SessionPlayerBridgeAudioProcessor::resetCaptureWindow()
+{
     accumulatedSamples = 0;
     processedSamples = 0.0;
     lowState = 0.0;
     highLowpassState = 0.0;
-    lowCoeff = coefficientForCutoff(200.0, currentSampleRate);
-    highCoeff = coefficientForCutoff(2000.0, currentSampleRate);
     fullEnergy = 0.0;
     lowEnergy = 0.0;
     midEnergy = 0.0;
@@ -450,6 +552,7 @@ void SessionPlayerBridgeAudioProcessor::emitFrameFromAccumulator(
     frame.highBandEnergy = unitFromEnergy(highEnergy / denom);
     frame.onsetStrength = onset;
     frame.barIndex = barIndexFromPpq(frame.ppqPosition);
+    frame.captureEpoch = captureEpoch;
     frame.playing = position.getIsPlaying();
 
     bridgeClient.pushFrame(frame);

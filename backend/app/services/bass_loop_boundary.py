@@ -11,6 +11,7 @@ egress point without compounding shifts.
 from __future__ import annotations
 
 import io
+import math
 from typing import Iterable
 
 import pretty_midi
@@ -23,9 +24,18 @@ _BASS_LO = 30
 _BASS_HI = 54
 _FIRST_NOTE_TOLERANCE_SLOTS = 0.25  # below this, treat first note as already at slot 0
 _MONOPHONIC_GAP_SECONDS = 1e-4
+_MAX_CONNECTED_OVERLAP_SECONDS = 0.005
 _MIN_NOTE_SECONDS = 0.025
 _MIN_NOTE_SIXTEENTH_FRACTION = 0.25
 _MAX_MIN_NOTE_SECONDS = 0.045
+_PITCH_BEND_RPN_SETUP = (
+    (101, 0),
+    (100, 0),
+    (6, 12),
+    (38, 0),
+    (101, 127),
+    (100, 127),
+)
 
 
 def _root_midi_in_bass_register(root_pc: int, *, lo: int = _BASS_LO, hi: int = _BASS_HI) -> int:
@@ -45,6 +55,7 @@ def normalize_bass_lane_notes(
     bar_count: int,
     harmonic_root_pc: int | None = None,
     allow_delayed_entry: bool = False,
+    preserve_connected_overlap: bool = False,
 ) -> list[LaneNote]:
     """Return a new list of LaneNote with a clean loop boundary.
 
@@ -199,6 +210,17 @@ def normalize_bass_lane_notes(
 
             if float(previous.end) <= float(current.start) - _MONOPHONIC_GAP_SECONDS:
                 break
+            overlap = float(previous.end) - float(current.start)
+            if (
+                preserve_connected_overlap
+                and int(previous.pitch) != int(current.pitch)
+                and 0.0 < overlap <= _MAX_CONNECTED_OVERLAP_SECONDS + 1e-9
+            ):
+                # Performance hammer/legato intent uses a deliberately tiny
+                # different-pitch overlap. Preserve only this bounded window;
+                # ordinary or excessive polyphony still follows the strict
+                # monophonic trim below.
+                break
             trimmed_end = float(current.start) - _MONOPHONIC_GAP_SECONDS
             if trimmed_end - float(previous.start) >= min_note_duration:
                 monophonic[-1] = LaneNote(
@@ -257,6 +279,7 @@ def normalize_bass_loop_bytes(
         return midi_bytes
     program = _DEFAULT_BASS_PROGRAM
     name = "Bass"
+    resolution = max(1, int(pm.resolution))
     bass_inst = None
     for inst in pm.instruments:
         if not inst.is_drum:
@@ -264,6 +287,10 @@ def normalize_bass_loop_bytes(
             program = int(inst.program)
             name = inst.name or name
             break
+    source_pitch_bends = list(bass_inst.pitch_bends) if bass_inst is not None else []
+    source_control_changes = (
+        list(bass_inst.control_changes) if bass_inst is not None else []
+    )
     raw_notes: list[LaneNote] = []
     if bass_inst is not None:
         for n in bass_inst.notes:
@@ -281,8 +308,16 @@ def normalize_bass_loop_bytes(
         bar_count=bar_count,
         harmonic_root_pc=harmonic_root_pc,
         allow_delayed_entry=allow_delayed_entry,
+        # Articulation metadata is not present in a generic SMF. The dedicated
+        # performance lane name is the egress contract that distinguishes an
+        # intentional hammer/legato overlap from accidental clean-lane
+        # polyphony.
+        preserve_connected_overlap=name.strip().casefold() == "bass (performance)",
     )
-    out_pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo))
+    out_pm = pretty_midi.PrettyMIDI(
+        initial_tempo=float(tempo),
+        resolution=resolution,
+    )
     out_inst = pretty_midi.Instrument(program=program, name=name)
     for n in normalized:
         out_inst.notes.append(
@@ -293,7 +328,164 @@ def normalize_bass_loop_bytes(
                 end=float(n.end),
             )
         )
+    raw_min_start = min(
+        (float(note.start) for note in raw_notes),
+        default=0.0,
+    )
+    automation_shift = (
+        -raw_min_start
+        if not allow_delayed_entry and raw_min_start > 0.0
+        else 0.0
+    )
+    loop_seconds = float(max(1, int(bar_count))) * (
+        4.0 * 60.0 / float(max(40, min(240, int(tempo))))
+    )
+    out_inst.control_changes.extend(
+        _normalized_control_changes(
+            source_control_changes,
+            time_shift=automation_shift,
+            loop_seconds=loop_seconds,
+        )
+    )
+    out_inst.pitch_bends.extend(
+        _normalized_pitch_bends(
+            source_pitch_bends,
+            time_shift=automation_shift,
+            loop_seconds=loop_seconds,
+            note_end=max(
+                (float(note.end) for note in normalized),
+                default=0.0,
+            ),
+            tick_seconds=(
+                60.0
+                / float(max(40, min(240, int(tempo))))
+                / float(resolution)
+            ),
+        )
+    )
     out_pm.instruments.append(out_inst)
     buf = io.BytesIO()
     out_pm.write(buf)
     return buf.getvalue()
+
+
+def _safe_event_time(
+    value: float,
+    *,
+    time_shift: float,
+    loop_seconds: float,
+) -> float | None:
+    try:
+        shifted = float(value) + float(time_shift)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(shifted):
+        return None
+    return max(0.0, min(float(loop_seconds), shifted))
+
+
+def _normalized_control_changes(
+    events: list[pretty_midi.ControlChange],
+    *,
+    time_shift: float,
+    loop_seconds: float,
+) -> list[pretty_midi.ControlChange]:
+    normalized: list[pretty_midi.ControlChange] = []
+    static_setup_ids = _pitch_bend_rpn_setup_event_ids(events)
+    for event in events:
+        event_time = _safe_event_time(
+            float(event.time),
+            # RPN pitch-bend sensitivity is channel configuration, not musical
+            # automation. Keep its ordered setup at the file head while note-
+            # attached CC automation follows any loop-normalization shift.
+            time_shift=0.0 if id(event) in static_setup_ids else time_shift,
+            loop_seconds=loop_seconds,
+        )
+        if event_time is None:
+            continue
+        normalized.append(
+            pretty_midi.ControlChange(
+                number=max(0, min(127, int(event.number))),
+                value=max(0, min(127, int(event.value))),
+                time=event_time,
+            )
+        )
+    return sorted(
+        normalized,
+        key=lambda event: float(event.time),
+    )
+
+
+def _pitch_bend_rpn_setup_event_ids(
+    events: list[pretty_midi.ControlChange],
+) -> set[int]:
+    ordered = sorted(events, key=lambda event: float(event.time))
+    signature_size = len(_PITCH_BEND_RPN_SETUP)
+    for start in range(0, len(ordered) - signature_size + 1):
+        window = ordered[start : start + signature_size]
+        signature = tuple(
+            (int(event.number), int(event.value))
+            for event in window
+        )
+        if signature == _PITCH_BEND_RPN_SETUP:
+            return {id(event) for event in window}
+    return set()
+
+
+def _normalized_pitch_bends(
+    events: list[pretty_midi.PitchBend],
+    *,
+    time_shift: float,
+    loop_seconds: float,
+    note_end: float,
+    tick_seconds: float,
+) -> list[pretty_midi.PitchBend]:
+    normalized: list[pretty_midi.PitchBend] = []
+    for event in events:
+        event_time = _safe_event_time(
+            float(event.time),
+            time_shift=time_shift,
+            loop_seconds=loop_seconds,
+        )
+        if event_time is None:
+            continue
+        normalized.append(
+            pretty_midi.PitchBend(
+                pitch=max(-8192, min(8191, int(event.pitch))),
+                time=event_time,
+            )
+        )
+    normalized.sort(key=lambda event: (float(event.time), int(event.pitch)))
+
+    # A nonzero bend on the terminal tick cannot be followed by an in-range
+    # reset. Drop that inaudible boundary-only state instead of appending a
+    # coincident zero: PrettyMIDI sorts same-tick pitch wheels by value, which
+    # can otherwise leave a positive bend last and make normalization grow on
+    # every pass.
+    terminal_guard = max(0.0, float(loop_seconds) - max(1e-9, float(tick_seconds)))
+    normalized = [
+        event
+        for event in normalized
+        if not (
+            int(event.pitch) != 0
+            and float(event.time) > terminal_guard + 1e-12
+        )
+    ]
+    if normalized and int(normalized[-1].pitch) != 0:
+        reset_time = max(
+            float(normalized[-1].time) + max(1e-9, float(tick_seconds)),
+            max(0.0, min(float(loop_seconds), float(note_end))),
+        )
+        reset_time = min(float(loop_seconds), reset_time)
+        if reset_time <= float(normalized[-1].time):
+            # Defensive fallback for a pathological sub-tick loop: discard the
+            # terminal nonzero state rather than serialize a stuck bend.
+            normalized.pop()
+            return normalized
+        normalized.append(
+            pretty_midi.PitchBend(
+                pitch=0,
+                time=max(0.0, reset_time),
+            )
+        )
+    return normalized

@@ -387,6 +387,122 @@ def _shape_velocities(inst: pretty_midi.Instrument, player_key: str | None) -> N
             n.velocity = max(38, min(122, int(n.velocity + (n.pitch % 4))))
 
 
+def _explicit_chord_tones_midi(
+    chord: mt.ChordSpec,
+    *,
+    octave: int,
+    include_extensions: bool,
+) -> list[int]:
+    """Voice an explicit chart symbol without changing its chord quality.
+
+    A confirmed chart is the harmonic contract for every generated lane.  In
+    particular, a bare ``D`` in D natural minor must retain its F# rather than
+    being rebuilt as the scale's diatonic D-minor triad.
+    """
+
+    intervals = chord.intervals if include_extensions else chord.intervals[:3]
+    root = mt.pc_to_midi_note(chord.root_pc, octave)
+    return [root + int(interval) for interval in intervals]
+
+
+def _bar_chord_tones_midi(
+    *,
+    key: str,
+    scale: str,
+    degree: int,
+    explicit_chord: mt.ChordSpec | None,
+    octave: int,
+    seventh: bool,
+) -> list[int]:
+    if explicit_chord is not None:
+        return _explicit_chord_tones_midi(
+            explicit_chord,
+            octave=octave,
+            include_extensions=seventh,
+        )
+    return mt.chord_tones_midi(
+        key,
+        scale,
+        degree,
+        octave=octave,
+        seventh=seventh,
+    )
+
+
+def _enforce_explicit_chord_contract(
+    inst: pretty_midi.Instrument,
+    chord: mt.ChordSpec,
+    *,
+    bar_t0: float,
+    bar_end: float,
+    sixteenth: float,
+) -> None:
+    """Keep a chart-driven bar inside, and complete, its declared pitch set."""
+
+    expected = set(chord.tone_pcs)
+    bar_notes = [note for note in inst.notes if bar_t0 <= note.start < bar_end]
+
+    # MIDI tick quantisation can round an exact bar-boundary onset a fraction
+    # into the preceding bar. Keep chart changes just inside their own bar so
+    # downstream hosts and exports classify the harmony consistently.
+    if bar_t0 > 0.0:
+        boundary_guard = min(0.005, max(0.001, sixteenth * 0.02))
+        safe_start = bar_t0 + boundary_guard
+        for note in bar_notes:
+            if note.start < safe_start:
+                note.start = safe_start
+
+    # Explicit symbols are authoritative; style/player layers may alter rhythm,
+    # register and velocity, but not silently add a different harmony.
+    unsupported_ids = {
+        id(note)
+        for note in bar_notes
+        if note.pitch % 12 not in expected
+    }
+    if unsupported_ids:
+        inst.notes[:] = [note for note in inst.notes if id(note) not in unsupported_ids]
+        bar_notes = [note for note in bar_notes if id(note) not in unsupported_ids]
+
+    heard = {note.pitch % 12 for note in bar_notes}
+    missing = expected - heard
+    if not missing:
+        return
+
+    if bar_notes:
+        start = min(note.start for note in bar_notes)
+        end = min(bar_end - 1e-4, max(note.end for note in bar_notes))
+        velocity = max(
+            36,
+            min(112, round(sum(note.velocity for note in bar_notes) / len(bar_notes))),
+        )
+    else:
+        start = bar_t0
+        end = bar_end - 1e-4
+        velocity = 64
+    if end <= start:
+        end = min(bar_end - 1e-4, start + max(sixteenth, 1e-3))
+
+    canonical = _explicit_chord_tones_midi(
+        chord,
+        octave=4,
+        include_extensions=True,
+    )
+    for pitch in canonical:
+        if pitch % 12 not in missing:
+            continue
+        inst.notes.append(
+            pretty_midi.Note(
+                velocity=velocity,
+                pitch=pitch,
+                start=start,
+                end=end,
+            )
+        )
+        missing.remove(pitch % 12)
+        if not missing:
+            break
+
+
 def generate_chords(
     *,
     tempo: int,
@@ -395,6 +511,7 @@ def generate_chords(
     scale: str,
     chord_style: str | None = None,
     chord_instrument: str | None = None,
+    chord_progression: list[str] | None = None,
     session_preset: str | None = None,
     chord_player: str | None = None,
     context: SessionAnchorContext | None = None,
@@ -417,9 +534,11 @@ def generate_chords(
     bar_len = 4 * spb
     sixteenth = spb / 4.0
     degrees = mt.progression_degrees_for_bars(bar_count, scale)
+    explicit_chords = mt.progression_chords_for_bars(chord_progression, bar_count)
     salt = random.randint(0, 127)
 
     for bar, deg in enumerate(degrees):
+        explicit_chord = explicit_chords[bar] if explicit_chords else None
         bar_t0 = bar * bar_len
         bar_end = bar_t0 + bar_len
         ps = _phrase_seed(traits, bar, salt, deg)
@@ -436,10 +555,21 @@ def generate_chords(
                 sync_push *= chord_role_knobs.sync_push_mult
 
         if style == "simple":
-            seventh = _seventh_simple(traits, bar, salt, deg)
+            seventh = (
+                explicit_chord is not None
+                or _seventh_simple(traits, bar, salt, deg)
+            )
             base_oct = _base_oct(traits)
-            tones = list(mt.chord_tones_midi(key, scale, deg, octave=base_oct, seventh=seventh))
-            _maybe_add_ninth(tones, traits)
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=base_oct,
+                seventh=seventh,
+            )
+            if explicit_chord is None:
+                _maybe_add_ninth(tones, traits)
             inv = (ps + _inv_extra(traits)) % min(3, len(tones))
             tones = tones[inv:] + tones[:inv]
             if random.random() < 0.28 + (0.22 * traits["voicing_density"] if traits else 0.0):
@@ -483,12 +613,24 @@ def generate_chords(
                     inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=t0, end=t1))
 
         elif style == "jazzy":
-            tones = list(mt.chord_tones_midi(key, scale, deg, octave=4, seventh=True))
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=4,
+                seventh=True,
+            )
             root = tones[0]
             nine = root + 14
-            if nine > tones[-1] and (traits is None or random.random() < 0.55 + 0.35 * traits["color_tone_bias"]):
+            if (
+                explicit_chord is None
+                and nine > tones[-1]
+                and (traits is None or random.random() < 0.55 + 0.35 * traits["color_tone_bias"])
+            ):
                 tones.append(nine)
-            _maybe_color_extension(tones, traits)
+            if explicit_chord is None:
+                _maybe_color_extension(tones, traits)
             inv_bias = 1 + int(2.2 * traits["inversion_activity"]) if traits else 1
             if bar % (3 if inv_bias > 2 else 2) == 1 and len(tones) >= 4 and (traits is None or traits["inversion_activity"] > 0.45):
                 tones = [tones[1], tones[2], tones[0] + 12] + list(tones[3:])
@@ -500,7 +642,13 @@ def generate_chords(
                 tones = [tones[-1]] + tones[:-1]
             if random.random() < 0.22 + (0.28 * traits["inversion_activity"] if traits else 0.0) and len(tones) >= 2:
                 tones = [tones[0] + 12] + tones[1:]
-            if _groove_chord_anchor(context) and player_key == "herbie" and traits and random.random() < 0.24:
+            if (
+                explicit_chord is None
+                and _groove_chord_anchor(context)
+                and player_key == "herbie"
+                and traits
+                and random.random() < 0.24
+            ):
                 _maybe_color_extension(tones, traits)
             t0_base = bar_t0 + random.uniform(0, 0.05) * bar_len * (
                 0.65 + 0.35 * (traits["rhythmic_comping_bias"] if traits else 1.0)
@@ -535,10 +683,24 @@ def generate_chords(
                 inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=t0, end=t1))
 
         elif style == "wide":
-            low = mt.chord_tones_midi(key, scale, deg, octave=3, seventh=False)
+            low = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=3,
+                seventh=False,
+            )
             r, t, f = low[0], low[1], low[2]
             up_oct = _wide_upper_oct(traits)
-            upper = mt.chord_tones_midi(key, scale, deg, octave=up_oct, seventh=True)
+            upper = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=up_oct,
+                seventh=True,
+            )
             pitches = [r, t + 12, f + 12]
             if len(upper) > 3:
                 sev = upper[-1]
@@ -573,14 +735,26 @@ def generate_chords(
                 inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=t0, end=t1))
 
         elif style == "warm_broken":
-            tones = list(mt.chord_tones_midi(key, scale, deg, octave=4, seventh=True))
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=4,
+                seventh=True,
+            )
             root = tones[0]
             nine = root + 14
             while nine <= tones[-1]:
                 nine += 12
-            if nine <= 96 and (traits is None or random.random() < 0.55 + 0.35 * traits["color_tone_bias"]):
+            if (
+                explicit_chord is None
+                and nine <= 96
+                and (traits is None or random.random() < 0.55 + 0.35 * traits["color_tone_bias"])
+            ):
                 tones.append(nine)
-            _maybe_color_extension(tones, traits)
+            if explicit_chord is None:
+                _maybe_color_extension(tones, traits)
             k_rot = (ps + _inv_extra(traits)) % min(3, len(tones))
             tones = tones[k_rot:] + tones[:k_rot]
             arp_families = (
@@ -632,7 +806,14 @@ def generate_chords(
                     )
 
         elif style == "dense":
-            tones = mt.chord_tones_midi(key, scale, deg, octave=4, seventh=True)
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=4,
+                seventh=True,
+            )
             fill = list(tones)
             vd = traits["voicing_density"] if traits else 0.65
             if vd > 0.48:
@@ -677,11 +858,23 @@ def generate_chords(
                 inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=t0, end=t1))
 
         else:  # stabs
-            seventh = bar % 2 == 0 or (
-                traits is not None and random.random() < 0.25 + 0.35 * traits["color_tone_bias"]
+            seventh = explicit_chord is not None or (
+                bar % 2 == 0
+                or (
+                    traits is not None
+                    and random.random() < 0.25 + 0.35 * traits["color_tone_bias"]
+                )
             )
-            tones = list(mt.chord_tones_midi(key, scale, deg, octave=4, seventh=seventh))
-            _maybe_add_ninth(tones, traits)
+            tones = _bar_chord_tones_midi(
+                key=key,
+                scale=scale,
+                degree=deg,
+                explicit_chord=explicit_chord,
+                octave=4,
+                seventh=seventh,
+            )
+            if explicit_chord is None:
+                _maybe_add_ninth(tones, traits)
             slot_sets = (
                 (0, 4, 8, 12),
                 (0, 3, 7, 11),
@@ -730,6 +923,15 @@ def generate_chords(
                     vel = max(48, min(118, (82 if accent else 70) - idx * 4 + random.randint(-8, 10)))
                     inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=t0, end=t1))
 
+        if explicit_chord is not None:
+            _enforce_explicit_chord_contract(
+                inst,
+                explicit_chord,
+                bar_t0=bar_t0,
+                bar_end=bar_end,
+                sixteenth=sixteenth,
+            )
+
     _shape_velocities(inst, player_key)
 
     pm.instruments.append(inst)
@@ -740,6 +942,11 @@ def generate_chords(
     head = (
         f"Chords [{style}, {ci_lbl}{who}]: {mt.normalize_key(key)} {mt.describe_scale(scale)}, "
         f"{bar_count} bar(s), {tempo} BPM"
+    )
+    chart_tag = (
+        f" Chart: {' | '.join(chord.symbol for chord in explicit_chords[:bar_count])}."
+        if explicit_chords
+        else ""
     )
     inst_note = {
         "piano": "Acoustic piano tone.",
@@ -756,5 +963,5 @@ def generate_chords(
     pb = _player_blurb(player_key)
     mid = f"{pb} {_preview_blurb(style)}".strip() if pb else _preview_blurb(style)
     role_tag = f" Role vs anchor: {chord_role_name}." if chord_role_name else ""
-    preview = f"{head} — {mid} {inst_note}{soul_tag}{role_tag}"
+    preview = f"{head} — {mid} {inst_note}{chart_tag}{soul_tag}{role_tag}"
     return buf.getvalue(), preview
