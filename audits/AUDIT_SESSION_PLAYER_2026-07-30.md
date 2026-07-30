@@ -28,10 +28,10 @@ remaining P1 data-integrity findings are open.
 
 Product code was changed to repair the Listener callback boundary, persist the
 accepted Bass output register, seal the accepted fixture, own the backend
-lifecycle, and add regression contracts for those boundaries. Live state was
-deliberately split into isolated 88-BPM historical and 116-BPM current test
-fixtures after the initial audit mistook stale 25 July acceptance notes for the
-latest musical truth.
+lifecycle, make reference-audio storage transactional, and add regression
+contracts for those boundaries. Live state was deliberately split into
+isolated 88-BPM historical and 116-BPM current test fixtures after the initial
+audit mistook stale 25 July acceptance notes for the latest musical truth.
 
 ## Priority findings
 
@@ -219,7 +219,7 @@ Repair completed on 30 July:
 
 The accepted runtime is now recoverable from the named remote branch.
 
-### P1 — Reference uploads leak files and enforce their limit after buffering
+### Closed P1 — Reference uploads leaked files and buffered before limiting
 
 The reference-audio directory contains:
 
@@ -246,6 +246,36 @@ Recommended repair: stream uploads in bounded chunks, commit the new session
 reference first, then retire the prior blob after durable persistence succeeds.
 Add a dry-run GC that identifies files not referenced by sessions or recoverable
 history before any deletion.
+
+Repair completed on 30 July:
+
+- both upload lanes now stream in 1 MiB chunks and stop at a 25 MiB bound
+  without an unbounded `read()`;
+- uploads land through a unique temporary file, flush and `fsync`, then publish
+  to a unique final blob with an atomic rename;
+- session middleware retires a superseded blob only after the replacement
+  reference has been durably committed;
+- persistence failure, handler failure, and rejected sealed-session mutation
+  roll back the session and discard the uncommitted new blob;
+- retirement checks the complete live session map and retained Bass history,
+  so a duplicate session or recoverable idea keeps its source audio;
+- added a two-phase GC whose dry run records exact relative paths, sizes,
+  modification times, and SHA-256 hashes; apply requires the exact plan digest
+  and rechecks file identity and all current/history references;
+- GC refuses symlinks, non-regular entries, changed files, newly referenced
+  files, and missing protected files;
+- the live dry run reproduced the audit exactly: 202 orphans,
+  982,052,546 bytes, 33 protected paths, and zero unsafe entries;
+- applied plan
+  `eb97ab8fba2804a1a7122c2aa9a78e6a1358f2b2eca25f60b80e6e03f154b36c`;
+- the post-clean dry run found zero orphans, 33 protected files, zero missing
+  protected files, and zero unsafe entries;
+- the reference-audio directory now occupies 194,048 KiB instead of about
+  1.1 GiB. The 202 deleted blobs are not locally recoverable; the applied
+  receipt preserves their exact paths, sizes, timestamps, and content hashes
+  under `~/Library/Application Support/Session Player/GC Receipts/`.
+
+The upload lifecycle and known orphan backlog are closed.
 
 ### P1 — Saved setups/evaluations can be silently destroyed on read
 
@@ -313,7 +343,7 @@ CSP.
 
 ## Verification performed
 
-- Backend: **1,012 passed**, 4 existing librosa warnings.
+- Backend: **1,020 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
 - Frontend: Vite production build passed.
 - Native source builds:
@@ -336,6 +366,13 @@ CSP.
     and `+12` output transpose;
   - port inspection confirmed Session Player on loopback 8001 and AutoFactory
     separately on 8000.
+- Reference-audio lifecycle:
+  - bounded streaming, empty/oversize cleanup, persistence ordering, rollback,
+    recoverable-history protection, and hashed-GC refusal tests passed;
+  - exact 202-file dry-run plan applied, reclaiming 982,052,546 bytes;
+  - post-clean inventory: 33 protected files, zero missing, zero orphaned, zero
+    unsafe;
+  - backend restarted and restored the sealed 116-BPM acceptance fixture.
 - Candidate store read benchmark: 16.69 ms mean, 21.94 ms max at 3.6 MiB.
 - Fusion property pass: 8,000 build/serialize/restore round trips across
   1, 2, 3, 4, 7, 16, 31, and 128 bars.
@@ -371,7 +408,6 @@ CSP.
 
 ## Recommended order
 
-1. Repair upload lifecycle and safely reclaim confirmed orphan audio.
-2. Harden setup/evaluation stores.
-3. Upgrade frontend tooling and add UI/native regression harnesses.
-4. Add a production-load Listener timing/allocation stress harness.
+1. Harden setup/evaluation stores.
+2. Upgrade frontend tooling and add UI/native regression harnesses.
+3. Add a production-load Listener timing/allocation stress harness.

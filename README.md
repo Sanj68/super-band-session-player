@@ -94,6 +94,26 @@ scripts/session_player_backend.sh health
 scripts/session_player_backend.sh logs
 ```
 
+Reference-audio uploads are streamed in bounded chunks with a 25 MiB maximum.
+After a replacement is durably committed, the superseded blob is removed only
+when no current session or recoverable Bass history still references it.
+
+Reference-audio garbage collection is deliberately two-phase. Stop the managed
+backend, run a hashed dry run, then supply that exact plan digest to apply it:
+
+```bash
+scripts/session_player_backend.sh stop
+backend/.venv/bin/python backend/tools/reference_audio_gc.py
+backend/.venv/bin/python backend/tools/reference_audio_gc.py \
+  --apply --confirm-plan-sha256 <digest-from-dry-run>
+scripts/session_player_backend.sh start
+```
+
+Both runs write receipts under
+`~/Library/Application Support/Session Player/GC Receipts/`. Apply refuses if
+the inventory, size, modification time, content hash, or live/history
+references changed after the dry run.
+
 For development without the managed service:
 
 1. Stop the agent:

@@ -20,7 +20,12 @@ from app.routes.plugin_routes import router as plugin_router
 from app.routes.evaluation_routes import router as evaluation_router
 from app.routes.midi_routes import router as midi_router
 from app.routes.setup_routes import router as setup_router
-from app.services import session_mutation_gate, session_store
+from app.services import (
+    bass_history_store,
+    reference_audio_store,
+    session_mutation_gate,
+    session_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +175,34 @@ async def _session_mutation_gate_claim():
             session_mutation_gate.release()
 
 
+def _session_audio_paths(sessions: dict[str, object]) -> set:
+    return reference_audio_store.session_reference_paths(sessions)
+
+
+def _retire_audio_paths(
+    candidates: set,
+    *,
+    sessions: dict[str, object],
+) -> None:
+    if not candidates:
+        return
+    try:
+        reference_audio_store.retire_unreferenced(
+            candidates,
+            root=session_routes._REFERENCE_AUDIO_ROOT,  # noqa: SLF001
+            active_references=_session_audio_paths(sessions),
+            recoverable_references=bass_history_store.referenced_audio_paths(),
+        )
+    except (
+        OSError,
+        bass_history_store.BassHistoryStoreError,
+        reference_audio_store.ReferenceAudioStoreError,
+    ):
+        # The session transaction is already coherent. Fail closed by retaining
+        # the blob; the two-phase GC tool can retry it later.
+        logger.exception("Could not retire detached reference audio")
+
+
 @app.middleware("http")
 async def persist_session_mutations(request, call_next):
     path = request.url.path
@@ -227,20 +260,39 @@ async def persist_session_mutations(request, call_next):
                 if requires_snapshot
                 else None
             )
+            before_audio_paths = (
+                _session_audio_paths(before)
+                if before is not None
+                else set()
+            )
             try:
                 response = await call_next(request)
             except BaseException:
                 # Includes cancellation and response-model validation errors:
                 # neither may strand a half-applied in-memory revision.
                 if before is not None:
+                    attempted_audio_paths = _session_audio_paths(
+                        session_routes._SESSIONS  # noqa: SLF001
+                    )
                     session_routes._SESSIONS.clear()  # noqa: SLF001
                     session_routes._SESSIONS.update(before)  # noqa: SLF001
+                    _retire_audio_paths(
+                        attempted_audio_paths - before_audio_paths,
+                        sessions=session_routes._SESSIONS,  # noqa: SLF001
+                    )
                 raise
             if response.status_code >= 400 and before is not None:
                 # Route implementations are staged where practical, but this
                 # gives every failed durable request the same atomic contract.
+                attempted_audio_paths = _session_audio_paths(
+                    session_routes._SESSIONS  # noqa: SLF001
+                )
                 session_routes._SESSIONS.clear()  # noqa: SLF001
                 session_routes._SESSIONS.update(before)  # noqa: SLF001
+                _retire_audio_paths(
+                    attempted_audio_paths - before_audio_paths,
+                    sessions=session_routes._SESSIONS,  # noqa: SLF001
+                )
                 return response
             enabled = bool(
                 getattr(request.app.state, "session_persistence_enabled", False)
@@ -253,8 +305,15 @@ async def persist_session_mutations(request, call_next):
                     # Never acknowledge a durable mutation that cannot survive
                     # restart. Restore the coherent pre-request snapshot and
                     # let the caller retry after storage recovers.
+                    attempted_audio_paths = _session_audio_paths(
+                        session_routes._SESSIONS  # noqa: SLF001
+                    )
                     session_routes._SESSIONS.clear()  # noqa: SLF001
                     session_routes._SESSIONS.update(before)  # noqa: SLF001
+                    _retire_audio_paths(
+                        attempted_audio_paths - before_audio_paths,
+                        sessions=session_routes._SESSIONS,  # noqa: SLF001
+                    )
                     return JSONResponse(
                         status_code=503,
                         content={
@@ -269,6 +328,13 @@ async def persist_session_mutations(request, call_next):
                         },
                         headers={"Retry-After": "1"},
                     )
+                current_audio_paths = _session_audio_paths(
+                    session_routes._SESSIONS  # noqa: SLF001
+                )
+                _retire_audio_paths(
+                    before_audio_paths - current_audio_paths,
+                    sessions=session_routes._SESSIONS,  # noqa: SLF001
+                )
             return response
 
 

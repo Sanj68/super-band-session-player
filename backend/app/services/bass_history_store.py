@@ -413,6 +413,28 @@ def _trim_unkept(rows: list[dict[str, Any]], session_id: str) -> list[dict[str, 
     ]
 
 
+def referenced_audio_paths() -> set[str]:
+    """Return audio blobs needed to recover every retained Bass snapshot."""
+
+    with _LOCK:
+        document = _load_unlocked()
+        referenced: set[str] = set()
+        for row in document["snapshots"]:
+            if not isinstance(row, dict):
+                continue
+            context = row.get("context")
+            if not isinstance(context, dict):
+                continue
+            for field_name in (
+                "reference_audio_path",
+                "groove_reference_audio_path",
+            ):
+                value = context.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    referenced.add(value)
+        return referenced
+
+
 def capture(session: object, *, kept: bool = False) -> dict[str, Any]:
     """Store the current exact bass idea, deduplicating identical captures."""
 

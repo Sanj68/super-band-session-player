@@ -51,6 +51,7 @@ from app.services import (
     bass_history_store,
     bridge_store,
     generator,
+    reference_audio_store,
 )
 from app.services.bass_bar_splice import splice_bass_bars
 from app.services.bass_candidate_roles import (
@@ -1394,17 +1395,31 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
                 "message": f"Supported formats: {', '.join(sorted(_ALLOWED_REFERENCE_EXTS))}",
             },
         )
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail={"error": "empty_upload", "message": "Uploaded file is empty."})
-    if len(payload) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail={"error": "file_too_large", "message": "Max upload size is 25MB."})
-
-    target_dir = _REFERENCE_AUDIO_ROOT / s.id
-    target_dir.mkdir(parents=True, exist_ok=True)
-    blob_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
-    target = target_dir / blob_name
-    target.write_bytes(payload)
+    try:
+        target = await reference_audio_store.store_upload(
+            file,
+            root=_REFERENCE_AUDIO_ROOT,
+            session_id=s.id,
+            extension=ext,
+        )
+    except reference_audio_store.EmptyReferenceAudio as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "empty_upload", "message": "Uploaded file is empty."},
+        ) from exc
+    except reference_audio_store.ReferenceAudioTooLarge as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": "file_too_large", "message": "Max upload size is 25MB."},
+        ) from exc
+    except reference_audio_store.ReferenceAudioStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "reference_audio_storage_unavailable",
+                "message": "Reference audio could not be stored safely.",
+            },
+        ) from exc
     staged = replace(s)
     _discard_live_bridge_overlay(staged)
     staged.reference_audio_path = str(target)
@@ -1419,7 +1434,17 @@ async def upload_reference_audio(session_id: str, file: UploadFile = File(...)) 
     staged.suggested_chord_progression = None
     staged.suggested_chord_confidence = None
     staged.harmony_map_source = "none"
-    s = _publish_staged_session(s, staged)
+    try:
+        s = _publish_staged_session(s, staged)
+    except BaseException:
+        try:
+            reference_audio_store.discard_uncommitted(
+                target,
+                root=_REFERENCE_AUDIO_ROOT,
+            )
+        except reference_audio_store.ReferenceAudioStoreError:
+            pass
+        raise
     return _to_state(s, message="Reference audio uploaded. Call /analyze-audio to run DSP analysis.")
 
 
@@ -1518,17 +1543,32 @@ async def upload_groove_reference_audio(session_id: str, file: UploadFile = File
                 "message": f"Supported formats: {', '.join(sorted(_ALLOWED_REFERENCE_EXTS))}",
             },
         )
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail={"error": "empty_upload", "message": "Uploaded file is empty."})
-    if len(payload) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail={"error": "file_too_large", "message": "Max upload size is 25MB."})
-
-    target_dir = _REFERENCE_AUDIO_ROOT / s.id
-    target_dir.mkdir(parents=True, exist_ok=True)
-    blob_name = f"groove_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
-    target = target_dir / blob_name
-    target.write_bytes(payload)
+    try:
+        target = await reference_audio_store.store_upload(
+            file,
+            root=_REFERENCE_AUDIO_ROOT,
+            session_id=s.id,
+            extension=ext,
+            name_prefix="groove_",
+        )
+    except reference_audio_store.EmptyReferenceAudio as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "empty_upload", "message": "Uploaded file is empty."},
+        ) from exc
+    except reference_audio_store.ReferenceAudioTooLarge as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": "file_too_large", "message": "Max upload size is 25MB."},
+        ) from exc
+    except reference_audio_store.ReferenceAudioStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "reference_audio_storage_unavailable",
+                "message": "Reference audio could not be stored safely.",
+            },
+        ) from exc
     staged = replace(s)
     staged.groove_reference_audio_path = str(target)
     staged.groove_reference_audio_filename = filename
@@ -1536,7 +1576,17 @@ async def upload_groove_reference_audio(session_id: str, file: UploadFile = File
     staged.groove_reference_audio_duration_seconds = 0.0
     staged.groove_reference_audio_head_trim_seconds = 0.0
     staged.groove_reference_analysis_override = None
-    s = _publish_staged_session(s, staged)
+    try:
+        s = _publish_staged_session(s, staged)
+    except BaseException:
+        try:
+            reference_audio_store.discard_uncommitted(
+                target,
+                root=_REFERENCE_AUDIO_ROOT,
+            )
+        except reference_audio_store.ReferenceAudioStoreError:
+            pass
+        raise
     return _to_state(s, message="Groove reference uploaded. Analyse it to extract kick, snare and pocket.")
 
 
