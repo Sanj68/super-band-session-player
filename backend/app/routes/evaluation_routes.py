@@ -74,27 +74,28 @@ def get_clip_evaluation(clip_id: str) -> ClipEvaluationResponse:
 
 @router.put("/reference-notes", response_model=ClipEvaluationResponse)
 def set_reference_notes(body: SetReferenceNotesBody) -> ClipEvaluationResponse:
-    records = store.load_records()
-    idx = store.find_clip_index(records, body.clip_id)
-    if idx is None:
-        records.append(ClipEvaluationRecord(clip_id=body.clip_id, reference_notes=body.reference_notes, takes=[]))
-        out = records[-1]
-    else:
+    def update(
+        records: list[ClipEvaluationRecord],
+    ) -> ClipEvaluationRecord:
+        idx = store.find_clip_index(records, body.clip_id)
+        if idx is None:
+            records.append(
+                ClipEvaluationRecord(
+                    clip_id=body.clip_id,
+                    reference_notes=body.reference_notes,
+                    takes=[],
+                )
+            )
+            return records[-1]
         records[idx].reference_notes = body.reference_notes
-        out = records[idx]
-    store.save_records(records)
+        return records[idx]
+
+    out = store.mutate_records(update)
     return ClipEvaluationResponse(record=out)
 
 
 @router.post("/takes", response_model=ClipEvaluationResponse)
 def add_take_evaluation(body: CreateTakeEvaluationBody) -> ClipEvaluationResponse:
-    records = store.load_records()
-    idx = store.find_clip_index(records, body.clip_id)
-    if idx is None:
-        records.append(_empty_record(body.clip_id))
-        idx = len(records) - 1
-
-    rec = records[idx]
     take = BassTakeEvaluation(
         take_id=body.take_id,
         created_at=datetime.now(timezone.utc),
@@ -106,9 +107,23 @@ def add_take_evaluation(body: CreateTakeEvaluationBody) -> ClipEvaluationRespons
         notes=body.notes,
         scores=body.scores,
     )
-    rec.takes = [t for t in rec.takes if t.take_id != body.take_id]
-    rec.takes.append(take)
-    rec.takes.sort(key=lambda t: t.created_at, reverse=True)
-    store.save_records(records)
-    return ClipEvaluationResponse(record=rec)
 
+    def update(
+        records: list[ClipEvaluationRecord],
+    ) -> ClipEvaluationRecord:
+        idx = store.find_clip_index(records, body.clip_id)
+        if idx is None:
+            records.append(_empty_record(body.clip_id))
+            idx = len(records) - 1
+        record = records[idx]
+        record.takes = [
+            existing
+            for existing in record.takes
+            if existing.take_id != body.take_id
+        ]
+        record.takes.append(take)
+        record.takes.sort(key=lambda existing: existing.created_at, reverse=True)
+        return record
+
+    rec = store.mutate_records(update)
+    return ClipEvaluationResponse(record=rec)

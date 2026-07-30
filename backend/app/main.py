@@ -22,9 +22,11 @@ from app.routes.midi_routes import router as midi_router
 from app.routes.setup_routes import router as setup_router
 from app.services import (
     bass_history_store,
+    evaluation_store,
     reference_audio_store,
     session_mutation_gate,
     session_store,
+    setup_store,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,25 @@ async def request_validation_error(
                 jsonable_encoder(exc.errors())
             )
         },
+    )
+
+
+@app.exception_handler(setup_store.SetupStoreError)
+@app.exception_handler(evaluation_store.EvaluationStoreError)
+async def local_json_store_error(
+    _request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    logger.error("Local JSON store requires recovery: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "error": "local_store_recovery_required",
+                "message": str(exc),
+            }
+        },
+        headers={"Retry-After": "1"},
     )
 
 

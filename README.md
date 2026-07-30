@@ -114,6 +114,13 @@ Both runs write receipts under
 the inventory, size, modification time, content hash, or live/history
 references changed after the dry run.
 
+Saved setups and take evaluations also fail closed. If either JSON document is
+invalid or unreadable, the backend returns HTTP 503 and preserves the original
+beside it as `*.quarantine-*`. The quarantine is a recovery barrier: restore a
+validated copy to the canonical filename (or explicitly archive/remove the
+quarantine before starting a new empty store) rather than retrying writes over
+unknown state.
+
 For development without the managed service:
 
 1. Stop the agent:

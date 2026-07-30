@@ -23,15 +23,17 @@ The backend is now owned by a per-user LaunchAgent with fail-closed startup
 preflight, health probing, crash restart, and an explicit port-8001 boundary
 that does not collide with AutoFactory on port 8000.
 The product is not yet ready for a broad “studio-safe” claim because the
-Listener has not yet been stressed inside a production-size mix and the
-remaining P1 data-integrity findings are open.
+Listener has not yet been stressed inside a production-size mix, frontend and
+native UI regression coverage is thin, and desktop packaging remains
+developer-oriented.
 
 Product code was changed to repair the Listener callback boundary, persist the
 accepted Bass output register, seal the accepted fixture, own the backend
-lifecycle, make reference-audio storage transactional, and add regression
-contracts for those boundaries. Live state was deliberately split into
-isolated 88-BPM historical and 116-BPM current test fixtures after the initial
-audit mistook stale 25 July acceptance notes for the latest musical truth.
+lifecycle, make reference-audio storage transactional, harden auxiliary JSON
+stores, and add regression contracts for those boundaries. Live state was
+deliberately split into isolated 88-BPM historical and 116-BPM current test
+fixtures after the initial audit mistook stale 25 July acceptance notes for the
+latest musical truth.
 
 ## Priority findings
 
@@ -277,7 +279,7 @@ Repair completed on 30 July:
 
 The upload lifecycle and known orphan backlog are closed.
 
-### P1 — Saved setups/evaluations can be silently destroyed on read
+### Closed P1 — Saved setups/evaluations could be silently destroyed on read
 
 Unlike the session, candidate, and bass-history stores, `setup_store` and
 `evaluation_store` overwrite invalid/unreadable JSON with an empty document.
@@ -296,6 +298,28 @@ Evidence:
 
 Recommended repair: use the same fail-closed, UUID-temp, quarantine, and
 `RLock` pattern already implemented in `session_store`/`bass_history_store`.
+
+Repair completed on 30 July:
+
+- both stores now validate the complete document and every record; invalid
+  JSON, non-standard constants, unsupported schemas, and invalid rows fail the
+  whole read instead of returning a partial or empty result;
+- corrupt or unreadable originals are moved intact to uniquely named
+  quarantine files;
+- the presence of a quarantine file creates a recovery barrier, so a later
+  read cannot silently initialize an empty replacement;
+- writes serialize strictly, flush and `fsync`, use a UUID-specific temporary
+  file, and atomically replace the canonical document while preserving the
+  prior file on failure;
+- setup create/delete and evaluation note/take routes now hold one `RLock`
+  across the complete read-modify-write transaction;
+- store recovery failures return a structured HTTP 503 with `Retry-After`
+  rather than presenting empty data;
+- concurrent duplicate setup requests produce exactly one create and one
+  conflict, while 16 simultaneous unique take writes are all retained;
+- the generated local evaluation file is now ignored by Git.
+
+The data-loss and concurrent-update finding is closed.
 
 ### P2 — Bass AU can overwrite a failed action message immediately
 
@@ -343,7 +367,7 @@ CSP.
 
 ## Verification performed
 
-- Backend: **1,020 passed**, 4 existing librosa warnings.
+- Backend: **1,030 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
 - Frontend: Vite production build passed.
 - Native source builds:
@@ -373,6 +397,11 @@ CSP.
   - post-clean inventory: 33 protected files, zero missing, zero orphaned, zero
     unsafe;
   - backend restarted and restored the sealed 116-BPM acceptance fixture.
+- Auxiliary JSON stores:
+  - corruption, invalid-record, strict-JSON, transient-read, atomic-write
+    failure, quarantine-barrier, and structured-503 tests passed;
+  - concurrent duplicate setup creation and 16-way evaluation writes passed
+    without lost updates.
 - Candidate store read benchmark: 16.69 ms mean, 21.94 ms max at 3.6 MiB.
 - Fusion property pass: 8,000 build/serialize/restore round trips across
   1, 2, 3, 4, 7, 16, 31, and 128 bars.
@@ -408,6 +437,5 @@ CSP.
 
 ## Recommended order
 
-1. Harden setup/evaluation stores.
-2. Upgrade frontend tooling and add UI/native regression harnesses.
-3. Add a production-load Listener timing/allocation stress harness.
+1. Upgrade frontend tooling and add UI/native regression harnesses.
+2. Add a production-load Listener timing/allocation stress harness.

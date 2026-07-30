@@ -16,6 +16,7 @@ frontend/dist/
 # Local data / generated runs
 backend/data/bass_candidate_runs.json
 backend/data/bass_history.json
+backend/data/bass_take_evaluations.json
 backend/data/sessions.json
 
 # OS / editor

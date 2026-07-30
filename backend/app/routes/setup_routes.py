@@ -26,15 +26,22 @@ def list_setups() -> BandSetupListResponse:
 
 @router.post("", response_model=BandSetupCreated, status_code=201)
 def create_setup(body: BandSetupCreate) -> BandSetupCreated:
-    setups = store.load_setups()
-    if store.find_by_name(setups, body.name) is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "duplicate_name", "message": "A setup with this name already exists.", "name": body.name},
-        )
     setup = BandSetup.model_validate(body.model_dump())
-    setups.append(setup)
-    store.save_setups(setups)
+
+    def create(setups: list[BandSetup]) -> BandSetup:
+        if store.find_by_name(setups, body.name) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate_name",
+                    "message": "A setup with this name already exists.",
+                    "name": body.name,
+                },
+            )
+        setups.append(setup)
+        return setup
+
+    store.mutate_setups(create)
     return BandSetupCreated(setup=setup)
 
 
@@ -60,13 +67,18 @@ def delete_setup(name: str) -> BandSetupDeleted:
     decoded = name.strip()
     if not decoded:
         raise HTTPException(status_code=400, detail={"error": "invalid_name", "message": "Name is required."})
-    setups = store.load_setups()
-    idx = store.find_by_name(setups, decoded)
-    if idx is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "setup_not_found", "message": "No saved setup with that name.", "name": decoded},
-        )
-    deleted_name = setups.pop(idx).name
-    store.save_setups(setups)
+    def delete(setups: list[BandSetup]) -> str:
+        idx = store.find_by_name(setups, decoded)
+        if idx is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "setup_not_found",
+                    "message": "No saved setup with that name.",
+                    "name": decoded,
+                },
+            )
+        return setups.pop(idx).name
+
+    deleted_name = store.mutate_setups(delete)
     return BandSetupDeleted(deleted=deleted_name)
