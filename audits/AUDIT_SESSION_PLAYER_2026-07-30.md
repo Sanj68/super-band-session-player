@@ -321,7 +321,7 @@ Repair completed on 30 July:
 
 The data-loss and concurrent-update finding is closed.
 
-### P2 — Bass AU can overwrite a failed action message immediately
+### Closed P2 — Bass AU could overwrite a failed action message immediately
 
 The Bass polling thread records an HTTP rejection for Regenerate/Keep, then the
 same loop treats the action as handled and calls `fetchPart()` with status
@@ -337,6 +337,26 @@ Evidence:
 Recommended repair: preserve action-result status through the subsequent
 part refresh, as the command path already does with `fetchPart(false)`. Add a
 native test for 409/422/503 responses.
+
+Repair completed on 30 July:
+
+- the polling loop now tracks whether the latest producer action failed and
+  passes that decision into the mandatory part refresh;
+- rejected Regenerate/Keep responses and offline failures refresh playable MIDI
+  silently, leaving the actual engine message visible;
+- successful producer actions still publish the fresh part's normal musical
+  status;
+- later actions in the same polling turn retain last-action semantics;
+- rejected Earlier/Later navigation receives the same protection;
+- the command path keeps its existing explicit silent refresh and deliberate
+  three-second response hold;
+- native compile-time assertions cover HTTP 409, 422, 503, offline, and 200,
+  while a source contract prevents an unconditional status-updating
+  `fetchPart()` from returning to the action loop;
+- the Bass AU Release build, ad-hoc signature, installed-binary digest, and
+  Apple `auval` all passed.
+
+The stale-success status overwrite is closed.
 
 ### P2 — Frontend development dependencies have known advisories
 
@@ -367,7 +387,7 @@ CSP.
 
 ## Verification performed
 
-- Backend: **1,030 passed**, 4 existing librosa warnings.
+- Backend: **1,032 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
 - Frontend: Vite production build passed.
 - Native source builds:
@@ -402,6 +422,12 @@ CSP.
     failure, quarantine-barrier, and structured-503 tests passed;
   - concurrent duplicate setup creation and 16-way evaluation writes passed
     without lost updates.
+- Bass action status:
+  - native 409/422/503/offline/success policy assertions compiled;
+  - source contract confirms failed producer actions use a silent part refresh;
+  - rebuilt and installed Bass AU binary SHA-256:
+    `67c270ce8c76a09480be15ecc779191fa45a934d4db85546746c765ed32a3696`;
+  - strict code-signature verification and Apple `auval` passed.
 - Candidate store read benchmark: 16.69 ms mean, 21.94 ms max at 3.6 MiB.
 - Fusion property pass: 8,000 build/serialize/restore round trips across
   1, 2, 3, 4, 7, 16, 31, and 128 bars.

@@ -90,6 +90,16 @@ constexpr bool isSuccessfulHttpStatus (int statusCode)
     return statusCode >= 200 && statusCode < 300;
 }
 
+constexpr bool shouldPreserveProducerActionStatus (
+    int statusCode,
+    bool responseStreamOpened)
+{
+    return (
+        ! responseStreamOpened
+        || ! isSuccessfulHttpStatus (statusCode)
+    );
+}
+
 constexpr bool shouldInvalidateRejectedFetch (
     int statusCode,
     bool bindingEpochUnchanged,
@@ -299,6 +309,11 @@ static_assert (shouldAcceptFetchedPart (true, true, true));
 static_assert (! shouldAcceptFetchedPart (false, true, true));
 static_assert (! shouldAcceptFetchedPart (true, false, true));
 static_assert (! shouldAcceptFetchedPart (true, true, false));
+static_assert (shouldPreserveProducerActionStatus (409, true));
+static_assert (shouldPreserveProducerActionStatus (422, true));
+static_assert (shouldPreserveProducerActionStatus (503, true));
+static_assert (shouldPreserveProducerActionStatus (0, false));
+static_assert (! shouldPreserveProducerActionStatus (200, true));
 static_assert (shouldInvalidateRejectedFetch (409, true, true));
 static_assert (! shouldInvalidateRejectedFetch (409, false, true));
 static_assert (! shouldInvalidateRejectedFetch (409, true, false));
@@ -436,6 +451,7 @@ void SessionPlayerMidiFXProcessor::run()
     while (! threadShouldExit())
     {
         bool handledAction = false;
+        bool preserveActionStatus = false;
 
         if (keepRequested_.exchange (false))
         {
@@ -455,6 +471,9 @@ void SessionPlayerMidiFXProcessor::run()
             if (auto stream = url.withPOSTData (json).createInputStream (options))
             {
                 const auto responseBody = stream->readEntireStreamAsString();
+                preserveActionStatus = shouldPreserveProducerActionStatus (
+                    statusCode,
+                    true);
                 setStatus (
                     responseMessageOr (
                         responseBody,
@@ -463,7 +482,12 @@ void SessionPlayerMidiFXProcessor::run()
                             : "Idea was not kept."));
             }
             else
+            {
+                preserveActionStatus = shouldPreserveProducerActionStatus (
+                    statusCode,
+                    false);
                 setStatus ("engine offline (keep failed)");
+            }
             fetchHistory();
         }
 
@@ -488,6 +512,9 @@ void SessionPlayerMidiFXProcessor::run()
             if (auto stream = url.withPOSTData (json).createInputStream (options))
             {
                 const auto parsed = juce::JSON::parse (stream->readEntireStreamAsString());
+                preserveActionStatus = shouldPreserveProducerActionStatus (
+                    statusCode,
+                    true);
                 if (statusCode >= 200 && statusCode < 300)
                 {
                     setStatus (parsed.getProperty ("message", "Idea recalled.").toString());
@@ -505,7 +532,10 @@ void SessionPlayerMidiFXProcessor::run()
                 }
             }
             else
+            {
+                preserveActionStatus = true;
                 setStatus (goingEarlier ? "no earlier idea available" : "no later idea available");
+            }
             fetchHistory();
         }
 
@@ -577,6 +607,9 @@ void SessionPlayerMidiFXProcessor::run()
             if (auto stream = url.withPOSTData (json).createInputStream (options))
             {
                 const auto responseBody = stream->readEntireStreamAsString();
+                preserveActionStatus = shouldPreserveProducerActionStatus (
+                    statusCode,
+                    true);
                 if (! isSuccessfulHttpStatus (statusCode))
                     setStatus (
                         responseMessageOr (
@@ -586,7 +619,12 @@ void SessionPlayerMidiFXProcessor::run()
                 // below publishes it after binding validation.
             }
             else
+            {
+                preserveActionStatus = shouldPreserveProducerActionStatus (
+                    statusCode,
+                    false);
                 setStatus ("engine offline (regenerate failed)");
+            }
         }
 
         juce::String command;
@@ -597,6 +635,9 @@ void SessionPlayerMidiFXProcessor::run()
         if (command.isNotEmpty())
         {
             handledAction = true;
+            // The command path performs its own silent refresh and deliberate
+            // three-second reply hold before the normal status may resume.
+            preserveActionStatus = false;
             setStatus ("\"" + command + "\" ...");
             juce::DynamicObject::Ptr body = new juce::DynamicObject();
             const auto sessionId = boundSessionId();
@@ -631,7 +672,7 @@ void SessionPlayerMidiFXProcessor::run()
         const auto refreshRequested = refreshRequested_.exchange (false);
         if (shouldPollEngine (refreshRequested, handledAction, transportRunning_.load()))
         {
-            fetchPart();
+            fetchPart (! preserveActionStatus);
             // Advice is a receipt for the current generated take, not a live
             // analyser readout. Keep polling the part while transport runs so
             // frame/connection status stays current, but refresh the receipt
