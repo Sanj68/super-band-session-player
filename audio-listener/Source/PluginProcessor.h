@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -72,6 +73,7 @@ private:
 };
 
 class SessionPlayerListenerAudioProcessor final : public juce::AudioProcessor
+                                                , private juce::Thread
 {
 public:
     SessionPlayerListenerAudioProcessor();
@@ -107,21 +109,54 @@ public:
 private:
     static constexpr int fftOrder = 13;
     static constexpr int fftSize = 1 << fftOrder;
+    static constexpr int analysisQueueCapacity = 4;
+
+    struct AnalysisJob
+    {
+        std::array<float, fftSize> samples {};
+        double sampleRate = 44100.0;
+        double tempo = 120.0;
+        double tempoConfidence = 0.0;
+        double ppqPosition = -1.0;
+        double frameStartSeconds = 0.0;
+        double durationSeconds = 0.125;
+        int barIndex = 0;
+        std::uint64_t captureEpoch = 0;
+        bool playing = false;
+    };
+
+    static_assert(
+        std::is_trivially_copyable<AnalysisJob>::value,
+        "The audio callback may hand off only fixed-size POD analysis jobs.");
+    static_assert(
+        std::atomic<std::uint64_t>::is_always_lock_free,
+        "Capture-epoch signalling must remain lock-free on the audio callback.");
 
     void resetAnalysisState(double sampleRate);
     void resetCaptureWindow();
     void clearBarAnalysisWindow();
     void pushAnalysisSample(float sample);
     void maybeEmitBarFrame(const juce::AudioPlayHead::PositionInfo& position);
-    HarmonicFrame analyseCurrentWindow(double tempo, int barIndex);
-    std::array<float, 12> extractChroma();
+    bool queueCurrentWindow(
+        double tempo,
+        double tempoConfidence,
+        double ppqPosition,
+        int barIndex,
+        bool playing);
+    void run() override;
+    void processAnalysisJob(const AnalysisJob& job);
+    HarmonicFrame analyseWindow(const AnalysisJob& job);
+    std::array<float, 12> extractChroma(const AnalysisJob& job);
     static juce::String cadenceFromChroma(const std::array<float, 12>& chroma, int tonic);
     static double onsetStrengthForWindow(const std::array<float, fftSize>& samples);
 
     HarmonicBridgeClient bridgeClient;
+    juce::AbstractFifo analysisFifo { analysisQueueCapacity };
+    std::array<AnalysisJob, analysisQueueCapacity> analysisJobs {};
+    std::atomic<bool> analysisTransportRunning { false };
+    std::atomic<std::uint64_t> activeAnalysisEpoch { 0 };
     juce::dsp::FFT fft { fftOrder };
     std::array<float, fftSize> window {};
-    std::array<float, fftSize> analysisBuffer {};
     std::array<float, fftSize * 2> fftBuffer {};
     std::array<float, fftSize> fftWindow {};
 

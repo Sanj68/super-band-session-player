@@ -70,29 +70,56 @@ npm run dev   # http://localhost:5173
 
 ## Logic Quickstart
 
-1. Start the backend:
+The normal macOS setup runs the backend as a per-user LaunchAgent on
+`127.0.0.1:8001`:
+
+```bash
+scripts/session_player_backend.sh install   # once
+scripts/session_player_backend.sh status
+```
+
+The agent starts at login, restarts after a crash, enables the live Bridge,
+and refuses to launch if port 8001 is already owned. Its startup preflight also
+checks that the AU configuration uses loopback port 8001, that the configured
+session exists, and that the durable session snapshot—including any acceptance
+receipt—is valid. Port 8000 is never used by Session Player.
+
+Operations:
+
+```bash
+scripts/session_player_backend.sh start
+scripts/session_player_backend.sh stop
+scripts/session_player_backend.sh restart
+scripts/session_player_backend.sh health
+scripts/session_player_backend.sh logs
+```
+
+For development without the managed service:
+
+1. Stop the agent:
+   ```bash
+   scripts/session_player_backend.sh stop
+   ```
+2. Start the backend:
    ```bash
    cd backend
    source .venv/bin/activate
-   uvicorn app.main:app --reload
+   SESSION_PLAYER_ENABLE_GROOVE_BRIDGE=true uvicorn app.main:app --reload --port 8001
    ```
-2. Start the frontend:
+3. Start the frontend:
    ```bash
    cd frontend
    npm run dev
    ```
-3. Open `http://localhost:5173`, choose the session settings, and generate the session.
-4. Click **Download MIDI for Logic** for one combined MIDI file, or download individual lane MIDI files for drums, bass, chords, and lead.
-5. Drag the downloaded `.mid` file into Logic.
-6. Assign Logic instruments to the imported MIDI tracks.
+4. Open `http://localhost:5173`, choose the session settings, and generate the session.
+5. Click **Download MIDI for Logic** for one combined MIDI file, or download individual lane MIDI files for drums, bass, chords, and lead.
+6. Drag the downloaded `.mid` file into Logic.
+7. Assign Logic instruments to the imported MIDI tracks.
 
 ## Live source-to-bass proof
 
-1. Start the backend with live analysis enabled:
-   ```bash
-   cd backend
-   SESSION_PLAYER_ENABLE_GROOVE_BRIDGE=true .venv/bin/uvicorn app.main:app --reload
-   ```
+1. Confirm the managed backend is healthy with
+   `scripts/session_player_backend.sh health`.
 2. Create the working session in the web app. Analyser AUs with no explicit
    session configured automatically bind to the newest created session.
 3. On the source track or bus, insert both audio effects:

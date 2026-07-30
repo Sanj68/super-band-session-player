@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -385,13 +386,24 @@ bool HarmonicBridgeClient::postJson(
 SessionPlayerListenerAudioProcessor::SessionPlayerListenerAudioProcessor()
     : AudioProcessor(BusesProperties()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
-          .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      Thread("Session Player Listener Analysis")
 {
+    juce::dsp::WindowingFunction<float>::fillWindowingTables(
+        fftWindow.data(),
+        static_cast<size_t>(fftSize),
+        juce::dsp::WindowingFunction<float>::hann,
+        false);
+
     bridgeClient.start();
+    startThread();
 }
 
 SessionPlayerListenerAudioProcessor::~SessionPlayerListenerAudioProcessor()
 {
+    analysisTransportRunning.store(false);
+    signalThreadShouldExit();
+    stopThread(2000);
     bridgeClient.stop();
 }
 
@@ -432,6 +444,7 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
     const auto transportRunning = position.getIsPlaying() || position.getIsRecording();
     if (! transportRunning)
     {
+        analysisTransportRunning.store(false);
         bridgeClient.setTransportRunning(false);
         if (wasTransportRunning)
             resetCaptureWindow();
@@ -447,6 +460,7 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
     {
         // Treat host count-in/pre-roll as silence for analysis. PPQ zero
         // reopens the client and establishes a fresh capture epoch.
+        analysisTransportRunning.store(false);
         bridgeClient.setTransportRunning(false);
         resetCaptureWindow();
         wasTransportRunning = false;
@@ -480,9 +494,11 @@ void SessionPlayerListenerAudioProcessor::processBlock(juce::AudioBuffer<float>&
     if (startsNewCapture)
     {
         ++captureEpoch;
+        activeAnalysisEpoch.store(captureEpoch);
         resetCaptureWindow();
     }
     wasTransportRunning = true;
+    analysisTransportRunning.store(true);
     bridgeClient.setTransportRunning(true);
 
     // PPQ identifies the bar at the start of this block. Close the previous
@@ -593,17 +609,12 @@ float SessionPlayerListenerAudioProcessor::getCurrentKeyConfidence() const
 
 void SessionPlayerListenerAudioProcessor::resetAnalysisState(double sampleRate)
 {
+    analysisTransportRunning.store(false);
     currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     wasTransportRunning = false;
     lastPpqPosition = -1.0;
     lastPlayingCallbackMs = 0.0;
     resetCaptureWindow();
-
-    juce::dsp::WindowingFunction<float>::fillWindowingTables(
-        fftWindow.data(),
-        static_cast<size_t>(fftSize),
-        juce::dsp::WindowingFunction<float>::hann,
-        false);
 }
 
 void SessionPlayerListenerAudioProcessor::resetCaptureWindow()
@@ -620,7 +631,6 @@ void SessionPlayerListenerAudioProcessor::clearBarAnalysisWindow()
     samplesSinceLastFallbackBar = 0.0;
     writeIndex = 0;
     validSamples = 0;
-    window.fill(0.0f);
 }
 
 void SessionPlayerListenerAudioProcessor::pushAnalysisSample(float sample)
@@ -657,27 +667,13 @@ void SessionPlayerListenerAudioProcessor::maybeEmitBarFrame(const juce::AudioPla
 
     if (validSamples >= fftSize / 2)
     {
-        auto frame = analyseCurrentWindow(tempo, barIndex);
-        frame.sampleRate = currentSampleRate;
-        frame.tempoConfidence = position.getBpm().hasValue() ? 1.0 : 0.25;
-        frame.captureEpoch = captureEpoch;
-        frame.playing = position.getIsPlaying() || position.getIsRecording();
-        frame.frameStartSeconds = juce::jmax(
-            0.0,
-            (processedSamples - static_cast<double>(validSamples)) / currentSampleRate);
-        frame.durationSeconds = juce::jmax(
-            0.001,
-            static_cast<double>(validSamples) / currentSampleRate);
-        frame.ppqPosition = framePpq;
-        bridgeClient.pushFrame(frame);
-
-        {
-            const juce::ScopedLock lock(keyLock);
-            currentKeyText = frame.key + " " + frame.scale;
-            currentKeyConfidence = frame.keyConfidence;
-        }
-
-        lastEmittedBar = barIndex;
+        if (queueCurrentWindow(
+                tempo,
+                position.getBpm().hasValue() ? 1.0 : 0.25,
+                framePpq,
+                barIndex,
+                position.getIsPlaying() || position.getIsRecording()))
+            lastEmittedBar = barIndex;
     }
 
     if (! position.getPpqPosition().hasValue())
@@ -685,10 +681,108 @@ void SessionPlayerListenerAudioProcessor::maybeEmitBarFrame(const juce::AudioPla
     clearBarAnalysisWindow();
 }
 
-HarmonicFrame SessionPlayerListenerAudioProcessor::analyseCurrentWindow(double tempo, int barIndex)
+bool SessionPlayerListenerAudioProcessor::queueCurrentWindow(
+    double tempo,
+    double tempoConfidence,
+    double ppqPosition,
+    int barIndex,
+    bool playing)
 {
-    const auto chroma = extractChroma();
-    const auto onsetStrength = onsetStrengthForWindow(analysisBuffer);
+    const auto scope = analysisFifo.write(1);
+    if (scope.blockSize1 <= 0)
+        return false;
+
+    auto& job = analysisJobs[static_cast<size_t>(scope.startIndex1)];
+    const auto sampleCount = juce::jlimit(0, fftSize, validSamples);
+    const auto leadingZeros = fftSize - sampleCount;
+    std::fill_n(job.samples.begin(), leadingZeros, 0.0f);
+
+    if (sampleCount > 0)
+    {
+        const auto start = (writeIndex + fftSize - sampleCount) % fftSize;
+        const auto firstCount = juce::jmin(sampleCount, fftSize - start);
+        std::copy_n(
+            window.begin() + start,
+            firstCount,
+            job.samples.begin() + leadingZeros);
+
+        const auto secondCount = sampleCount - firstCount;
+        if (secondCount > 0)
+            std::copy_n(
+                window.begin(),
+                secondCount,
+                job.samples.begin() + leadingZeros + firstCount);
+    }
+
+    job.sampleRate = currentSampleRate;
+    job.tempo = tempo;
+    job.tempoConfidence = tempoConfidence;
+    job.ppqPosition = ppqPosition;
+    job.frameStartSeconds = juce::jmax(
+        0.0,
+        (processedSamples - static_cast<double>(sampleCount)) / currentSampleRate);
+    job.durationSeconds = juce::jmax(
+        0.001,
+        static_cast<double>(sampleCount) / currentSampleRate);
+    job.barIndex = barIndex;
+    job.captureEpoch = captureEpoch;
+    job.playing = playing;
+
+    // ScopedWrite publishes the fully populated POD slot on destruction.
+    return true;
+}
+
+void SessionPlayerListenerAudioProcessor::run()
+{
+    while (! threadShouldExit())
+    {
+        const auto available = juce::jmin(2, analysisFifo.getNumReady());
+        if (available <= 0)
+        {
+            wait(10);
+            continue;
+        }
+
+        const auto scope = analysisFifo.read(available);
+        for (int i = 0; i < scope.blockSize1; ++i)
+            processAnalysisJob(
+                analysisJobs[static_cast<size_t>(scope.startIndex1 + i)]);
+        for (int i = 0; i < scope.blockSize2; ++i)
+            processAnalysisJob(
+                analysisJobs[static_cast<size_t>(scope.startIndex2 + i)]);
+        // ScopedRead releases processed slots when it leaves scope.
+    }
+}
+
+void SessionPlayerListenerAudioProcessor::processAnalysisJob(
+    const AnalysisJob& job)
+{
+    if (
+        ! analysisTransportRunning.load()
+        || job.captureEpoch != activeAnalysisEpoch.load()
+    )
+        return;
+
+    auto frame = analyseWindow(job);
+
+    if (
+        ! analysisTransportRunning.load()
+        || job.captureEpoch != activeAnalysisEpoch.load()
+    )
+        return;
+
+    bridgeClient.pushFrame(frame);
+
+    const juce::ScopedLock lock(keyLock);
+    currentKeyText = frame.key + " " + frame.scale;
+    currentKeyConfidence.store(frame.keyConfidence);
+}
+
+HarmonicFrame SessionPlayerListenerAudioProcessor::analyseWindow(
+    const AnalysisJob& job)
+{
+    const auto chroma = extractChroma(job);
+    const auto onsetStrength = onsetStrengthForWindow(job.samples);
 
     auto bestScore = -std::numeric_limits<double>::infinity();
     auto bestTonic = 0;
@@ -723,37 +817,41 @@ HarmonicFrame SessionPlayerListenerAudioProcessor::analyseCurrentWindow(double t
     frame.cadenceConfidence = static_cast<float>(
         juce::jlimit(0.0, 1.0, onsetStrength < 0.015 ? 0.25 : onsetStrength * 4.0));
     frame.chroma = chroma;
-    frame.tempo = tempo;
-    frame.barIndex = barIndex;
+    frame.sampleRate = job.sampleRate;
+    frame.tempo = job.tempo;
+    frame.tempoConfidence = job.tempoConfidence;
+    frame.ppqPosition = job.ppqPosition;
+    frame.frameStartSeconds = job.frameStartSeconds;
+    frame.durationSeconds = job.durationSeconds;
+    frame.barIndex = job.barIndex;
+    frame.captureEpoch = job.captureEpoch;
+    frame.playing = job.playing;
     return frame;
 }
 
-std::array<float, 12> SessionPlayerListenerAudioProcessor::extractChroma()
+std::array<float, 12> SessionPlayerListenerAudioProcessor::extractChroma(
+    const AnalysisJob& job)
 {
-    analysisBuffer.fill(0.0f);
     fftBuffer.fill(0.0f);
 
-    const auto start = (writeIndex + fftSize - validSamples) % fftSize;
-    const auto leadingZeros = fftSize - validSamples;
-
-    for (int i = 0; i < validSamples; ++i)
-    {
-        const auto sourceIndex = (start + i) % fftSize;
-        const auto destIndex = leadingZeros + i;
-        analysisBuffer[static_cast<size_t>(destIndex)] = window[static_cast<size_t>(sourceIndex)];
-    }
-
     for (int i = 0; i < fftSize; ++i)
-        fftBuffer[static_cast<size_t>(i)] = analysisBuffer[static_cast<size_t>(i)] * fftWindow[static_cast<size_t>(i)];
+        fftBuffer[static_cast<size_t>(i)] = (
+            job.samples[static_cast<size_t>(i)]
+            * fftWindow[static_cast<size_t>(i)]
+        );
 
     fft.performFrequencyOnlyForwardTransform(fftBuffer.data(), true);
 
     std::array<float, 12> chroma {};
-    const auto nyquist = currentSampleRate * 0.5;
+    const auto nyquist = job.sampleRate * 0.5;
 
     for (int bin = 1; bin < fftSize / 2; ++bin)
     {
-        const auto frequency = static_cast<double>(bin) * currentSampleRate / static_cast<double>(fftSize);
+        const auto frequency = (
+            static_cast<double>(bin)
+            * job.sampleRate
+            / static_cast<double>(fftSize)
+        );
         if (frequency < 40.0 || frequency > juce::jmin(5000.0, nyquist))
             continue;
 

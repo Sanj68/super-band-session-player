@@ -17,7 +17,7 @@ from typing import Final, Iterable, Literal
 import pretty_midi
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.models.session import (
     AddPartToSuitBody,
@@ -46,6 +46,7 @@ from app.models.session import (
 )
 from app.routes.midi_routes import get_audition_player
 from app.services import (
+    acceptance_fixture,
     bass_candidate_store,
     bass_history_store,
     bridge_store,
@@ -111,6 +112,18 @@ class NewFusionDnaBody(BaseModel):
     include_lead: bool = False
 
 
+class SealAcceptanceFixtureBody(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Acceptance fixture name cannot be blank")
+        return normalized
+
+
 _LANE_REGENERATION_ORDER: Final[tuple[LaneName, ...]] = (
     LaneName.drums,
     LaneName.bass,
@@ -150,6 +163,10 @@ class StoredSession:
     key: str
     scale: str
     bar_count: int
+    acceptance_fixture_name: str | None = None
+    acceptance_sealed_at: str | None = None
+    acceptance_fixture_manifest: dict[str, object] | None = None
+    acceptance_receipt_sha256: str | None = None
     session_preset: str | None = None
     lead_style: str = "melodic"
     bass_style: str = "supportive"
@@ -166,6 +183,7 @@ class StoredSession:
     bass_expression: float = 0.5
     bass_performance_controls: dict[str, float] | None = None
     bass_phase_offset_beats: float = 0.0
+    bass_output_transpose_semitones: int = 0
     bass_density_bias: float = 0.0
     bass_seed: int | None = None
     fusion_dna_seed: int | None = None
@@ -476,6 +494,38 @@ def _publish_staged_session(
 
     if staged.id != current.id:
         raise ValueError("Cannot publish a staged session under a different id")
+    if current.acceptance_receipt_sha256 is not None:
+        try:
+            durable_current = _durable_session_view(current)
+            durable_staged = _durable_session_view(staged)
+            acceptance_fixture.validate_sealed_session(durable_current)
+            manifest = current.acceptance_fixture_manifest
+            if (
+                staged.acceptance_fixture_manifest != manifest
+                or staged.acceptance_receipt_sha256
+                != current.acceptance_receipt_sha256
+                or acceptance_fixture.observed_manifest(
+                    durable_staged,
+                    manifest,
+                )
+                != manifest
+            ):
+                raise acceptance_fixture.AcceptanceFixtureError(
+                    "Acceptance fixture content is immutable"
+                )
+        except acceptance_fixture.AcceptanceFixtureError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "acceptance_fixture_sealed",
+                    "fixture_name": current.acceptance_fixture_name,
+                    "receipt_sha256": current.acceptance_receipt_sha256,
+                    "message": (
+                        "This accepted session is sealed. Duplicate it to a new "
+                        "working session before changing settings or MIDI."
+                    ),
+                },
+            ) from exc
     _SESSIONS[current.id] = staged
     return staged
 
@@ -811,6 +861,9 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         key=s.key,
         scale=s.scale,
         bar_count=s.bar_count,
+        acceptance_fixture_name=s.acceptance_fixture_name,
+        acceptance_sealed_at=s.acceptance_sealed_at,
+        acceptance_receipt_sha256=s.acceptance_receipt_sha256,
         session_preset=s.session_preset,
         lead_style=s.lead_style,
         bass_style=s.bass_style,
@@ -839,6 +892,7 @@ def _to_state(s: StoredSession, message: str | None = None) -> SessionState:
         bass_performance_controls_notice=performance_controls.notice,
         bass_density_bias=s.bass_density_bias,
         bass_phase_offset_beats=s.bass_phase_offset_beats,
+        bass_output_transpose_semitones=s.bass_output_transpose_semitones,
         bass_performance_available=s.bass_performance_bytes is not None,
         bass_seed=s.bass_seed,
         fusion_contract_active=fusion_contract_active,
@@ -1099,6 +1153,7 @@ def _duplicate_stored_session(src: StoredSession, new_id: str) -> StoredSession:
             else None
         ),
         bass_phase_offset_beats=src.bass_phase_offset_beats,
+        bass_output_transpose_semitones=src.bass_output_transpose_semitones,
         bass_density_bias=src.bass_density_bias,
         bass_seed=src.bass_seed,
         fusion_dna_seed=src.fusion_dna_seed,
@@ -1301,6 +1356,7 @@ def create_session(body: SessionCreate) -> SessionCreated:
             else None
         ),
         bass_phase_offset_beats=body.bass_phase_offset_beats,
+        bass_output_transpose_semitones=body.bass_output_transpose_semitones,
         bass_density_bias=body.bass_density_bias,
         drum_player=dp_ins,
         chord_instrument=ci_ins,
@@ -1550,6 +1606,57 @@ def duplicate_session(session_id: str) -> SessionState:
     dup = _duplicate_stored_session(src, new_id)
     _SESSIONS[new_id] = dup
     return _to_state(dup, message="Session duplicated. You are now working on a variation.")
+
+
+@router.post("/{session_id}/acceptance-fixture", response_model=SessionState)
+def seal_acceptance_fixture(
+    session_id: str,
+    body: SealAcceptanceFixtureBody,
+) -> SessionState:
+    """Irreversibly seal the durable session state behind a content receipt."""
+
+    current = _get_session_or_404(session_id)
+    if current.acceptance_receipt_sha256 is not None:
+        try:
+            acceptance_fixture.validate_sealed_session(
+                _durable_session_view(current)
+            )
+        except acceptance_fixture.AcceptanceFixtureError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "acceptance_fixture_receipt_invalid",
+                    "message": str(exc),
+                },
+            ) from exc
+        if current.acceptance_fixture_name != body.name:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "acceptance_fixture_already_sealed",
+                    "fixture_name": current.acceptance_fixture_name,
+                    "receipt_sha256": current.acceptance_receipt_sha256,
+                },
+            )
+        return _to_state(
+            current,
+            message="Acceptance fixture already sealed; receipt verified.",
+        )
+
+    staged = _durable_session_view(current)
+    staged.acceptance_fixture_name = body.name
+    staged.acceptance_sealed_at = datetime.now(timezone.utc).isoformat()
+    staged.acceptance_fixture_manifest = acceptance_fixture.build_manifest(staged)
+    staged.acceptance_receipt_sha256 = acceptance_fixture.receipt_sha256(
+        staged.acceptance_fixture_manifest
+    )
+    sealed = _publish_staged_session(current, staged)
+    return _to_state(
+        sealed,
+        message=(
+            "Acceptance fixture sealed. Duplicate it before making future changes."
+        ),
+    )
 
 
 def _mark_changed_fusion_renders_stale(
@@ -1829,6 +1936,11 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
     if body.bass_phase_offset_beats is not None:
         staged.bass_phase_offset_beats = float(body.bass_phase_offset_beats)
         parts.append("Bass phase offset updated")
+    if body.bass_output_transpose_semitones is not None:
+        staged.bass_output_transpose_semitones = int(
+            body.bass_output_transpose_semitones
+        )
+        parts.append("Bass output register updated")
     if "drum_player" in body.model_dump(exclude_unset=True):
         staged.drum_player = body.drum_player.value if body.drum_player is not None else None
         parts.append("Drum player updated")
@@ -1855,7 +1967,14 @@ def patch_session(session_id: str, body: SessionPatch) -> SessionState:
             "Fusion render marked stale for "
             + ", ".join(lane.value for lane in stale_lanes)
         )
-    msg = ". ".join(parts) + ". Regenerate affected lane(s) to rebuild MIDI."
+    playback_only_fields = {
+        "bass_phase_offset_beats",
+        "bass_output_transpose_semitones",
+    }
+    if body.model_fields_set.issubset(playback_only_fields):
+        msg = ". ".join(parts) + ". Existing bass MIDI is unchanged."
+    else:
+        msg = ". ".join(parts) + ". Regenerate affected lane(s) to rebuild MIDI."
     s = _publish_staged_session(s, staged)
     return _to_state(s, message=msg)
 
@@ -2385,8 +2504,7 @@ def _commit_regenerated_lanes(
     # Mapping replacement is atomic under CPython. Concurrent GET/plugin polls
     # therefore see either the complete prior revision or complete new one,
     # never clean MIDI from one take and performance/preview from another.
-    _SESSIONS[destination.id] = staged
-    return staged
+    return _publish_staged_session(destination, staged)
 
 
 @router.post("/{session_id}/generate-around-anchor", response_model=SessionState)
@@ -2587,8 +2705,7 @@ def add_part_to_suit(session_id: str, body: AddPartToSuitBody) -> SessionState:
     staged.lead_preview = l_prev
     if staged.bridge_live_overlay_active:
         _promote_live_bridge_overlay(staged)
-    _SESSIONS[s.id] = staged
-    s = staged
+    s = _publish_staged_session(s, staged)
     msg = _SUIT_PART_MESSAGES.get(mode_v, "Generated a new lead to suit the current session.")
     return _to_state(s, message=msg)
 

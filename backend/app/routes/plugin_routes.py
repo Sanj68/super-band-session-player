@@ -224,6 +224,12 @@ class PluginBassPart(BaseModel):
     bass_instrument: str
     bass_player: str | None
     phase_offset_beats: float = 0.0
+    output_transpose_semitones: int = Field(
+        default=0,
+        ge=-24,
+        le=24,
+        multiple_of=12,
+    )
     notes: list[PluginNote]
     automation: list[PluginAutomationEvent] = Field(default_factory=list)
 
@@ -326,6 +332,7 @@ def _bass_part_for_session(s: session_routes.StoredSession) -> PluginBassPart:
         bass_instrument=s.bass_instrument,
         bass_player=s.bass_player,
         phase_offset_beats=float(s.bass_phase_offset_beats),
+        output_transpose_semitones=int(s.bass_output_transpose_semitones),
         notes=notes,
         automation=automation,
     )

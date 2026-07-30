@@ -14,6 +14,7 @@ from uuid import uuid4
 from pydantic import BaseModel, TypeAdapter
 
 from app.models.session import SourceAnalysis
+from app.services import acceptance_fixture
 from app.services.fusion_contract import FusionGrooveContract
 from app.utils import music_theory as mt
 
@@ -176,6 +177,15 @@ def _payload_to_session(payload: object, session_type: type[SessionT]) -> Sessio
             raise ValueError(f"Invalid persisted {field_name}")
         if maximum is not None and value > maximum:
             raise ValueError(f"Invalid persisted {field_name}")
+    output_transpose = getattr(session, "bass_output_transpose_semitones")
+    if (
+        isinstance(output_transpose, bool)
+        or not isinstance(output_transpose, int)
+        or output_transpose < -24
+        or output_transpose > 24
+        or output_transpose % 12 != 0
+    ):
+        raise ValueError("Invalid persisted bass_output_transpose_semitones")
     lock = getattr(session, "bass_lock_to_groove")
     if lock is not None and (
         not math.isfinite(float(lock))
@@ -268,6 +278,10 @@ def _payload_to_session(payload: object, session_type: type[SessionT]) -> Sessio
             setattr(session, "fusion_drums_render_stale", True)
             setattr(session, "fusion_bass_render_stale", True)
             setattr(session, "fusion_chords_render_stale", True)
+    try:
+        acceptance_fixture.validate_sealed_session(session)
+    except acceptance_fixture.AcceptanceFixtureError as exc:
+        raise ValueError(str(exc)) from exc
     return session
 
 

@@ -37,6 +37,7 @@ def test_full_session_round_trip_preserves_order_midi_and_analysis(
         bar_count=4,
         bass_style="melodic",
         bass_density_bias=0.35,
+        bass_output_transpose_semitones=12,
         bass_bytes=b"MThd-bass",
         bass_performance_bytes=b"MThd-performance",
         drum_bytes=b"MThd-drums",
@@ -68,6 +69,7 @@ def test_full_session_round_trip_preserves_order_midi_and_analysis(
     assert restored["session-a"].chords_bytes == b"MThd-chords"
     assert restored["session-a"].lead_bytes == b"MThd-lead"
     assert restored["session-a"].bass_density_bias == 0.35
+    assert restored["session-a"].bass_output_transpose_semitones == 12
     assert restored["session-a"].bass_locked is True
     assert restored["session-a"].source_analysis_override == first.source_analysis_override
     assert (
@@ -115,6 +117,7 @@ def test_fusion_contract_round_trip_and_legacy_none(
     assert restored[fusion.id].fusion_dna_revision == 2
     assert restored[legacy.id].fusion_contract_payload is None
     assert restored[legacy.id].fusion_dna_revision == 0
+    assert restored[legacy.id].bass_output_transpose_semitones == 0
 
 
 def test_fusion_render_freshness_round_trips_and_legacy_payload_fails_closed(

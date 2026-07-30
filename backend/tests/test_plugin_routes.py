@@ -185,6 +185,44 @@ def test_bass_part_exposes_patchable_playback_phase(client: TestClient) -> None:
     assert part.json()["phase_offset_beats"] == pytest.approx(1.0)
 
 
+def test_bass_part_exposes_persisted_output_register_without_rewriting_notes(
+    client: TestClient,
+) -> None:
+    sid = _create_session_with_bass(client)
+    before = client.get(
+        "/api/plugin/bass-part",
+        params={"session_id": sid},
+    )
+    assert before.status_code == 200, before.text
+
+    patched = client.patch(
+        f"/api/sessions/{sid}",
+        json={"bass_output_transpose_semitones": 12},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["bass_output_transpose_semitones"] == 12
+    assert "Existing bass MIDI is unchanged" in patched.json()["message"]
+
+    after = client.get(
+        "/api/plugin/bass-part",
+        params={"session_id": sid},
+    )
+    assert after.status_code == 200, after.text
+    assert after.json()["output_transpose_semitones"] == 12
+    assert after.json()["notes"] == before.json()["notes"]
+
+
+def test_bass_output_register_rejects_non_octave_shift(client: TestClient) -> None:
+    sid = _create_session_with_bass(client)
+
+    response = client.patch(
+        f"/api/sessions/{sid}",
+        json={"bass_output_transpose_semitones": 7},
+    )
+
+    assert response.status_code == 422
+
+
 def test_bass_part_honours_explicit_session_binding(client: TestClient) -> None:
     first = _create_session_with_bass(client)
     second = _create_session_with_bass(client)

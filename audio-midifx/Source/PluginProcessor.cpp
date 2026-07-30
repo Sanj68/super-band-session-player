@@ -159,6 +159,10 @@ std::uint64_t playbackFingerprintFor (const BassPart& part)
     mixFingerprint (hash, static_cast<std::uint64_t> (part.beatsPerBar));
     mixFingerprint (hash, static_cast<std::uint64_t> (part.version));
     mixFingerprint (hash, doubleFingerprintBits (part.phaseOffsetBeats));
+    mixFingerprint (
+        hash,
+        static_cast<std::uint64_t> (
+            static_cast<std::int64_t> (part.outputTransposeSemitones)));
     mixFingerprint (hash, static_cast<std::uint64_t> (part.notes.size()));
     for (const auto& note : part.notes)
     {
@@ -807,6 +811,16 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
     fresh->phaseOffsetBeats = std::isfinite (rawPhaseOffset)
         ? juce::jlimit (0.0, 4.0, rawPhaseOffset)
         : 0.0;
+    const auto rawOutputTranspose = (int) parsed.getProperty (
+        "output_transpose_semitones",
+        0);
+    fresh->outputTransposeSemitones = (
+        rawOutputTranspose >= -24
+        && rawOutputTranspose <= 24
+        && rawOutputTranspose % 12 == 0
+    )
+        ? rawOutputTranspose
+        : 0;
     if (auto* arr = parsed.getProperty ("notes", juce::var()).getArray())
     {
         fresh->notes.reserve (
@@ -957,6 +971,12 @@ void SessionPlayerMidiFXProcessor::fetchPart (bool updateStatus)
             status += " | " + fresh->bassArticulationNotice;
         if (fresh->bassPerformanceControlsNotice.isNotEmpty())
             status += " | " + fresh->bassPerformanceControlsNotice;
+        if (fresh->outputTransposeSemitones != 0)
+            status += " | output "
+                      + juce::String (
+                          fresh->outputTransposeSemitones > 0 ? "+" : "")
+                      + juce::String (fresh->outputTransposeSemitones)
+                      + " st";
         setStatus (status);
     }
 }
@@ -1475,6 +1495,10 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
     for (const auto& due : dueNoteOns_)
     {
         const auto& n = part->notes[static_cast<size_t> (due.noteIndex)];
+        const auto outputPitch = juce::jlimit (
+            0,
+            127,
+            n.pitch + part->outputTransposeSemitones);
         const int samplePos = due.samplePos;
         // Natural expiries win exact-time ties. A later expiry remains active
         // so the retrigger guard below can replace it at this earlier onset.
@@ -1483,7 +1507,7 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
         // rotation can wrap late source notes ahead of early source notes.
         for (auto it = active_.begin(); it != active_.end();)
         {
-            if (it->pitch == n.pitch)
+            if (it->pitch == outputPitch)
             {
                 midi.addEvent (juce::MidiMessage::noteOff (1, it->pitch), samplePos);
                 it = active_.erase (it);
@@ -1491,12 +1515,12 @@ void SessionPlayerMidiFXProcessor::processBlock (juce::AudioBuffer<float>& buffe
             else
                 ++it;
         }
-        midi.addEvent (juce::MidiMessage::noteOn (1, n.pitch, (juce::uint8) n.velocity),
+        midi.addEvent (juce::MidiMessage::noteOn (1, outputPitch, (juce::uint8) n.velocity),
                        samplePos);
         const int durationSamples = juce::jmax (
             1, (int) std::round (n.durBeats / beatsPerSample));
         const int noteEndSample = samplePos + durationSamples;
-        active_.push_back ({ n.pitch, noteEndSample });
+        active_.push_back ({ outputPitch, noteEndSample });
     }
 
     // Finish all expiries that land inside this block. A note ending exactly

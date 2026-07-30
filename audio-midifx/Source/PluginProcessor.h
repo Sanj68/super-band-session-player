@@ -68,6 +68,7 @@ struct BassPart
     int grooveSourceFrameCount = 0;
     juce::String grooveSourceNotice;
     double phaseOffsetBeats = 0.0;
+    int outputTransposeSemitones = 0;
     std::vector<BassPartNote> notes;
     std::vector<BassPartAutomationEvent> automation;
     std::uint64_t playbackFingerprint = 0;

@@ -332,6 +332,16 @@ class SessionPatch(BaseModel):
         le=4.0,
         description="Whole-part playback phase delay in quarter-note beats.",
     )
+    bass_output_transpose_semitones: int | None = Field(
+        default=None,
+        ge=-24,
+        le=24,
+        multiple_of=12,
+        description=(
+            "Playback-only bass register shift in semitones. Restricted to "
+            "whole octaves so the stored harmony is unchanged."
+        ),
+    )
     drum_player: DrumPlayer | None = Field(
         default=None,
         description="When set, updates stored drum player profile (regenerate drums to apply). Send null to clear.",
@@ -383,7 +393,8 @@ class SessionPatch(BaseModel):
                 "chord_style, chord_progression, chord_player, drum_style, drum_player, session_preset, "
                 "lead_instrument, bass_instrument, chord_instrument, drum_kit, anchor_lane, bass_engine, "
                 "bass_articulation_focus, bass_expression, bass_density_bias, bass_lock_to_groove, "
-                "bass_performance_controls, bass_phase_offset_beats"
+                "bass_performance_controls, bass_phase_offset_beats, "
+                "bass_output_transpose_semitones"
             )
         return self
 
@@ -484,6 +495,16 @@ class SessionCreate(BaseModel):
         ge=0.0,
         le=4.0,
         description="Whole-part playback phase delay in quarter-note beats.",
+    )
+    bass_output_transpose_semitones: int = Field(
+        default=0,
+        ge=-24,
+        le=24,
+        multiple_of=12,
+        description=(
+            "Playback-only bass register shift in semitones. Restricted to "
+            "whole octaves so the stored harmony is unchanged."
+        ),
     )
     drum_player: DrumPlayer | None = Field(
         default=None,
@@ -718,6 +739,18 @@ class SessionState(BaseModel):
     key: str
     scale: str
     bar_count: int
+    acceptance_fixture_name: str | None = Field(
+        default=None,
+        description="Immutable acceptance-fixture name, or null for a working session.",
+    )
+    acceptance_sealed_at: str | None = Field(
+        default=None,
+        description="UTC seal timestamp for an immutable acceptance fixture.",
+    )
+    acceptance_receipt_sha256: str | None = Field(
+        default=None,
+        description="SHA-256 receipt for the fixture's canonical durable manifest.",
+    )
     session_preset: str | None = Field(
         default=None,
         description="Active session preset id, if any.",
@@ -822,6 +855,15 @@ class SessionState(BaseModel):
         ge=0.0,
         le=4.0,
         description="Whole-part playback phase delay in quarter-note beats.",
+    )
+    bass_output_transpose_semitones: int = Field(
+        default=0,
+        ge=-24,
+        le=24,
+        multiple_of=12,
+        description=(
+            "Playback-only bass register shift applied by Session Player Bass."
+        ),
     )
     bass_performance_available: bool = Field(
         default=False,
