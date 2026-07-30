@@ -24,7 +24,7 @@ preflight, health probing, crash restart, and an explicit port-8001 boundary
 that does not collide with AutoFactory on port 8000.
 The product is not yet ready for a broad “studio-safe” claim because the
 Listener has not yet been stressed inside a production-size mix and the
-remaining P1 data-integrity and remote-recovery findings are open.
+remaining P1 data-integrity findings are open.
 
 Product code was changed to repair the Listener callback boundary, persist the
 accepted Bass output register, seal the accepted fixture, own the backend
@@ -194,16 +194,30 @@ Repair completed on 30 July:
 
 The lifecycle finding is closed for the current local-AU product shape.
 
-### P1 — Forty-four commits are not on the remote
+### Closed P1 — Local history lacked a remote recovery point
 
-`HEAD` is 44 commits ahead of `origin/main` (41 on local `main`, plus the three
-Fusion-branch commits). The worktree is clean, and machine backups reduce the
-immediate loss risk, but the complete working product is not recoverable from
+At audit start, `HEAD` was 44 commits ahead of `origin/main` (41 on local
+`main`, plus the three Fusion-branch commits). Machine backups reduced the
+immediate loss risk, but the complete working product was not recoverable from
 the repository remote.
 
 Recommended repair: review the branch boundary, then push a named safety branch
 before further Session Player development. Do not merge the three Fusion
 commits until the timing and Logic acceptance findings above are resolved.
+
+Repair completed on 30 July:
+
+- reviewed the complete tracked and untracked worktree boundary;
+- excluded generated binaries, Logic projects, and durable session data;
+- created and pushed
+  `codex/session-player-audit-safety-20260730`;
+- GitHub directly reported repair commit
+  `b1a76d30112aab3798632636618e234b206d20a1` at that remote ref;
+- the safety branch contains the 44 pre-existing local commits plus the
+  verified audit repair commit; `origin/main` remains unchanged and nothing
+  was merged.
+
+The accepted runtime is now recoverable from the named remote branch.
 
 ### P1 — Reference uploads leak files and enforce their limit after buffering
 
@@ -326,6 +340,11 @@ CSP.
 - Fusion property pass: 8,000 build/serialize/restore round trips across
   1, 2, 3, 4, 7, 16, 31, and 128 bars.
 - `git diff --check` and repository object validation passed.
+- Remote safety recovery:
+  - branch `codex/session-player-audit-safety-20260730` pushed to GitHub;
+  - remote repair commit verified as
+    `b1a76d30112aab3798632636618e234b206d20a1`;
+  - no merge into `origin/main`.
 - Controlled Logic acceptance:
   - both fixed-bass pocket-pass sections judged better than their “before”
     sections;
@@ -352,8 +371,7 @@ CSP.
 
 ## Recommended order
 
-1. Review the branch boundary and push a named safety branch.
-2. Repair upload lifecycle and safely reclaim confirmed orphan audio.
-3. Harden setup/evaluation stores.
-4. Upgrade frontend tooling and add UI/native regression harnesses.
-5. Add a production-load Listener timing/allocation stress harness.
+1. Repair upload lifecycle and safely reclaim confirmed orphan audio.
+2. Harden setup/evaluation stores.
+3. Upgrade frontend tooling and add UI/native regression harnesses.
+4. Add a production-load Listener timing/allocation stress harness.
