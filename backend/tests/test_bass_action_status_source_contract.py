@@ -5,6 +5,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PROCESSOR_CPP = ROOT / "audio-midifx" / "Source" / "PluginProcessor.cpp"
+POLICY_H = ROOT / "audio-midifx" / "Source" / "ActionStatusPolicy.h"
+POLICY_TEST = (
+    ROOT / "audio-midifx" / "Tests" / "ActionStatusPolicyTests.cpp"
+)
 
 
 def _function_body(source: str, signature: str) -> str:
@@ -24,8 +28,10 @@ def _function_body(source: str, signature: str) -> str:
 
 def test_rejected_producer_statuses_have_native_compile_time_contracts() -> None:
     source = PROCESSOR_CPP.read_text(encoding="utf-8")
+    policy_source = POLICY_H.read_text(encoding="utf-8")
+    executable_test = POLICY_TEST.read_text(encoding="utf-8")
     policy = _function_body(
-        source,
+        policy_source,
         "constexpr bool shouldPreserveProducerActionStatus (",
     )
 
@@ -44,6 +50,8 @@ def test_rejected_producer_statuses_have_native_compile_time_contracts() -> None
         "static_assert (! shouldPreserveProducerActionStatus (200, true));"
         in source
     )
+    assert "std::array<StatusCase, 7>" in executable_test
+    assert "shouldPreserveProducerActionStatus (" in executable_test
 
 
 def test_action_poll_refreshes_part_without_overwriting_rejection() -> None:

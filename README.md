@@ -58,7 +58,7 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install fastapi uvicorn pretty_midi
 
-uvicorn app.main:app --reload   # http://localhost:8000
+uvicorn app.main:app --reload --port 8001   # http://localhost:8001
 ```
 
 **Frontend**
@@ -66,6 +66,14 @@ uvicorn app.main:app --reload   # http://localhost:8000
 cd frontend
 npm install
 npm run dev   # http://localhost:5173
+npm test
+```
+
+**Native Bass policy test**
+```bash
+cmake -S audio-midifx -B audio-midifx/build -DBUILD_TESTING=ON
+cmake --build audio-midifx/build --config Release
+ctest --test-dir audio-midifx/build --output-on-failure -C Release
 ```
 
 ## Logic Quickstart
@@ -181,7 +189,7 @@ without rebuilding by adding `plugin_api_base_url` to that config file:
 
 ## Desktop app (Tauri)
 
-A native macOS/Windows wrapper lives in `desktop/`. It embeds the built frontend and talks to the backend over `http://127.0.0.1:8000`.
+A native macOS/Windows wrapper lives in `desktop/`. It embeds the built frontend and talks to the separately managed backend over `http://127.0.0.1:8001`.
 
 **Prerequisites:** Rust toolchain (`rustup`), Node ≥ 18.
 

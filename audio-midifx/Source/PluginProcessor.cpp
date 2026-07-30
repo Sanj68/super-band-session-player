@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "ActionStatusPolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,9 @@
 
 namespace
 {
+using session_player::bass::isSuccessfulHttpStatus;
+using session_player::bass::shouldPreserveProducerActionStatus;
+
 constexpr int  kPollMs = 2000;
 constexpr int  kMaxPartNotes = 4096;
 constexpr int  kMaxAutomationEvents = 16384;
@@ -82,21 +86,6 @@ constexpr bool shouldAcceptFetchedPart (
         bindingEpochUnchanged
         && bindingIdUnchanged
         && responseMatchesRequestedSession
-    );
-}
-
-constexpr bool isSuccessfulHttpStatus (int statusCode)
-{
-    return statusCode >= 200 && statusCode < 300;
-}
-
-constexpr bool shouldPreserveProducerActionStatus (
-    int statusCode,
-    bool responseStreamOpened)
-{
-    return (
-        ! responseStreamOpened
-        || ! isSuccessfulHttpStatus (statusCode)
     );
 }
 

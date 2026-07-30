@@ -2,7 +2,8 @@
 
 Repo: `/Users/sub/Work/Code/Projects/super-band-session-player`
 Branch: `codex/session-player-audit-safety-20260730`
-Audited commit: `75e9c7869aacdea550841bdd061dd471b6349861`
+Audit baseline: `75e9c7869aacdea550841bdd061dd471b6349861`
+Repairs and verification: current through the branch head on 30 July 2026.
 
 ## Verdict
 
@@ -23,9 +24,11 @@ The backend is now owned by a per-user LaunchAgent with fail-closed startup
 preflight, health probing, crash restart, and an explicit port-8001 boundary
 that does not collide with AutoFactory on port 8000.
 The product is not yet ready for a broad “studio-safe” claim because the
-Listener has not yet been stressed inside a production-size mix, frontend and
-native UI regression coverage is thin, and desktop packaging remains
-developer-oriented.
+Listener has not yet been stressed inside a production-size mix, native
+process-block timing/allocation is not under an automated host harness, and
+desktop packaging remains developer-oriented. The frontend's highest-value
+control paths and the Bass action-status policy now have executable regression
+coverage.
 
 Product code was changed to repair the Listener callback boundary, persist the
 accepted Bass output register, seal the accepted fixture, own the backend
@@ -358,22 +361,27 @@ Repair completed on 30 July:
 
 The stale-success status overwrite is closed.
 
-### P2 — Frontend development dependencies have known advisories
+### Closed P2 — Frontend development dependency advisories
 
-`npm audit` reports four frontend development-tool vulnerabilities:
+The audit initially found four frontend development-tool vulnerabilities:
 
 - 2 high (`vite`, `postcss`);
 - 1 moderate (`esbuild`);
 - 1 low (`@babel/core`).
 
-The desktop dependency tree reports zero. These are build/dev-server
-dependencies rather than code shipped in the static bundle, which reduces
-production impact, but Vite's dev server is part of the daily workflow and the
-desktop target includes Windows.
+These were removed by upgrading Vite 5 to 8.2.0 and plugin-react 4 to 6.0.5 on
+the safety branch. React remains on 18.3.1, avoiding an unrelated React-major
+migration. The Vite development proxy and desktop build now target the owned
+Session Player backend on port 8001 rather than AutoFactory's port 8000.
 
-Recommended repair: upgrade Vite/plugin-react on a dedicated branch, rebuild,
-rerun the full suite, and re-audit. Do not apply a blind major-version audit
-fix on the accepted branch.
+Post-repair proof:
+
+- `npm audit`: zero vulnerabilities;
+- Vite 8.2.0 production build passed;
+- Vitest 4.1.10 with React Testing Library and jsdom: 8 tests passed;
+- Fusion preset/lock behavior, saved-setup guards, reference-audio
+  success/failure behavior, and structured API recovery errors are covered;
+- the desktop dependency tree remains at zero vulnerabilities.
 
 ### P2 — Desktop packaging is a wrapper, not a standalone product
 
@@ -389,7 +397,11 @@ CSP.
 
 - Backend: **1,032 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
-- Frontend: Vite production build passed.
+- Frontend:
+  - Vite 8.2.0 production build passed;
+  - 8 Vitest/React Testing Library tests passed;
+  - `npm audit` reports zero vulnerabilities;
+  - the installed dependency tree is valid.
 - Native source builds:
   - Session Player Bass AU passed.
   - Session Player Listener AU passed.
@@ -424,6 +436,7 @@ CSP.
     without lost updates.
 - Bass action status:
   - native 409/422/503/offline/success policy assertions compiled;
+  - the standalone seven-case C++ policy executable passed through CTest;
   - source contract confirms failed producer actions use a silent part refresh;
   - rebuilt and installed Bass AU binary SHA-256:
     `67c270ce8c76a09480be15ecc779191fa45a934d4db85546746c765ed32a3696`;
@@ -455,13 +468,14 @@ CSP.
 
 ## Coverage gaps
 
-- No frontend test script exists; only production compilation covers React.
-- Native behavior relies on compile-time assertions, `auval`, and manual Logic
-  audition. There is no automated process-block timing/allocation harness.
+- Frontend component coverage now protects the highest-risk control paths, but
+  there is no full browser end-to-end suite.
+- Native action-status behavior now has an executable CTest, while audio/MIDI
+  process-block timing and allocation still lack an automated host harness.
 - The hands-on Logic pass covered a controlled light-load project. It did not
   stress Listener under a production-size mix or prove callback deadlines.
 
 ## Recommended order
 
-1. Upgrade frontend tooling and add UI/native regression harnesses.
-2. Add a production-load Listener timing/allocation stress harness.
+1. Add a production-load Listener timing/allocation stress harness.
+2. Add a browser end-to-end smoke test around backend/session creation.

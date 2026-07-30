@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 
 project(SessionPlayerMidiFX VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
@@ -59,3 +61,19 @@ target_link_libraries(SessionPlayerMidiFX
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+if(BUILD_TESTING)
+    add_executable(SessionPlayerMidiFXActionStatusPolicyTests
+        Tests/ActionStatusPolicyTests.cpp
+    )
+    target_include_directories(SessionPlayerMidiFXActionStatusPolicyTests
+        PRIVATE Source
+    )
+    target_compile_features(SessionPlayerMidiFXActionStatusPolicyTests
+        PRIVATE cxx_std_17
+    )
+    add_test(
+        NAME SessionPlayerMidiFX.ActionStatusPolicy
+        COMMAND SessionPlayerMidiFXActionStatusPolicyTests
+    )
+endif()
