@@ -12,7 +12,7 @@ namespace session_player
 
 struct BridgeConfig
 {
-    juce::String apiBaseUrl = "http://127.0.0.1:8000/api/bridge";
+    juce::String apiBaseUrl = "http://127.0.0.1:8001/api/bridge";
     juce::String sessionId;
     juce::String sourceId = "logic-live";
 };

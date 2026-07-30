@@ -23,6 +23,9 @@ SHA-256 receipt, while playback and transient Bridge overlays remain available.
 The backend is now owned by a per-user LaunchAgent with fail-closed startup
 preflight, health probing, crash restart, and an explicit port-8001 boundary
 that does not collide with AutoFactory on port 8000.
+An isolated Logic-chain regression now exercises the exact Bridge, Listener,
+and Bass HTTP contracts from automatic binding through a playable Fusion part,
+without requiring the browser or changing the durable session store.
 The product is not yet ready for a broad “studio-safe” claim because the
 synthetic native load test is not a substitute for a production-size Logic
 project and desktop packaging remains developer-oriented. The Listener
@@ -206,6 +209,25 @@ Repair completed on 30 July:
   112 Bass notes, and `+12` output transpose.
 
 The lifecycle finding is closed for the current local-AU product shape.
+
+### Closed P1 — AU fallback endpoints could target AutoFactory
+
+Durable config already pointed the three installed Audio Units at Session
+Player on port 8001, so the controlled Logic pass was correct. Source fallback
+values in Bridge, Listener, and Bass still used port 8000, however. A missing,
+reset, or unreadable config could therefore send Session Player traffic to the
+separate AutoFactory service.
+
+Repair completed on 30 July:
+
+- all three AUs now default to their owned port-8001 API roots;
+- an executable source contract rejects any `127.0.0.1:8000/api` fallback;
+- the isolated chain test binds Bridge and Listener, accepts 64 groove frames
+  and four harmonic frames, rebuilds Fusion DNA through the Bass AU's
+  **NEW BEAT / RESET** request, and validates a playable groove-locked `+12`
+  Bass part;
+- all three Release AUs were rebuilt, installed, signature-checked, and passed
+  Apple `auval`.
 
 ### Closed P1 — Local history lacked a remote recovery point
 
@@ -403,7 +425,7 @@ CSP.
 
 ## Verification performed
 
-- Backend: **1,033 passed**, 4 existing librosa warnings.
+- Backend: **1,035 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
 - Frontend:
   - Vite 8.2.0 production build passed;
@@ -424,10 +446,21 @@ CSP.
   - the complete synthetic host cycle stayed below its deadline;
   - ten consecutive CTest passes completed;
   - rebuilt/installed Listener SHA-256:
-    `bfc1ccdf8c163a4998b820282528b27b54ba9f12e99062afa25b4866c1b1f688`;
+    `fcf85ee9b326d2ed86d07f4d7ee18f9beea32f45d54d01699ba12b5a437b0e9b`;
   - strict signature verification and Apple `auval` passed.
 - Installed artifacts match the newly built component directories.
 - Apple `auval` passed all three installed AUs.
+- Logic plug-in chain:
+  - exact Bridge and Listener heartbeat contracts auto-bound to the newest
+    isolated session;
+  - 64 Bridge groove frames and four Listener harmonic frames were accepted;
+  - Bass **NEW BEAT / RESET** rebuilt the shared Fusion law from captured
+    evidence;
+  - returned contract contained sorted playable notes, groove lock `1.00`,
+    connected touch, and persisted `+12` output transpose;
+  - the test uses a temporary session store and requires no browser.
+- Rebuilt/installed Bridge SHA-256:
+  `7580fe23715f8f073dc0abc417d2cfcf61a45826a18a29224fde829dc27bc5eb`.
 - Python bytecode compilation passed.
 - `pip check` passed.
 - Current stores validated:
@@ -459,7 +492,7 @@ CSP.
   - the standalone seven-case C++ policy executable passed through CTest;
   - source contract confirms failed producer actions use a silent part refresh;
   - rebuilt and installed Bass AU binary SHA-256:
-    `67c270ce8c76a09480be15ecc779191fa45a934d4db85546746c765ed32a3696`;
+    `e949758fbd6dd73aba9cc755288c9048842b12cf04ad1fe3242cac16699a0942`;
   - strict code-signature verification and Apple `auval` passed.
 - Candidate store read benchmark: 16.69 ms mean, 21.94 ms max at 3.6 MiB.
 - Fusion property pass: 8,000 build/serialize/restore round trips across
@@ -488,8 +521,10 @@ CSP.
 
 ## Coverage gaps
 
-- Frontend component coverage now protects the highest-risk control paths, but
-  there is no full browser end-to-end suite.
+- The Logic product path now has an isolated AU-wire-contract integration
+  test, but it does not load the three component bundles inside a DAW host.
+- Frontend component coverage protects the highest-risk web control paths; a
+  full browser end-to-end suite remains optional for the secondary web UI.
 - Native action-status and Listener callback timing/allocation now have
   executable CTests.
 - The Listener load test is deterministic and synthetic. The hands-on Logic
@@ -498,5 +533,6 @@ CSP.
 
 ## Recommended order
 
-1. Add a browser end-to-end smoke test around backend/session creation.
-2. Repeat the Listener audition inside a real production-size Logic mix.
+1. Repeat the Listener audition inside a real production-size Logic mix.
+2. Add an automated macOS host harness that instantiates all three installed
+   AUs; keep the browser end-to-end smoke test as secondary web-app coverage.

@@ -187,10 +187,9 @@ For development without the managed service:
 
 An explicit `SESSION_PLAYER_SESSION_ID` or
 `~/Library/Application Support/Session Player Bridge/config.json` binding still
-overrides automatic newest-session selection.
-
-When another local service owns port 8000, the Bass MIDI FX API can be moved
-without rebuilding by adding `plugin_api_base_url` to that config file:
+overrides automatic newest-session selection. Bridge, Listener, and Bass all
+default to the owned Session Player service on port 8001. Both API roots can
+still be overridden without rebuilding:
 
 ```json
 {
@@ -200,6 +199,19 @@ without rebuilding by adding `plugin_api_base_url` to that config file:
 ```
 
 `SESSION_PLAYER_PLUGIN_URL` overrides the file value for the Bass MIDI FX.
+
+The Logic plug-in chain has a backend-level integration test built from the
+exact AU wire contracts:
+
+```bash
+backend/.venv/bin/pytest -q backend/tests/test_logic_plugin_chain_e2e.py
+```
+
+It creates an isolated Fusion session, binds the unconfigured Bridge and
+Listener instances, delivers 64 groove frames and four harmonic frames,
+performs the Bass AU's **NEW BEAT / RESET** request, and verifies that the
+returned part is playable, groove-locked, and carries the persisted output
+transpose. It does not require a browser or modify the durable session store.
 
 ## Desktop app (Tauri)
 

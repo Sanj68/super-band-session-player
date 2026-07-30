@@ -326,7 +326,7 @@ juce::String loadPluginApiBaseUrl()
             "SESSION_PLAYER_PLUGIN_URL", {}); envUrl.isNotEmpty())
         baseUrl = envUrl;
     if (baseUrl.isEmpty())
-        baseUrl = "http://127.0.0.1:8000/api/plugin";
+        baseUrl = "http://127.0.0.1:8001/api/plugin";
     return baseUrl.trim().trimCharactersAtEnd ("/");
 }
 }

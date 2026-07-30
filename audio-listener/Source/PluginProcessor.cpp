@@ -290,7 +290,7 @@ juce::String HarmonicBridgeClient::getApiBaseUrl()
     if (const auto envUrl = getEnvironment("SESSION_PLAYER_BRIDGE_URL"); envUrl.isNotEmpty())
         baseUrl = envUrl;
     if (baseUrl.isEmpty())
-        baseUrl = "http://127.0.0.1:8000/api/bridge";
+        baseUrl = "http://127.0.0.1:8001/api/bridge";
     return baseUrl.trim().trimCharactersAtEnd("/");
 }
 

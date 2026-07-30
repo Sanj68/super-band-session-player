@@ -177,7 +177,7 @@ BridgeConfig BridgeClient::loadConfig() const
     }
 
     if (config.apiBaseUrl.isEmpty())
-        config.apiBaseUrl = "http://127.0.0.1:8000/api/bridge";
+        config.apiBaseUrl = "http://127.0.0.1:8001/api/bridge";
     if (config.sourceId.isEmpty())
         config.sourceId = "logic-live";
 
