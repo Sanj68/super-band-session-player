@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 
 project(SessionPlayerListenerAU VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
@@ -65,5 +67,29 @@ if(APPLE)
     add_custom_command(TARGET SessionPlayerListener_AU POST_BUILD
         COMMAND /usr/bin/codesign --force --sign - "$<TARGET_BUNDLE_DIR:SessionPlayerListener_AU>"
         COMMENT "Ad-hoc signing Session Player Listener AU"
+    )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(SessionPlayerListenerRealtimeStressTests
+        Tests/ListenerRealtimeStressTests.cpp
+    )
+    target_include_directories(SessionPlayerListenerRealtimeStressTests
+        PRIVATE Source
+    )
+    target_compile_features(SessionPlayerListenerRealtimeStressTests
+        PRIVATE cxx_std_17
+    )
+    target_link_libraries(SessionPlayerListenerRealtimeStressTests
+        PRIVATE
+            SessionPlayerListener
+            juce::juce_audio_utils
+    )
+    add_test(
+        NAME SessionPlayerListener.RealtimeStress
+        COMMAND SessionPlayerListenerRealtimeStressTests
+    )
+    set_tests_properties(SessionPlayerListener.RealtimeStress PROPERTIES
+        TIMEOUT 30
     )
 endif()

@@ -76,7 +76,8 @@ class SessionPlayerListenerAudioProcessor final : public juce::AudioProcessor
                                                 , private juce::Thread
 {
 public:
-    SessionPlayerListenerAudioProcessor();
+    explicit SessionPlayerListenerAudioProcessor(
+        bool enableBridgeNetworking = true);
     ~SessionPlayerListenerAudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
@@ -150,6 +151,7 @@ private:
     static juce::String cadenceFromChroma(const std::array<float, 12>& chroma, int tonic);
     static double onsetStrengthForWindow(const std::array<float, fftSize>& samples);
 
+    const bool bridgeNetworkingEnabled;
     HarmonicBridgeClient bridgeClient;
     juce::AbstractFifo analysisFifo { analysisQueueCapacity };
     std::array<AnalysisJob, analysisQueueCapacity> analysisJobs {};

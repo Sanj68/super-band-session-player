@@ -24,11 +24,10 @@ The backend is now owned by a per-user LaunchAgent with fail-closed startup
 preflight, health probing, crash restart, and an explicit port-8001 boundary
 that does not collide with AutoFactory on port 8000.
 The product is not yet ready for a broad “studio-safe” claim because the
-Listener has not yet been stressed inside a production-size mix, native
-process-block timing/allocation is not under an automated host harness, and
-desktop packaging remains developer-oriented. The frontend's highest-value
-control paths and the Bass action-status policy now have executable regression
-coverage.
+synthetic native load test is not a substitute for a production-size Logic
+project and desktop packaging remains developer-oriented. The Listener
+callback, frontend's highest-value control paths, and Bass action-status policy
+now have executable regression coverage.
 
 Product code was changed to repair the Listener callback boundary, persist the
 accepted Bass output register, seal the accepted fixture, own the backend
@@ -154,6 +153,15 @@ Repair status, later on 30 July:
 - stale jobs are rejected by transport state and capture epoch;
 - a source-contract regression test fails if analysis, strings, locks, or
   publication return to `processBlock()` or its boundary handoff;
+- a Release-mode CTest now drives the actual processor for 18 bars at
+  48 kHz/128 samples under a preallocated 64-track, four-stage workload;
+- 12,414 measured callbacks and 16 bar-boundary handoffs completed with zero
+  callback-thread C++ heap allocations;
+- across ten consecutive passes, each 2.67 ms block deadline held; the
+  representative verbose pass measured callback p99 at 0.458 microseconds,
+  callback p99.9 at 0.666 microseconds, boundary max at 0.958 microseconds,
+  64-track host-cycle p99 at 32.750 microseconds, and host-cycle max at
+  36.458 microseconds;
 - Listener Release build and signing passed, installed binary matched the
   build, Apple `auval` passed, and the full backend suite reported 998 passed.
 
@@ -395,7 +403,7 @@ CSP.
 
 ## Verification performed
 
-- Backend: **1,032 passed**, 4 existing librosa warnings.
+- Backend: **1,033 passed**, 4 existing librosa warnings.
 - Research: **29 passed**.
 - Frontend:
   - Vite 8.2.0 production build passed;
@@ -406,6 +414,18 @@ CSP.
   - Session Player Bass AU passed.
   - Session Player Listener AU passed.
   - Session Player Bridge AU passed.
+- Listener real-time stress:
+  - actual Release processor exercised at 48 kHz/128 samples for 18 bars;
+  - 64 simulated tracks with four processing stages each;
+  - 12,414 measured callbacks and 16 measured bar boundaries per run;
+  - zero callback-thread C++ heap allocations;
+  - callback p99/p99.9 and boundary maximum stayed below 10%/20%/25% of
+    the 2.67 ms block deadline;
+  - the complete synthetic host cycle stayed below its deadline;
+  - ten consecutive CTest passes completed;
+  - rebuilt/installed Listener SHA-256:
+    `bfc1ccdf8c163a4998b820282528b27b54ba9f12e99062afa25b4866c1b1f688`;
+  - strict signature verification and Apple `auval` passed.
 - Installed artifacts match the newly built component directories.
 - Apple `auval` passed all three installed AUs.
 - Python bytecode compilation passed.
@@ -470,12 +490,13 @@ CSP.
 
 - Frontend component coverage now protects the highest-risk control paths, but
   there is no full browser end-to-end suite.
-- Native action-status behavior now has an executable CTest, while audio/MIDI
-  process-block timing and allocation still lack an automated host harness.
-- The hands-on Logic pass covered a controlled light-load project. It did not
-  stress Listener under a production-size mix or prove callback deadlines.
+- Native action-status and Listener callback timing/allocation now have
+  executable CTests.
+- The Listener load test is deterministic and synthetic. The hands-on Logic
+  pass still covered a controlled light-load project rather than a full
+  production session with third-party instruments and effects.
 
 ## Recommended order
 
-1. Add a production-load Listener timing/allocation stress harness.
-2. Add a browser end-to-end smoke test around backend/session creation.
+1. Add a browser end-to-end smoke test around backend/session creation.
+2. Repeat the Listener audition inside a real production-size Logic mix.

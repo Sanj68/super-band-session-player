@@ -383,11 +383,13 @@ bool HarmonicBridgeClient::postJson(
     return true;
 }
 
-SessionPlayerListenerAudioProcessor::SessionPlayerListenerAudioProcessor()
+SessionPlayerListenerAudioProcessor::SessionPlayerListenerAudioProcessor(
+    bool enableBridgeNetworking)
     : AudioProcessor(BusesProperties()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      Thread("Session Player Listener Analysis")
+      Thread("Session Player Listener Analysis"),
+      bridgeNetworkingEnabled(enableBridgeNetworking)
 {
     juce::dsp::WindowingFunction<float>::fillWindowingTables(
         fftWindow.data(),
@@ -395,7 +397,8 @@ SessionPlayerListenerAudioProcessor::SessionPlayerListenerAudioProcessor()
         juce::dsp::WindowingFunction<float>::hann,
         false);
 
-    bridgeClient.start();
+    if (bridgeNetworkingEnabled)
+        bridgeClient.start();
     startThread();
 }
 
@@ -404,7 +407,8 @@ SessionPlayerListenerAudioProcessor::~SessionPlayerListenerAudioProcessor()
     analysisTransportRunning.store(false);
     signalThreadShouldExit();
     stopThread(2000);
-    bridgeClient.stop();
+    if (bridgeNetworkingEnabled)
+        bridgeClient.stop();
 }
 
 void SessionPlayerListenerAudioProcessor::prepareToPlay(double sampleRate, int)

@@ -76,6 +76,20 @@ cmake --build audio-midifx/build --config Release
 ctest --test-dir audio-midifx/build --output-on-failure -C Release
 ```
 
+**Listener real-time stress test**
+```bash
+cmake -S audio-listener -B audio-listener/build \
+  -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build audio-listener/build --config Release \
+  --target SessionPlayerListenerRealtimeStressTests
+ctest --test-dir audio-listener/build --output-on-failure -C Release
+```
+
+The Listener test drives the real processor for 18 bars at 48 kHz/128 samples
+under a preallocated 64-track, four-stage mix workload. It fails on callback
+C++ heap allocation or if callback, bar-boundary, or complete host-cycle CPU
+time crosses its real-time budget.
+
 ## Logic Quickstart
 
 The normal macOS setup runs the backend as a per-user LaunchAgent on

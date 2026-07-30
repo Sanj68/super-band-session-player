@@ -6,6 +6,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PROCESSOR_CPP = ROOT / "audio-listener" / "Source" / "PluginProcessor.cpp"
 PROCESSOR_H = ROOT / "audio-listener" / "Source" / "PluginProcessor.h"
+LISTENER_CMAKE = ROOT / "audio-listener" / "CMakeLists.txt"
+STRESS_TEST = (
+    ROOT
+    / "audio-listener"
+    / "Tests"
+    / "ListenerRealtimeStressTests.cpp"
+)
 
 
 def _function_body(source: str, signature: str) -> str:
@@ -75,3 +82,20 @@ def test_listener_worker_owns_analysis_publication_and_ui_lock() -> None:
     assert "analyseWindow(job)" in worker
     assert "bridgeClient.pushFrame(frame)" in worker
     assert "juce::ScopedLock lock(keyLock)" in worker
+
+
+def test_listener_realtime_stress_harness_is_registered_and_gated() -> None:
+    cmake = LISTENER_CMAKE.read_text(encoding="utf-8")
+    stress = STRESS_TEST.read_text(encoding="utf-8")
+
+    assert "SessionPlayerListenerRealtimeStressTests" in cmake
+    assert "NAME SessionPlayerListener.RealtimeStress" in cmake
+    assert "TIMEOUT 30" in cmake
+    assert "SessionPlayerListenerAudioProcessor processor(false)" in stress
+    assert "simulatedTracks = 64" in stress
+    assert "channelStripStages = 4" in stress
+    assert "allocation_probe::tracking = true" in stress
+    assert "measuredAllocations == 0" in stress
+    assert "callbackP99 < blockDurationNs / 10" in stress
+    assert "boundaryMax < blockDurationNs / 4" in stress
+    assert "hostCycleMax < blockDurationNs" in stress
